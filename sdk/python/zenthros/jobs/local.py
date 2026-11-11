@@ -209,7 +209,7 @@ def _fetch_script():
 
 def agent_pin():
     """The release this wheel goes with: {"install_base", "sha256sums_sha256"}.
-    Written by install/publish-sdk-gcs.sh; absent in a checkout."""
+    Written by install/build-sdk.sh; absent in a checkout."""
     try:
         return json.loads((Path(__file__).parent.parent / "_data" / "agent-release.json").read_text())
     except OSError:
