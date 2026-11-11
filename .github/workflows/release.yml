@@ -31,11 +31,6 @@ jobs:
           ZENTHROS_RELEASE: ${{ github.ref_name }}
           ZENTHROS_STAGE_INSTALL_BASE: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
         run: bash install/stage.sh "${RUNNER_TEMP}/release" | tee "${RUNNER_TEMP}/digests.txt"
-      - name: The SDK's wheel
-        run: |
-          python -m pip install "$(grep '^build==' sdk/python/requirements-dev.txt)"
-          python -m build --wheel --outdir "${RUNNER_TEMP}/wheel" sdk/python
-          (cd "${RUNNER_TEMP}/wheel" && sha256sum ./*.whl | sed 's/^/wheel_sha256=/') >> "${RUNNER_TEMP}/digests.txt"
       - name: The agent's image
         env:
           ZENTHROS_RELEASE: ${{ github.ref_name }}
@@ -46,6 +41,13 @@ jobs:
           builder="$(docker buildx create --driver docker-container)"
           image="$(BUILDER="${builder}" bash install/publish-agent-image.sh "ghcr.io/${GITHUB_REPOSITORY,,}/agent:${GITHUB_REF_NAME}")"
           echo "agent_image=${image}" >> "${RUNNER_TEMP}/digests.txt"
+      - name: The SDK's wheel, pinned to this release's agent
+        run: |
+          image="$(sed -n 's/^agent_image=//p' "${RUNNER_TEMP}/digests.txt")"
+          ZENTHROS_SHA256SUMS="${RUNNER_TEMP}/release/SHA256SUMS" bash install/build-sdk.sh "${RUNNER_TEMP}/sdk" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" "${image}"
+          mkdir -p "${RUNNER_TEMP}/wheel" && mv "${RUNNER_TEMP}"/sdk/*.whl "${RUNNER_TEMP}/wheel/"
+          (cd "${RUNNER_TEMP}/wheel" && sha256sum ./*.whl | sed 's/^/wheel_sha256=/') >> "${RUNNER_TEMP}/digests.txt"
       - name: The release
         env:
           GH_TOKEN: ${{ github.token }}
