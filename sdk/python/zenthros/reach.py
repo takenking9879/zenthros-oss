@@ -56,7 +56,10 @@ def _travels(value, code_dir):
         return False
     from zenthros.remote import bundle
 
-    named = os.path.relpath(os.path.abspath(value), os.path.abspath(code_dir)).replace(os.sep, "/")
+    try:
+        named = os.path.relpath(os.path.abspath(value), os.path.abspath(code_dir)).replace(os.sep, "/")
+    except ValueError:  # Windows: on another drive than the project, so not one of its files
+        return False
     files = bundle.project_files(code_dir)
     return named in files or any(name.startswith(named.rstrip("/") + "/") for name in files)
 

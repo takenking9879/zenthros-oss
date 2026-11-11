@@ -27,7 +27,7 @@ from zenthros.core.storage import FileBlobStore
 from zenthros.jobs.fake import FakeJobClient
 from zenthros.jobs.handle import FAILED, SUCCEEDED
 
-from support import ReportAgent
+from support import ReportAgent, machine_side
 
 STORE = "s3://zr-machine/calls"
 
@@ -115,6 +115,7 @@ class MachineTest(unittest.TestCase):
             call = remote.map(triple, [1, 2], code_dir=None)
             self.assertEqual(call.result(stream_logs=False), [3, 6])
 
+    @machine_side
     def test_project_code_under_src_is_importable_on_the_machine(self):
         # `python src/train.py` from the project root puts src/ on sys.path:
         # train imports model as a top-level module. On the machine only the

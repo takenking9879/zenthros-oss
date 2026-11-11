@@ -383,7 +383,12 @@ def plan_details(plan, fn, args, kwargs, on, options, mode, deps, contracts):
     details["data"] = data
     details["cache"] = _plan_cache(fn, args, kwargs, options, on, mode, deps, contracts)
     if name == machines.LOCAL:
-        missing = local_client().missing_offline(options.get("image") or (environments.tag_of(env_name) if env_name else None))
+        try:
+            missing = local_client().missing_offline(options.get("image") or (environments.tag_of(env_name) if env_name else None))
+        except errors.EngineMissing as err:
+            # Said like any other problem of the plan: what to install.
+            plan.problems.append(str(err))
+            missing = ["a container engine"]
         details["offline_ready"], details["offline_missing"] = not missing, missing
     if name == machines.LOCAL_K8S:
         details["store"] = {"shared": local_k8s_client().shared_now(), "where": str(local_k8s_client().store_dir)}

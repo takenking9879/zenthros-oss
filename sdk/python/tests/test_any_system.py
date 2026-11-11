@@ -25,7 +25,7 @@ from zenthros import console, identity, reach
 from zenthros.core.env import JobEnv
 from zenthros.core.report import new_snapshot
 from zenthros.jobs import localk8s
-from zenthros.remote import snapshot
+from zenthros.remote import bundle, snapshot
 from zenthros.remote.call import CALL_KIND, RemoteCall
 
 from test_snapshot import Repo, git
@@ -98,10 +98,33 @@ class NamesTest(unittest.TestCase):
         project = os.path.join(self.root, "project")
         os.makedirs(os.path.join(project, "conf"))
         Path(project, "conf", "train.yaml").write_text("lr: 1\n")
-        value = os.path.relpath(os.path.join(project, "conf", "train.yaml"))
-        self.assertTrue(reach._travels(value, project))
-        with self.windows_names():
-            self.assertTrue(reach._travels(value, project), "conf\\train.yaml is not the bundle's conf/train.yaml")
+        # Run from the project, as its notebook does: Windows' relpath has
+        # no answer across drives (the CI's checkout is on D:, its temp on C:).
+        with contextlib.chdir(project):
+            value = os.path.relpath(os.path.join(project, "conf", "train.yaml"))
+            self.assertTrue(reach._travels(value, project))
+            with self.windows_names():
+                self.assertTrue(reach._travels(value, project), "conf\\train.yaml is not the bundle's conf/train.yaml")
+
+    def test_the_projects_import_roots_are_its_folders_with_slashes(self):
+        # `python src\\train.py` puts src on sys.path; the machine puts the
+        # project's src/ back (runner, a Linux side). Here, with this
+        # system's own names: Windows' short ones (RUNNER~1) included.
+        project = os.path.join(self.root, "project")
+        os.makedirs(os.path.join(project, "src", "pkg"))
+        entries = [os.path.join(project, "src"), os.path.join(project, "src", "pkg"), self.root, project]
+        with mock.patch.object(sys, "path", entries):
+            self.assertEqual(bundle.import_roots(project), ["src", "src/pkg"])
+
+    def test_a_path_on_another_drive_is_not_the_projects(self):
+        # From D:\notebooks a relative path is on D:, the project on C:: not
+        # one of the project's, and no ValueError of Windows' relpath
+        # (public repository's Windows CI, 2026-11-11).
+        project = os.path.join(self.root, "project")
+        os.makedirs(project)
+        two_drives = ValueError("path is on mount 'D:', start on mount 'C:'")
+        with mock.patch.object(os.path, "relpath", side_effect=two_drives):
+            self.assertFalse(reach._travels("data.csv", project))
 
     def test_a_folder_has_one_identity_on_every_system(self):
         folder = os.path.join(self.root, "table")

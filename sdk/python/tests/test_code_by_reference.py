@@ -24,7 +24,7 @@ from zenthros.core.storage import FileBlobStore, MemoryBlobStore
 from zenthros.jobs.fake import FakeJobClient
 from zenthros.remote import runner
 
-from support import execute
+from support import execute, machine_side
 from test_remote import STORE, ExecutingClient, double
 from test_remote_machine import machine
 
@@ -149,6 +149,7 @@ class ProjectOnTheMachineTest(unittest.TestCase):
                     print("\n".join(client.outputs))
                     raise
 
+    @machine_side
     def test_what_the_function_writes_stays_in_the_jobs_directory(self):
         # Files the function writes under relative paths land in the job's
         # directory, as before the project came by reference: the runner

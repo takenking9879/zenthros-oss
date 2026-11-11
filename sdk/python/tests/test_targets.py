@@ -20,11 +20,23 @@ from unittest import mock
 import zenthros
 from zenthros import errors, machines, remote
 from zenthros import targetlist as targets
+from zenthros.jobs.local import LocalJobClient
 
 from support import local_in_wsl
 from test_machines import Env
 
 GIB = 1 << 30
+
+
+class _EngineWithEverything:
+    """A container engine that has every image."""
+
+    def image_name(self, image):
+        return image
+
+    def run(self, args, stdin=None, timeout=600):
+        return 0, "amd64\n", ""
+
 OBSERVED = "2026-10-15T09:00:00Z"
 
 ROWS = [
@@ -307,10 +319,23 @@ class RemoteDryRunTest(Submitting):
     @local_in_wsl
     def test_on_local_is_a_container_of_the_functions_size(self):
         fn = remote.cloud(memory="2Gi", cpu=1)(train)
-        plan = fn.remote(on="local", dry_run=True)
+        with mock.patch.object(LocalJobClient, "engine", new_callable=mock.PropertyMock, return_value=_EngineWithEverything()):
+            plan = fn.remote(on="local", dry_run=True)
         self.assertTrue(plan.ok, plan.problems)
         self.assertEqual((plan.action, plan.milli_cpu, plan.memory_bytes), ("create", 1000, 2 * GIB))
         self.assertIn("removed after", repr(plan))
+        self.assertEqual((self.submitted, self.changes()), ([], ([], [])))
+
+    def test_on_local_with_no_container_engine_says_so_and_runs_nothing(self):
+        # A Mac without Docker Desktop, and Windows, where such jobs run in
+        # WSL2: the plan says what to install; it raised before (macOS CI of
+        # the public repository, 2026-11-11).
+        fn = remote.cloud(memory="2Gi", cpu=1)(train)
+        none = mock.PropertyMock(side_effect=errors.EngineMissing("no container engine here: install Docker Desktop"))
+        with mock.patch.object(LocalJobClient, "engine", new_callable=lambda: none):
+            plan = fn.remote(on="local", dry_run=True)
+        self.assertFalse(plan.ok)
+        self.assertIn("install Docker Desktop", " ".join(plan.problems))
         self.assertEqual((self.submitted, self.changes()), ([], ([], [])))
 
     def test_on_a_template_says_a_machine_is_made_for_the_call_and_its_price(self):
