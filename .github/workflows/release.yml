@@ -42,7 +42,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-          image="$(bash install/publish-agent-image.sh "ghcr.io/${GITHUB_REPOSITORY,,}/agent:${GITHUB_REF_NAME}")"
+          # docker's own builder pushes one platform; the image has two.
+          builder="$(docker buildx create --driver docker-container)"
+          image="$(BUILDER="${builder}" bash install/publish-agent-image.sh "ghcr.io/${GITHUB_REPOSITORY,,}/agent:${GITHUB_REF_NAME}")"
           echo "agent_image=${image}" >> "${RUNNER_TEMP}/digests.txt"
       - name: The release
         env:
