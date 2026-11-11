@@ -47,6 +47,7 @@ import (
 	"github.com/zenthros/operator/pkg/backend/spark"
 	ctd "github.com/zenthros/operator/pkg/containerd"
 	"github.com/zenthros/operator/pkg/containerd/imagegc"
+	"github.com/zenthros/operator/pkg/containerfacts"
 	"github.com/zenthros/operator/pkg/infrastructure/provider/containerhosts"
 	"github.com/zenthros/operator/pkg/jobcli"
 	"github.com/zenthros/operator/pkg/podsecurity"
@@ -114,6 +115,7 @@ func main() {
 	raw := zap.NewRaw(zap.UseFlagOptions(&zapOpts))
 	ctrl.SetLogger(zapr.NewLogger(raw))
 	logger := ctrl.Log.WithName("agent-main")
+	agent.SetHostLog(ctrl.Log)
 	// fatal is the agent stopping for a reason of its own: its last line, at
 	// level fatal, then exit 1. A host that stops the container leaves no
 	// such line (test/cluster hostFault tells the two apart by it).
@@ -304,8 +306,13 @@ func runAgent(cfg agent.Config, logger logr.Logger) error {
 		envconf.Duration(containerhosts.EnvPreemptGrace, defaultPreemptGrace), logger)
 	ctx, stop := context.WithCancelCause(signalled)
 	defer stop(nil)
-	prepared, err := prepareToolchains(ctx, os.Getenv(pyenv.EnvToolchains), toolchainSteps{
-		prepare:     preparePython(logger),
+	_, host := proc.Declare(ctx)
+	prepared, err := prepareRuntime(ctx, os.Getenv(pyenv.EnvToolchains), runtimeSteps{
+		prepare: preparePython(logger),
+		checkGPU: gpuCheck(host.GPUCount > 0, infrav1alpha1.NormalizeOwnership(cfg.Ownership) == infrav1alpha1.OwnershipManaged,
+			func(ctx context.Context) containerfacts.CUDA {
+				return containerfacts.AskCUDA(ctx, nil, envconf.Or("ZENTHROS_PYTHON", "python3"))
+			}, proc.WithoutGPU, logger),
 		markPending: runtimegate.MarkPending,
 		markReady:   runtimegate.MarkReady,
 		markFailed:  markToolchainFailed,

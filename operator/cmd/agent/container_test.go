@@ -30,6 +30,7 @@ import (
 	"github.com/zenthros/operator/agent"
 	"github.com/zenthros/operator/pkg/bootstrap"
 	"github.com/zenthros/operator/pkg/cloudmeta"
+	"github.com/zenthros/operator/pkg/containerfacts"
 	"github.com/zenthros/operator/pkg/liveness"
 	"github.com/zenthros/operator/pkg/pyenv"
 	"github.com/zenthros/operator/pkg/runtimegate"
@@ -281,7 +282,7 @@ func zombieChildren(t *testing.T, parent int) []int {
 }
 
 // A container completing its Python is connected but takes no work: the gate
-// is closed before prepareToolchains returns (so before the agent's first
+// is closed before prepareRuntime returns (so before the agent's first
 // heartbeat), the jobs' env is published before the gate opens (so the first
 // job sees the venv), and a failed install never opens it.
 func TestToolchainGateOrder(t *testing.T) {
@@ -289,7 +290,7 @@ func TestToolchainGateOrder(t *testing.T) {
 	var order []string
 	release := make(chan error)
 	holder := &toolchainEnv{}
-	steps := toolchainSteps{
+	steps := runtimeSteps{
 		markPending: func() error { order = append(order, "pending"); return nil },
 		markReady: func() error {
 			order = append(order, "ready with venv="+holder.extraEnv()["VIRTUAL_ENV"])
@@ -303,12 +304,12 @@ func TestToolchainGateOrder(t *testing.T) {
 			return pyenv.Env{PathPrefix: []string{"/s/venv/bin"}, Vars: map[string]string{"VIRTUAL_ENV": "/s/venv"}}, nil
 		},
 	}
-	done, err := prepareToolchains(context.Background(), raw, steps, holder, logr.Discard())
+	done, err := prepareRuntime(context.Background(), raw, steps, holder, logr.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(order) != 1 || order[0] != "pending" {
-		t.Fatalf("the gate was not closed before prepareToolchains returned: %v", order)
+		t.Fatalf("the gate was not closed before prepareRuntime returned: %v", order)
 	}
 	if holder.pathPrefix() != nil {
 		t.Fatal("the jobs' env was published before the install finished")
@@ -323,7 +324,7 @@ func TestToolchainGateOrder(t *testing.T) {
 
 	order = nil
 	failed := &toolchainEnv{}
-	done, err = prepareToolchains(context.Background(), raw, steps, failed, logr.Discard())
+	done, err = prepareRuntime(context.Background(), raw, steps, failed, logr.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,18 +337,105 @@ func TestToolchainGateOrder(t *testing.T) {
 	}
 }
 
-// No toolchain, no gate: the container takes work at once. A toolchain a
-// container cannot add is refused before anything starts.
+// No toolchain and no GPU, no gate: the container takes work at once. A
+// toolchain a container cannot add is refused before anything starts.
 func TestToolchainsNoneOrRefused(t *testing.T) {
-	steps := toolchainSteps{
+	steps := runtimeSteps{
 		markPending: func() error { t.Fatal("the gate closed without a toolchain"); return nil },
 	}
-	if done, err := prepareToolchains(context.Background(), "", steps, &toolchainEnv{}, logr.Discard()); done != nil || err != nil {
+	if done, err := prepareRuntime(context.Background(), "", steps, &toolchainEnv{}, logr.Discard()); done != nil || err != nil {
 		t.Fatalf("no toolchain: %v %v", done, err)
 	}
-	_, err := prepareToolchains(context.Background(), `[{"name":"java","version":"25"}]`, steps, &toolchainEnv{}, logr.Discard())
+	_, err := prepareRuntime(context.Background(), `[{"name":"java","version":"25"}]`, steps, &toolchainEnv{}, logr.Discard())
 	if err == nil || !strings.Contains(err.Error(), `toolchain "java" cannot be added to a container`) {
 		t.Fatalf("java: %v", err)
+	}
+}
+
+// A container the hub rented for its GPU asks CUDA to start before anything
+// else, with the gate closed: one that does not start never opens it, and
+// its packages are never installed. Its heartbeat says why, so the machine
+// ends as one that never got Ready: the pool replaces it and avoids the host.
+func TestARentedContainerWhoseGPUDoesNotStartTakesNoWork(t *testing.T) {
+	const raw = `[{"name":"python","packages":["torch"]}]`
+	var order []string
+	steps := runtimeSteps{
+		markPending: func() error { order = append(order, "pending"); return nil },
+		markReady:   func() error { order = append(order, "ready"); return nil },
+		markFailed:  func(err error) error { order = append(order, "failed: "+err.Error()); return nil },
+		prepare: func(context.Context, pyenv.Toolchain) (pyenv.Env, error) {
+			order = append(order, "packages")
+			return pyenv.Env{}, nil
+		},
+	}
+	lost := func(context.Context) containerfacts.CUDA {
+		order = append(order, "cuInit")
+		return containerfacts.CUDA{Asked: true, Result: 999, Name: "CUDA_ERROR_UNKNOWN"}
+	}
+	dropped := false
+	steps.checkGPU = gpuCheck(true, true, lost, func() { dropped = true }, logr.Discard())
+	done, err := prepareRuntime(context.Background(), raw, steps, &toolchainEnv{}, logr.Discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err == nil || err.Error() != "the GPU does not start: cuInit returned 999 (CUDA_ERROR_UNKNOWN)" {
+		t.Fatalf("done = %v", err)
+	}
+	if want := "pending,cuInit,failed: the GPU does not start: cuInit returned 999 (CUDA_ERROR_UNKNOWN)"; strings.Join(order, ",") != want {
+		t.Fatalf("order %v, want %s", order, want)
+	}
+	if dropped {
+		t.Fatal("a rented container kept taking work without its GPU")
+	}
+
+	// A GPU that starts: the packages, then the gate opens.
+	order = nil
+	started := func(context.Context) containerfacts.CUDA {
+		order = append(order, "cuInit")
+		return containerfacts.CUDA{Asked: true, Name: "CUDA_SUCCESS"}
+	}
+	steps.checkGPU = gpuCheck(true, true, started, func() { dropped = true }, logr.Discard())
+	done, _ = prepareRuntime(context.Background(), raw, steps, &toolchainEnv{}, logr.Discard())
+	if err := <-done; err != nil || strings.Join(order, ",") != "pending,cuInit,packages,ready" || dropped {
+		t.Fatalf("a GPU that starts: %v %v dropped=%v", err, order, dropped)
+	}
+}
+
+// A container of its owner's (attached, this computer) whose GPU does not
+// start still takes work, without the GPU, and says why. One that cannot ask
+// (no python) offers the GPU nvidia-smi lists. Without a listed GPU nothing
+// is asked.
+func TestAnOwnContainerWhoseGPUDoesNotStartOffersNone(t *testing.T) {
+	lost := func(context.Context) containerfacts.CUDA {
+		return containerfacts.CUDA{Asked: true, Result: 100, Name: "CUDA_ERROR_NO_DEVICE"}
+	}
+	dropped := false
+	if err := gpuCheck(true, false, lost, func() { dropped = true }, logr.Discard())(context.Background()); err != nil || !dropped {
+		t.Fatalf("own container: %v dropped=%v", err, dropped)
+	}
+	dropped = false
+	unasked := func(context.Context) containerfacts.CUDA { return containerfacts.CUDA{Why: "python3 did not run"} }
+	for _, managed := range []bool{true, false} {
+		if err := gpuCheck(true, managed, unasked, func() { dropped = true }, logr.Discard())(context.Background()); err != nil || dropped {
+			t.Fatalf("managed=%v, not asked: %v dropped=%v", managed, err, dropped)
+		}
+	}
+	if gpuCheck(false, true, lost, func() {}, logr.Discard()) != nil {
+		t.Fatal("asked CUDA with no GPU listed")
+	}
+	// Without a toolchain, a listed GPU closes the gate while it is asked.
+	var order []string
+	steps := runtimeSteps{
+		markPending: func() error { order = append(order, "pending"); return nil },
+		markReady:   func() error { order = append(order, "ready"); return nil },
+		checkGPU:    func(context.Context) error { order = append(order, "cuInit"); return nil },
+	}
+	done, err := prepareRuntime(context.Background(), "", steps, &toolchainEnv{}, logr.Discard())
+	if err != nil || done == nil {
+		t.Fatalf("no toolchain, a GPU: %v %v", done, err)
+	}
+	if err := <-done; err != nil || strings.Join(order, ",") != "pending,cuInit,ready" {
+		t.Fatalf("order %v: %v", order, err)
 	}
 }
 

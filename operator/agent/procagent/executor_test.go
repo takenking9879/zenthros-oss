@@ -538,3 +538,20 @@ func TestAStartWithNoRoomIsBusyNotInvalid(t *testing.T) {
 		}
 	}
 }
+
+// A GPU that does not start is not offered from then on: the rest of the
+// container still is.
+func TestAGPUThatDoesNotStartIsNoLongerDeclared(t *testing.T) {
+	e := newTestExecutor(t, "runpod/pytorch:2.8.0")
+	e.host = func(context.Context) capability.Host {
+		return capability.Host{CPU: 8, GPUVendor: "nvidia", GPUModel: "NVIDIA H100 80GB HBM3", GPUCount: 1}
+	}
+	if _, host := e.Declare(context.Background()); host.GPUCount != 1 {
+		t.Fatalf("before: %+v", host)
+	}
+	e.WithoutGPU()
+	_, host := e.Declare(context.Background())
+	if host.GPUCount != 0 || host.GPUModel != "" || host.GPUVendor != "" || host.CPU != 8 {
+		t.Fatalf("after WithoutGPU: %+v", host)
+	}
+}

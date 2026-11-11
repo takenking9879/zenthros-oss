@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -115,6 +116,8 @@ type Config struct {
 type Executor struct {
 	cfg  Config
 	host func(context.Context) capability.Host
+	// noGPU: the GPU nvidia-smi lists does not start (WithoutGPU).
+	noGPU atomic.Bool
 
 	mu   sync.Mutex
 	jobs map[string]*job
@@ -185,9 +188,16 @@ func New(cfg Config) (*Executor, error) {
 	return e, nil
 }
 
+// WithoutGPU stops offering the container's GPU: nvidia-smi lists it, but
+// CUDA does not start on it, and every job that used it would fail.
+func (e *Executor) WithoutGPU() { e.noGPU.Store(true) }
+
 // Declare says what this container runs: a Job, as a process, in its image.
 func (e *Executor) Declare(ctx context.Context) (capability.Set, capability.Host) {
 	host := e.host(ctx)
+	if e.noGPU.Load() {
+		host.GPUVendor, host.GPUModel, host.GPUCount = "", "", 0
+	}
 	host.ContainerImage = e.cfg.Image
 	host.SecretStores = capability.SecretStoresContainer()
 	return capability.Container(), host

@@ -34,14 +34,14 @@ downloaded comes from this code. `.github/workflows/release.yml` builds each
 release from its tag. Build the same binary and compare:
 
 ```bash
-git checkout v0.1.0
+git checkout v0.1.1
 cd operator
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false \
-  -ldflags="-s -w -X github.com/zenthros/operator/internal/buildinfo.Release=v0.1.0" \
+  -ldflags="-s -w -X github.com/zenthros/operator/internal/buildinfo.Release=v0.1.1" \
   -o zenthros-agent ./cmd/agent
 sha256sum zenthros-agent
 # the release's agent, unpacked:
-curl -fsSL https://github.com/takenking9879/zenthros-oss/releases/download/v0.1.0/zenthros-agent-linux-amd64.zst | zstd -d | sha256sum
+curl -fsSL https://github.com/takenking9879/zenthros-oss/releases/download/v0.1.1/zenthros-agent-linux-amd64.zst | zstd -d | sha256sum
 ```
 
 The two digests are the same. `SHA256SUMS` in each release covers every file

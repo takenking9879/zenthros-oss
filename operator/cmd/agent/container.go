@@ -24,6 +24,7 @@ import (
 	"github.com/zenthros/operator/internal/envconf"
 	"github.com/zenthros/operator/pkg/bootstrap"
 	"github.com/zenthros/operator/pkg/cloudmeta"
+	"github.com/zenthros/operator/pkg/containerfacts"
 	"github.com/zenthros/operator/pkg/fault"
 	"github.com/zenthros/operator/pkg/infrastructure/provider/containerhosts"
 	"github.com/zenthros/operator/pkg/liveness"
@@ -364,7 +365,7 @@ func supervise(s supervision) int {
 }
 
 // containerToolchain is the container's prepared Python, shared by the
-// executor (the jobs' env) and runAgent (which prepares it).
+// executor (the jobs' env) and runAgent (which prepares it, prepareRuntime).
 var containerToolchain = &toolchainEnv{}
 
 // toolchainEnv is the prepared Python environment every job gets: empty until
@@ -392,24 +393,31 @@ func (t *toolchainEnv) extraEnv() map[string]string {
 	return t.env.Vars
 }
 
-// toolchainSteps are what prepareToolchains does, replaceable in tests.
-type toolchainSteps struct {
-	prepare     func(context.Context, pyenv.Toolchain) (pyenv.Env, error)
+// runtimeSteps are what prepareRuntime does, replaceable in tests.
+type runtimeSteps struct {
+	prepare func(context.Context, pyenv.Toolchain) (pyenv.Env, error)
+	// checkGPU asks the GPU to start (gpuCheck); nil when none is listed.
+	checkGPU    func(context.Context) error
 	markPending func() error
 	markReady   func() error
 	markFailed  func(error) error
 }
 
-// prepareToolchains completes the image's Python (ZENTHROS_TOOLCHAINS) while
-// the agent is already connected. The gate is closed before it returns, so
-// the agent's first heartbeat already says it takes no work; the job env is
-// published before the gate opens, so the first job sees the venv. The
-// channel carries the outcome once: an error means the container cannot run
-// the jobs it was made for.
-func prepareToolchains(ctx context.Context, raw string, steps toolchainSteps, holder *toolchainEnv, logger logr.Logger) (<-chan error, error) {
+// prepareRuntime makes the container ready for its jobs while the agent is
+// already connected: it asks a listed GPU to start, then completes the
+// image's Python (ZENTHROS_TOOLCHAINS). The GPU goes first: a host whose GPU
+// does not start is not worth the packages. The gate is closed before it
+// returns, so the agent's first heartbeat already says it takes no work; the
+// job env is published before the gate opens, so the first job sees the
+// venv. The channel carries the outcome once: an error means the container
+// cannot run the jobs it was made for.
+func prepareRuntime(ctx context.Context, raw string, steps runtimeSteps, holder *toolchainEnv, logger logr.Logger) (<-chan error, error) {
 	toolchains, err := pyenv.Parse(raw)
-	if err != nil || len(toolchains) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if len(toolchains) == 0 && steps.checkGPU == nil {
+		return nil, nil
 	}
 	if err := steps.markPending(); err != nil {
 		return nil, err
@@ -417,23 +425,55 @@ func prepareToolchains(ctx context.Context, raw string, steps toolchainSteps, ho
 	done := make(chan error, 1)
 	go func() {
 		started := time.Now()
-		logger.Info("preparing the python environment; taking no work until it is ready", "packages", toolchains[0].Packages)
-		env, err := steps.prepare(ctx, toolchains[0])
+		var env pyenv.Env
+		var err error
+		if steps.checkGPU != nil {
+			err = steps.checkGPU(ctx)
+		}
+		if err == nil && len(toolchains) > 0 {
+			logger.Info("preparing the python environment; taking no work until it is ready", "packages", toolchains[0].Packages)
+			env, err = steps.prepare(ctx, toolchains[0])
+		}
 		if err == nil {
 			holder.set(env)
 			err = steps.markReady()
 		}
 		if err == nil {
-			logger.Info("python environment ready", "took", time.Since(started).Round(time.Millisecond))
+			logger.Info("ready for work", "took", time.Since(started).Round(time.Millisecond))
 		} else if failed := steps.markFailed(err); failed != nil {
-			logger.Error(failed, "could not record why the python environment failed")
+			logger.Error(failed, "could not record why the container cannot run its jobs")
 		}
 		done <- err
 	}()
 	return done, nil
 }
 
-// afterPrepare is what an agent does with the outcome of preparing its Python.
+// gpuCheck is the GPU's step of a container's start, nil when nvidia-smi
+// lists none. A container the hub rented (managed) whose GPU does not start
+// cannot run what it was rented for: the step fails, the gate stays closed,
+// and the machine ends as one that never got Ready, its host avoided. One of
+// its owner's says it and goes on without the GPU (drop). Nothing asked
+// (no python, a libcuda the image cannot load) leaves the GPU nvidia-smi lists.
+func gpuCheck(listed, managed bool, ask func(context.Context) containerfacts.CUDA, drop func(), logger logr.Logger) func(context.Context) error {
+	if !listed {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		cuda := ask(ctx)
+		switch {
+		case !cuda.Asked:
+			logger.Info("cannot ask whether the GPU starts; offering the GPU nvidia-smi lists", "why", cuda.Why)
+		case cuda.Fails() && managed:
+			return errors.New(cuda.Failure())
+		case cuda.Fails():
+			logger.Info(cuda.Failure() + "; offering no GPU")
+			drop()
+		}
+		return nil
+	}
+}
+
+// afterPrepare is what an agent does with the outcome of prepareRuntime.
 // Connected, it stays: the gate stays closed, and its heartbeat says why to
 // whoever waits for the machine, which a restart would only repeat. With no
 // hub to tell (local mode), it stops, and its exit says it.
@@ -441,9 +481,9 @@ func afterPrepare(err error, local bool, stop func(error), logger logr.Logger) {
 	if err == nil {
 		return
 	}
-	logger.Error(err, "the python environment cannot be prepared; taking no work")
+	logger.Error(err, "the container cannot run its jobs; taking no work")
 	if local {
-		stop(fmt.Errorf("prepare the python environment: %w", err))
+		stop(fmt.Errorf("prepare the container for its jobs: %w", err))
 	}
 }
 

@@ -5,6 +5,8 @@ package agent
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,5 +125,47 @@ func TestAPublicAddressIsAskedForUntilKnown(t *testing.T) {
 	now = now.Add(time.Hour)
 	if c.get(cancelled); asked != 2 {
 		t.Fatalf("a known address was asked for again (%d)", asked)
+	}
+}
+
+// gpuHost lists two GPUs and answers python's ask of CUDA with cuda.
+func gpuHost(cuda string, err error) func(context.Context, string, ...string) (string, error) {
+	return func(_ context.Context, name string, _ ...string) (string, error) {
+		switch name {
+		case "nvidia-smi":
+			return "NVIDIA A100-SXM4-80GB\nNVIDIA A100-SXM4-80GB\n", nil
+		case "python3":
+			return cuda, err
+		}
+		return "", exec.ErrNotFound
+	}
+}
+
+// A GPU nvidia-smi lists but CUDA does not start on is not offered, and the
+// agent says why; the read is incomplete, so a GPU that starts later (a
+// fabric manager that came up) is offered then.
+func TestAGPUWhoseCUDADoesNotStartIsNotOffered(t *testing.T) {
+	t.Setenv("ZENTHROS_TOPOLOGY_PROVIDER", "onprem")
+	var said []string
+	say := func(msg string) { said = append(said, msg) }
+	host, complete := readHostFacts(hostSources{command: gpuHost("cuInit 999 CUDA_ERROR_UNKNOWN\n", nil), say: say})
+	if host.GPUCount != 0 || host.GPUModel != "" || host.GPUVendor != "" || complete {
+		t.Fatalf("offered a GPU that does not start: %+v complete=%v", host, complete)
+	}
+	if len(said) != 1 || !strings.Contains(said[0], "the GPU does not start: cuInit returned 999 (CUDA_ERROR_UNKNOWN)") ||
+		!strings.Contains(said[0], "NVIDIA A100-SXM4-80GB") {
+		t.Fatalf("said %q", said)
+	}
+
+	said = nil
+	host, complete = readHostFacts(hostSources{command: gpuHost("cuInit 0 CUDA_SUCCESS\n", nil), say: say})
+	if host.GPUCount != 2 || !complete || len(said) != 0 {
+		t.Fatalf("a GPU that starts: %+v complete=%v said %q", host, complete, said)
+	}
+
+	// Without a python to ask with, the GPU is what nvidia-smi lists.
+	host, complete = readHostFacts(hostSources{command: gpuHost("", exec.ErrNotFound), say: say})
+	if host.GPUCount != 2 || !complete || len(said) != 1 || !strings.Contains(said[0], "cannot ask whether the GPU starts") {
+		t.Fatalf("no python: %+v complete=%v said %q", host, complete, said)
 	}
 }

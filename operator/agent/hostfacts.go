@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-logr/logr"
 
 	"github.com/zenthros/operator/pkg/capability"
 	"github.com/zenthros/operator/pkg/cloudmeta"
@@ -28,8 +31,16 @@ var hostFacts = (&factsCache{read: func() (capability.Host, bool) {
 		metadata: func(ctx context.Context) cloudmeta.Facts {
 			return cloudmeta.DetectFacts(ctx, cloudmeta.FactsSources())
 		},
+		say: func(msg string) { hostLog.Info(msg) },
 	})
 }, now: time.Now}).get
+
+// hostLog is where the host's read says what its operator should know (a GPU
+// it does not offer). main sets it before the agent starts.
+var hostLog = logr.Discard()
+
+// SetHostLog sets where the host's read says what it does not offer.
+func SetHostLog(logger logr.Logger) { hostLog = logger.WithName("host") }
 
 // factsRetry is how often an incomplete read of the host is made again.
 const factsRetry = 5 * time.Minute
@@ -74,6 +85,8 @@ type hostSources struct {
 	osRelease, meminfo string
 	command            func(ctx context.Context, name string, args ...string) (string, error)
 	metadata           func(ctx context.Context) cloudmeta.Facts
+	// say tells the operator what the read found and does not offer.
+	say func(msg string)
 }
 
 // sourceTimeout bounds each source of host facts on its own: a slow first
@@ -100,6 +113,16 @@ func readHostFacts(src hostSources) (capability.Host, bool) {
 		}
 		if len(models) > 0 {
 			host.GPUVendor, host.GPUModel, host.GPUCount = "nvidia", models[0], int32(len(models))
+			// A machine of its owner's: the agent says it and offers no GPU,
+			// asking again in factsRetry, as a GPU still coming up would be.
+			switch cuda := containerfacts.AskCUDA(context.Background(), src.command, "python3"); {
+			case cuda.Fails():
+				src.say(fmt.Sprintf("%s: %s; offering no GPU", models[0], cuda.Failure()))
+				host.GPUVendor, host.GPUModel, host.GPUCount = "", "", 0
+				complete = false
+			case !cuda.Asked:
+				src.say(fmt.Sprintf("cannot ask whether the GPU starts (%s); offering the %s nvidia-smi lists", cuda.Why, models[0]))
+			}
 		}
 	} else if !errors.Is(err, exec.ErrNotFound) {
 		complete = false
