@@ -1,0 +1,16 @@
+{{- if not .Values.agent.local.enabled }}
+{{- if not .Values.agent.reportSpoolEmptyDir }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-reports
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.agent.reportSpoolSize | quote }}
+{{- end }}
+{{- end }}

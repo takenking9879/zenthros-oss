@@ -1,0 +1,134 @@
+{{- if not .Values.agent.local.enabled }}
+{{- if and .Values.enrollment.enabled .Values.enrollment.token }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-enroll
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.enrollment.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.enrollment.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "zenthros-agent.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: zenthros-agent-enrollment
+      restartPolicy: Never
+      {{- if .Values.enrollment.tailscale }}
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - {{ .Values.tailscale.dnsNameserver }}
+        {{- with .Values.tailscale.dnsSearch }}
+        searches:
+          - {{ . }}
+        {{- end }}
+      {{- else }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- end }}
+      {{- if .Values.enrollment.tailscale }}
+      initContainers:
+        - name: tailscale
+          image: {{ .Values.tailscale.image | quote }}
+          restartPolicy: Always
+          env:
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default .Values.tailscale.authKeySecret .Values.enrollment.tailscaleAuthKeySecret }}
+                  key: {{ .Values.tailscale.authKeySecretKey }}
+            - name: TS_HOSTNAME
+              value: {{ printf "%s-enroll" .Values.agent.backendID | quote }}
+            - name: TS_EXTRA_ARGS
+              value: {{ .Values.tailscale.extraArgs | quote }}
+            - name: TS_USERSPACE
+              value: "false"
+            - name: TS_ACCEPT_DNS
+              value: "true"
+            - name: TS_KUBE_SECRET
+              value: ""
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsNonRoot: false
+      {{- end }}
+      containers:
+        - name: enroll
+          image: {{ include "zenthros-agent.enrollmentImage" . | quote }}
+          imagePullPolicy: {{ .Values.agent.imagePullPolicy }}
+          command: ["/zenadm"]
+          args:
+            - join
+            - --controller
+            - {{ .Values.enrollment.controllerAddress | quote }}
+            {{- if .Values.enrollment.tlsServerName }}
+            - --tls-server-name
+            - {{ .Values.enrollment.tlsServerName | quote }}
+            {{- end }}
+            - --token
+            - "$(ZENTHROS_JOIN_TOKEN)"
+            - --ca-cert-hash
+            - "$(ZENTHROS_CA_CERT_HASH)"
+            - --backend-id
+            - {{ .Values.agent.backendID | quote }}
+            - --backend-type
+            - {{ .Values.agent.backendType | quote }}
+            - --deploy
+            - k8s
+            - --ownership
+            - {{ .Values.agent.ownership | quote }}
+            {{- if .Values.enrollment.providerIdentity }}
+            - --provider-identity
+            - {{ .Values.enrollment.providerIdentity | quote }}
+            {{- end }}
+            - --state-dir
+            - {{ .Values.enrollment.stateDir | quote }}
+            - --skip-if-existing
+          env:
+            # Where the agent's TLS Secret goes: this release's namespace
+            # and name (zenadm --deploy k8s).
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ZENTHROS_AGENT_TLS_SECRET
+              value: {{ .Values.agent.tls.secretName | quote }}
+            - name: ZENTHROS_JOIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.enrollment.tokenSecretName }}
+                  key: token
+            - name: ZENTHROS_CA_CERT_HASH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.enrollment.tokenSecretName }}
+                  key: ca-cert-hash
+            {{- if .Values.enrollment.clusterName }}
+            - name: ZENTHROS_EKS_CLUSTER_NAME
+              value: {{ .Values.enrollment.clusterName | quote }}
+            {{- end }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          {{- if not .Values.enrollment.tailscale }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+          {{- end }}
+{{- end }}
+{{- end }}

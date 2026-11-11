@@ -1,0 +1,5 @@
+[synth] Starting training pipeline
+(RayTrainWorker pid=33797) [synth-train] start epochs=3 lr=0.01
+(RayTrainWorker pid=33797) [synth-train] Epoch 0 loss=1.4001
+(RayTrainWorker pid=33797) [synth-train] Epoch 2 loss=1.3906
+(RayTrainWorker pid=33797) [synth-train] completed loss=1.3906

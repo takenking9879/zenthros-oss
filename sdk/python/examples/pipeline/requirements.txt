@@ -1,0 +1,12 @@
+# What the pipeline imports, pinned: the notebook and the machine must agree
+# on cloudpickle, and both engines are tested with exactly these. boto3 is
+# the runner's: a job reads its call from the Workspace's s3:// store.
+boto3==1.43.113
+cloudpickle==3.1.2
+numpy==2.4.4
+pandas==3.0.2
+polars==1.44.2
+pyarrow==24.0.0
+pyspark==4.2.0
+scikit-learn==1.8.0
+threadpoolctl==3.6.0

@@ -1,0 +1,1472 @@
+// Zenthros control channel between the Gateway and an agent on a target
+// backend. Metadata and signaling only: never data bytes or model artifacts (data
+// plane stays in the customer boundary). The agent initiates the connection
+// outbound (mTLS) so remote VMs/clusters need no inbound ports. The Gateway owns
+// Agent sockets; the Controller owns lifecycle and persists ExecutionReports.
+//
+// Versioning: every payload is a versioned envelope {api_version, kind, spec},
+// serialized as JSON inside `spec_json`. An agent and its Gateway speak the
+// same wire: the Gateway refuses at Register an agent whose fingerprint of it
+// (Advertise.wire_protocol, envelope.Protocol) is not its own (architecture §7).
+syntax = "proto3";
+
+package zenthros.agent.v1;
+
+option go_package = "github.com/zenthros/operator/internal/grpc/gen;agentpb";
+
+// Agent is served by the Gateway. The agent dials it outbound and calls these.
+service Agent {
+  // Register opens the control relationship as a bidirectional stream. The agent
+  // sends a RegisterRequest; the Gateway admits it and then drives work by
+  // sending Submit/Cancel/Status requests back over the same stream (which the
+  // agent answers with the matching responses). The stream's lifetime is the
+  // registration: when it closes, the Gateway prunes the agent. Reconnect
+  // re-registers with a new session_epoch; a stale epoch is rejected.
+  rpc Register(stream RegisterRequest) returns (stream RegisterResponse);
+
+  // Enroll bootstraps a new agent's client certificate (kubeadm-style discovery +
+  // CSR; architecture §20). It is the ONLY rpc callable without a client
+  // certificate: the agent authenticates with a one-time bootstrap token and submits
+  // a CSR; the controller signs it with its CA and returns the client certificate +
+  // CA. Every other rpc requires the resulting mTLS client certificate.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+
+  // Renew exchanges the agent's current, still valid client certificate for a
+  // new one with the same identity (common name, organization, DNS names),
+  // signed over a fresh key. It requires that certificate for mTLS, and a
+  // backend whose bootstrap tokens were revoked is refused: revocation takes
+  // effect at the next renewal at the latest.
+  rpc Renew(RenewRequest) returns (EnrollResponse);
+
+  // LogChannel is a second Agent-initiated TCP to Gateway :9443. First message
+  // is backend_id + session_epoch (must match the live Register owner). Later
+  // messages multiplex StreamLogs pulls by request_id. A dead log follow must
+  // not drop jobs; this stream is independent of Register.
+  rpc LogChannel(stream LogChannelFromAgent) returns (stream LogChannelFromGateway);
+}
+
+// AgentLogs is served by the agent. The controller dials it (over Tailscale) to
+// stream job logs on behalf of `zctl logs`. A separate service keeps the control
+// stream clean: log data is high-volume and unidirectional (architecture §28).
+service AgentLogs {
+  // StreamLogs returns user-facing stdout/stderr for a job the agent owns. The
+  // agent tails the backend-native log source (journalctl on VM, pod logs on k8s).
+  rpc StreamLogs(StreamLogsRequest) returns (stream LogChunk);
+}
+
+// LogService is served by the controller for zctl to consume job logs. zctl dials
+// the controller over the same mTLS channel; the controller proxies StreamLogs to
+// the owning agent. This keeps the CLI's only dependency the controller endpoint.
+service LogService {
+  // Logs streams user-facing stdout/stderr for a ZenthrosJob. The controller
+  // resolves the owning agent from the CRD status and proxies the agent's
+  // StreamLogs response.
+  rpc Logs(JobLogRequest) returns (stream LogChunk);
+}
+
+// AdminService is served by the controller for zctl day-2 backend administration
+// over the same mTLS channel. It covers operations that have no CRD representation.
+service AdminService {
+  // DeleteBackend decommissions a backend by removing its offline Tailscale
+  // devices from the tailnet, so a retired node does not linger in the admin
+  // console. A device is the backend's when its name is the longest known
+  // backend ID it matches; an online one is never deleted (stop the agent
+  // first), and a backend that still runs jobs is refused unless force.
+  rpc DeleteBackend(DeleteBackendRequest) returns (DeleteBackendResponse);
+
+  // ListBackends returns the controller's live view of registered backends (type,
+  // health, address, and advertised capacity). Backs `zctl get backends`; the data
+  // lives in the controller's agent registry (architecture §4 BackendRegistry).
+  rpc ListBackends(ListBackendsRequest) returns (ListBackendsResponse);
+
+  // DrainBackend closes a backend to new submissions (Phase O). Jobs already
+  // running on it finish untouched; new submissions are held Pending with
+  // BACKEND_BUSY until the backend is uncordoned. The state persists across
+  // controller restarts. Pairs with DeleteBackend: drain first, then decommission.
+  rpc DrainBackend(DrainBackendRequest) returns (DrainBackendResponse);
+
+  // UndrainBackend reopens a drained backend to new submissions.
+  rpc UndrainBackend(UndrainBackendRequest) returns (UndrainBackendResponse);
+
+  // JoinBackend mints a one-use attach token for a container that joins as a
+  // backend Private to one Workspace and Named: only jobs that name it reach
+  // it, never one the Scheduler places. zenthros-api asks it for the caller's
+  // Workspace (workspace.backends.join); the Controller writes the token.
+  rpc JoinBackend(JoinBackendRequest) returns (JoinBackendResponse);
+
+  // RetireBackend ends a backend Private to one Workspace: its tokens are
+  // revoked (it can no longer register or renew), then its access is
+  // removed, then the call answers. A Public backend is never retired here.
+  rpc RetireBackend(RetireBackendRequest) returns (RetireBackendResponse);
+}
+
+// EnrollRequest bootstraps an agent's identity. The agent holds no client certificate
+// yet; it proves eligibility with a one-time bootstrap token and submits a PKCS#10
+// CSR for the controller to sign.
+message EnrollRequest {
+  // token is the one-time bootstrap token issued by `zenadm token create`.
+  string token = 1;
+
+  // csr is the DER-encoded PKCS#10 certificate signing request.
+  bytes csr = 2;
+
+  // backend_id is the backend the agent will front (becomes the cert identity).
+  string backend_id = 3;
+
+  // backend_type is the implementation type, e.g. "vm".
+  string backend_type = 4;
+
+  // identity_document is the byte-exact provider-issued instance identity
+  // document. Required for managed tokens and empty for manual joins.
+  bytes identity_document = 5;
+
+  // identity_signature authenticates identity_document with the provider's
+  // published signing certificate. For EC2 this is the decoded /signature
+  // payload (RSA/SHA-256).
+  bytes identity_signature = 6;
+}
+
+// EnrollResponse returns the signed identity material the agent uses for mTLS.
+message EnrollResponse {
+  // client_cert is the PEM client certificate signed by the controller's CA.
+  bytes client_cert = 1;
+
+  // ca_cert is the PEM CA certificate the agent uses to verify the controller.
+  bytes ca_cert = 2;
+}
+
+// RenewRequest carries the CSR for the agent's next certificate. The identity
+// is not in the request: it is the verified client certificate's.
+message RenewRequest {
+  // csr is the DER-encoded PKCS#10 certificate signing request.
+  bytes csr = 1;
+}
+
+// HubRenewRequest is Renew forwarded by the Gateway with the identity it
+// verified on the agent's client certificate.
+message HubRenewRequest {
+  bytes csr = 1;
+  string common_name = 2;
+  repeated string organizations = 3;
+  repeated string dns_names = 4;
+}
+
+// RegisterRequest is a message from the agent over the control stream. Exactly one
+// field is set per message: `advertise` first, then one `response` per command,
+// or an agent-initiated `status_update` / `heartbeat`.
+message RegisterRequest {
+  // advertise identifies the agent; sent once when the stream opens.
+  Advertise advertise = 1;
+
+  // submit_response answers a SubmitRequest.
+  SubmitResponse submit_response = 2;
+
+  // cancel_response answers a CancelRequest.
+  CancelResponse cancel_response = 3;
+
+  // status_response answers a StatusRequest.
+  StatusResponse status_response = 4;
+
+  // status_update is pushed by the agent when a job's observed state changes.
+  StatusUpdate status_update = 5;
+
+  // heartbeat is sent periodically to prove liveness.
+  Heartbeat heartbeat = 6;
+
+  // execution_report is a complete producer snapshot the agent is forwarding
+  // from its durable local spool.
+  ExecutionReport execution_report = 7;
+
+  // checkpoint_commit is metadata for a blob already written to customer
+  // object storage. Bytes never travel on this channel.
+  CheckpointCommit checkpoint_commit = 8;
+
+  // prepare_response answers a PrepareRequest.
+  PrepareResponse prepare_response = 9;
+
+  // child_spawn asks the controller to create (or list) a running job's
+  // child jobs. The agent only forwards it; the controller decides.
+  ChildSpawnRequest child_spawn = 10;
+}
+
+// RegisterResponse is a message from the controller over the control stream: an
+// admission acknowledgement or a command for the agent to execute.
+message RegisterResponse {
+  // accepted acknowledges the advertisement (sent once, first).
+  bool accepted = 1;
+
+  // message carries a human-readable reason when not accepted.
+  string message = 2;
+
+  // submit asks the agent to run a job.
+  SubmitRequest submit = 3;
+
+  // cancel asks the agent to stop and remove a job.
+  CancelRequest cancel = 4;
+
+  // status asks the agent for a job's observed state.
+  StatusRequest status = 5;
+
+  // heartbeat_ack acknowledges a heartbeat.
+  HeartbeatAck heartbeat_ack = 6;
+
+  // execution_report_ack is the Controller ACK after PostgreSQL commit, or a
+  // retryable/rejected error. The agent deletes the spool row only on success
+  // or a non-retryable rejection.
+  ExecutionReportAck execution_report_ack = 7;
+
+  // checkpoint_ack is the Controller ACK after status.progress is written, or
+  // a rejection when the lease is not live (cursor stays frozen).
+  CheckpointAck checkpoint_ack = 8;
+
+  // prepare asks the agent to warm its cache (a Prewarm).
+  PrepareRequest prepare = 9;
+
+  // child_spawn_ack answers a ChildSpawnRequest, only after every child of
+  // the group exists (or with the refusal, verbatim).
+  ChildSpawnAck child_spawn_ack = 10;
+
+  // 11 was log_channel_on_demand: every LogChannel opens when asked
+  // (open_log_channel), so nobody says so any more.
+  reserved 11;
+  reserved "log_channel_on_demand";
+
+  // open_log_channel asks the agent to open its LogChannel now: someone is
+  // reading the backend's logs. Asked again while the reader waits; an agent
+  // whose channel is open or opening ignores it.
+  OpenLogChannel open_log_channel = 12;
+
+  // log_batch_window_ms, on the accepting message, is the window the agent
+  // joins a job's log lines in before sending them (agent/logbatch.go): the
+  // installation sets it once, at the Gateway, for every machine. Zero says
+  // nothing and the agent keeps its own; negative asks for no window, a
+  // message per line.
+  int64 log_batch_window_ms = 13;
+
+  // power_off asks the agent to power its machine off. Only a machine of the
+  // installation's own (ownership Managed) obeys, and nothing answers: the
+  // machine going is the answer. Asked again until it is gone.
+  PowerOff power_off = 14;
+}
+
+// OpenLogChannel is the Gateway's ask for the agent's LogChannel.
+message OpenLogChannel {}
+
+// PowerOff is the hub's ask that a managed machine power itself off: its
+// cloud account stopped taking the provisioner's terminate, and a machine of
+// such an account is launched to terminate when it powers off.
+message PowerOff {}
+
+// Advertise identifies the agent and the backend it fronts.
+message Advertise {
+  // backend_id is the unique backend identifier (matches spec.target.backend).
+  string backend_id = 1;
+
+  // backend_type is the implementation type, e.g. "vm".
+  string backend_type = 2;
+
+  // agent_version is the agent build version, for observability.
+  string agent_version = 3;
+
+  // agent_addr is the agent's own Tailscale IP (discovered from its tailscale
+  // interface). The controller dials this IP to stream logs. It is reported by the
+  // agent rather than inferred from the gRPC peer address, because the peer can be a
+  // relay/host NAT address that does not reach the agent's log server.
+  string agent_addr = 4;
+
+  // ownership identifies who may mutate the underlying infrastructure. Empty (a
+  // manually joined agent) is External.
+  string ownership = 5;
+
+  // age_recipients are the destination's age X25519 public keys (age1...). The
+  // private identity never leaves the agent. Current and overlapping previous
+  // keys are all advertised so zctl can seal ciphertext during rotation.
+  repeated string age_recipients = 6;
+
+  // session_epoch is the exclusive-owner generation for this Register stream.
+  // A newer epoch evicts the previous stream for the same backend_id. A stale
+  // epoch (older than the live owner, or equal while that owner is live) is
+  // rejected so two connections cannot split-brain. At N>1 the admitting
+  // replica Fences siblings so the old epoch cannot stay live on another pod.
+  int64 session_epoch = 7;
+
+  // capabilities are the workload kinds this agent's executor runs. The
+  // controller admits a job to this backend only when its kind is here.
+  repeated WorkloadCapability capabilities = 8;
+
+  // host is what the agent observed about its machine or cluster.
+  HostFacts host = 9;
+
+  // capability_hash identifies capabilities+host; a Heartbeat carrying a
+  // different hash carries the new declaration with it.
+  string capability_hash = 10;
+
+  // 11 was log_channel_on_demand: every agent holds its LogChannel closed
+  // until the Gateway asks for it (RegisterResponse.open_log_channel).
+  reserved 11;
+  reserved "log_channel_on_demand";
+
+  // wire_protocol is the agent's fingerprint of this wire (envelope.Protocol):
+  // the messages of the Agent service and the job spec they carry. A Gateway
+  // that speaks another refuses the agent at Register, before any command.
+  string wire_protocol = 12;
+}
+
+// WorkloadCapability is one workload kind an executor runs.
+message WorkloadCapability {
+  // kind is a ZenthrosJob workload kind (Job, RayJob, Manifest...).
+  string kind = 1;
+
+  // lifecycle is RunToCompletion or Service.
+  string lifecycle = 2;
+
+  // runtimes the executor runs this kind under (systemd, containerd,
+  // kubernetes).
+  repeated string runtimes = 3;
+
+  // default_runtime is used when a job names none.
+  string default_runtime = 4;
+
+  // endpoints: the executor runs this kind as a Service and publishes its
+  // endpoints (template.service on a Job, endpointFrom on a Manifest). An
+  // agent that does not say so is sent no Service.
+  bool endpoints = 5;
+}
+
+// HostFacts describe the machine (VM agent) or cluster (k8s agent).
+message HostFacts {
+  string arch = 1;
+  string os_id = 2;
+  string os_version = 3;
+  int32 cpu = 4;
+  int64 memory_bytes = 5;
+  string gpu_vendor = 6;
+  string gpu_model = 7;
+  int32 gpu_count = 8;
+  bool nvidia_container_runtime = 9;
+  // peer_addr is how other members of a distributed job reach this host on
+  // the private network.
+  string peer_addr = 10;
+  // network_id names the private network peer_addr is on (VPC or subnet).
+  string network_id = 11;
+  // zone, region and provider place the host for spec.placement; from the
+  // instance metadata service or ZENTHROS_TOPOLOGY_*. The operator's values
+  // on the BackendAccess win over these.
+  string zone = 12;
+  string region = 13;
+  string provider = 14;
+  // cached_images are the most recently used image references in the
+  // host's cache (at most 64); the scheduler prefers a warm host.
+  repeated string cached_images = 15;
+  // cached_artifacts are the sha256 digests of the most recently used
+  // artifacts in the host's cache (at most 64).
+  repeated string cached_artifacts = 16;
+  // container_image is the image a container agent runs in; jobs on it run
+  // in this image and no other. Empty on machines and clusters.
+  string container_image = 17;
+  // job_grace_seconds is the silence window this host's link needs while it
+  // runs a job, as its provider set it (ZENTHROS_JOB_GRACE): a slow or
+  // relayed link can stall longer than the cluster's default. The control
+  // plane only ever lengthens its own default with it, up to a cap. 0: none.
+  int32 job_grace_seconds = 18;
+  // secret_stores are the secretSources types this host resolves
+  // (encrypted-payload, k8s-secret, aws-secrets-manager). Empty from an
+  // agent that predates the field, which the control plane does not judge.
+  repeated string secret_stores = 19;
+  // milli_cpu is cpu exactly, in thousandths, where the agent knows it (a
+  // container's quota of 1.5 CPUs: cpu 2, milli_cpu 1500). 0: cpu.
+  int32 milli_cpu = 20;
+  // nodes are a Kubernetes cluster's nodes a job can land on (Ready, not
+  // cordoned, no NoSchedule or NoExecute taint). Empty on machines.
+  repeated NodeFacts nodes = 21;
+}
+
+// NodeFacts is one Kubernetes node: what it has (milli_cpu, memory_bytes,
+// gpu_count: allocatable) and what its pods that have not ended have not
+// requested (free_*).
+message NodeFacts {
+  string name = 1;
+  int64 milli_cpu = 2;
+  int64 memory_bytes = 3;
+  int32 gpu_count = 4;
+  int64 free_milli_cpu = 5;
+  int64 free_memory_bytes = 6;
+}
+
+// JobEnvelope is the versioned description of a job. `spec_json` carries a
+// backend-neutral job spec (entrypoint, image, resolved env, workers, source),
+// letting each backend evolve its schema without breaking the channel.
+message JobEnvelope {
+  // id is the idempotency key (the ZenthrosJob UID).
+  string id = 1;
+
+  // name is the ZenthrosJob name.
+  string name = 2;
+
+  // namespace is the tenant namespace the job belongs to.
+  string namespace = 3;
+
+  // kind is the workload kind, e.g. "RayJob".
+  string kind = 4;
+
+  // api_version of the spec schema carried in spec_json.
+  string api_version = 5;
+
+  // spec_json is the JSON-encoded, backend-neutral job spec.
+  string spec_json = 6;
+}
+
+// SubmitRequest asks the agent to run a job.
+message SubmitRequest {
+  // request_id correlates the command with its response over the control stream.
+  string request_id = 1;
+
+  // backend_id selects the agent that owns this job (used by the controller to
+  // route; echoed for the agent to validate).
+  string backend_id = 2;
+
+  JobEnvelope job = 3;
+}
+
+// ErrorClass is the stable Submit failure class. Values are the existing
+// Phase D/J reason codes (not a second taxonomy). UNSPECIFIED is unknown
+// and stays transient after decode.
+enum ErrorClass {
+  UNSPECIFIED = 0;
+  SPEC_MISMATCH = 1;
+  UNSUPPORTED_WORKLOAD_KIND = 2;
+  UNSUPPORTED_BACKEND = 3;
+  IMAGE_PULL_FAILED = 4;
+  QUOTA_EXCEEDED = 5;
+  ADMISSION_REJECTED = 6;
+  INVALID_SECRET_SOURCE = 7;
+  // REJECTED: the agent ran the Submit and refused it for a reason with no
+  // class of its own. Permanent.
+  REJECTED = 8;
+  // The transient refusals below keep their meaning across the wire so the
+  // controller retries instead of failing the job.
+  BACKEND_UNAVAILABLE = 9;
+  BACKEND_BUSY = 10;
+  RATE_LIMITED = 11;
+  QUEUE_FULL = 12;
+  // The destination's own refusals, relayed with their text unchanged.
+  FORBIDDEN = 13;
+  INVALID = 14;
+  NOT_FOUND = 15;
+  // DESTINATION_UNAVAILABLE: the cluster or API behind the agent answered
+  // 429, 5xx or a timeout. Transient: the agent itself is up.
+  DESTINATION_UNAVAILABLE = 16;
+}
+
+// SubmitResponse reports the outcome of a submission.
+message SubmitResponse {
+  // request_id echoes the command's request_id.
+  string request_id = 1;
+
+  // handle_name is the backend-native resource name (e.g. the systemd unit),
+  // echoed back in Status/Cancel.
+  string handle_name = 2;
+
+  // error is non-empty if the submission failed.
+  string error = 3;
+
+  // error_class is the decodeable sentinel. Text in error stays for humans.
+  ErrorClass error_class = 4;
+
+  // resolved_image is the job's image pinned by digest (repo@sha256:...),
+  // when the agent pulled it during Submit. Empty when the job has no image
+  // or the agent learns the digest later (JobStatus.resolved_image).
+  string resolved_image = 5;
+
+  // error_reason is the stable reason code of an INVALID_SECRET_SOURCE
+  // refusal (SECRET_NOT_FOUND, SECRET_ACCESS_DENIED, ...). The controller
+  // reads it here, never out of the text in error.
+  string error_reason = 6;
+}
+
+// CancelRequest asks the agent to stop and remove a job.
+message CancelRequest {
+  // request_id correlates the command with its response.
+  string request_id = 1;
+
+  // backend_id selects the owning agent (routing).
+  string backend_id = 2;
+
+  // id is the job id (idempotency key).
+  string id = 3;
+
+  // handle_name is the backend-native resource name from Submit.
+  string handle_name = 4;
+}
+
+// CancelResponse acknowledges a cancellation.
+message CancelResponse {
+  // request_id echoes the command's request_id.
+  string request_id = 1;
+
+  bool cancelled = 2;
+
+  // error is non-empty if the cancellation failed. It is the destination's
+  // own text; error_class only adds how to retry it.
+  string error = 3;
+
+  ErrorClass error_class = 4;
+}
+
+// StatusRequest asks for the observed state of a job.
+message StatusRequest {
+  // request_id correlates the command with its response.
+  string request_id = 1;
+
+  // backend_id selects the owning agent (routing).
+  string backend_id = 2;
+
+  // id is the job id.
+  string id = 3;
+
+  // handle_name is the backend-native resource name from Submit.
+  string handle_name = 4;
+}
+
+// Reason is a structured explanation of the phase.
+message Reason {
+  string code = 1;
+  string detail = 2;
+}
+
+// JobStatus is the observed state of a job, in Zenthros terms.
+message JobStatus {
+  // phase is the lifecycle phase, e.g. "Running", "Succeeded", "Failed".
+  string phase = 1;
+
+  // message is a short human-readable summary.
+  string message = 2;
+
+  // reasons explain the phase (e.g. PROCESS_FAILED).
+  repeated Reason reasons = 3;
+
+  // start_time_unix is when the job started running (0 if unknown).
+  int64 start_time_unix = 4;
+
+  // completion_time_unix is when the job reached a terminal state (0 if not done).
+  int64 completion_time_unix = 5;
+
+  // retry_count is the backend-native workload restart count.
+  int32 retry_count = 6;
+
+  // resolved_image is the image the workload runs, pinned by digest
+  // (repo@sha256:...), once the destination has pulled it. Empty until then.
+  string resolved_image = 7;
+
+  // endpoints are where a Service answers, once it does: one per port of
+  // its template.service whose port accepts connections, or per
+  // manifest.endpointFrom the object publishes. Empty for any other job.
+  repeated Endpoint endpoints = 8;
+
+  // endpoint_problem says why a Service that runs publishes no endpoint
+  // yet: "WaitingForPort: ..." or "EndpointUnresolved: ...".
+  string endpoint_problem = 9;
+
+  // exit_code is what the workload's process returned, once it ended and
+  // where the executor can tell. Absent otherwise: a process killed by a
+  // signal, a machine that went away, a kind with no one process.
+  optional int32 exit_code = 10;
+}
+
+// Endpoint is one URL a Service answers on.
+message Endpoint {
+  string name = 1;
+  int32 port = 2;
+  string url = 3;
+  // scope is Public, Private or Cluster.
+  string scope = 4;
+}
+
+// JobHandle identifies a submitted job for Status/Cancel. It is the reference the
+// controller holds per job and passes back to the agent.
+message JobHandle {
+  // id is the job id (idempotency key).
+  string id = 1;
+
+  // handle_name is the backend-native resource name from Submit (e.g. systemd unit).
+  string handle_name = 2;
+}
+
+// StatusResponse carries the observed state.
+message StatusResponse {
+  // request_id echoes the command's request_id.
+  string request_id = 1;
+
+  JobStatus status = 2;
+
+  // error is non-empty if the status query failed. It is the destination's
+  // own text; error_class only adds how to retry it (NOT_FOUND: the workload
+  // is gone and may be submitted again).
+  string error = 3;
+
+  ErrorClass error_class = 4;
+}
+
+// StatusUpdate is pushed by the agent when a job's observed phase changes. The
+// controller writes it to the ZenthrosJob CRD status subresource, giving
+// `kubectl get zenthrosjob` real-time visibility without polling.
+message StatusUpdate {
+  // backend_id identifies the agent that owns the job.
+  string backend_id = 1;
+
+  // job_id is the ZenthrosJob UID (idempotency key).
+  string job_id = 2;
+
+  // handle_name is the backend-native resource name from Submit.
+  string handle_name = 3;
+
+  JobStatus status = 4;
+
+  // received_unix_nano is when the Gateway read this from the agent's
+  // stream, set by the Gateway: the Hub's proof that the agent lived then.
+  // A forward delivered late (a slow Hub, a queue drained after the stream
+  // ended) proves no more than that. Zero: the Hub's own clock.
+  int64 received_unix_nano = 5;
+}
+
+// Heartbeat is sent periodically by the agent to prove liveness and report
+// capacity. The controller tracks lastHeartbeat per backend; no heartbeat for 45s
+// marks the backend unhealthy and new jobs fail fast with BACKEND_UNAVAILABLE. The
+// capacity fields let the controller refuse new submissions to a backend that is at
+// capacity (BACKEND_BUSY) instead of overloading it (Phase J).
+message Heartbeat {
+  // backend_id identifies the agent.
+  string backend_id = 1;
+
+  // timestamp_unix is when the heartbeat was sent.
+  int64 timestamp_unix = 2;
+
+  // running_jobs is the count of non-terminal jobs the agent tracks.
+  int32 running_jobs = 3;
+
+  // max_jobs is the agent's configured concurrent-job capacity. 0 means unlimited
+  // (the controller never reports the backend as busy). Negative means the
+  // guest runtime is still installing: connected, not ready for work.
+  int32 max_jobs = 4;
+
+  // age_recipients refreshes advertised public keys without reconnecting, so a
+  // rotation overlap is visible to zctl while the control stream stays open.
+  repeated string age_recipients = 5;
+
+  // preempted is set when this agent observed an IMDS/GCP interruption notice.
+  // Optional; recovery must work with this unset (jobGrace / Describe).
+  bool preempted = 7;
+
+  // capability_hash is the hash of the agent's current declaration. When it
+  // differs from the one last advertised, capabilities and host carry the
+  // new declaration.
+  string capability_hash = 8;
+  repeated WorkloadCapability capabilities = 9;
+  HostFacts host = 10;
+
+  // preempt_source, preempt_action and preempt_deadline_unix describe the
+  // notice when preempted is set: who gave it, what the provider will do,
+  // and when (0 when the provider gives no time).
+  string preempt_source = 11;
+  string preempt_action = 12;
+  int64 preempt_deadline_unix = 13;
+
+  // rebalance_recommended_unix is when the machine's provider recommended
+  // rebalancing it away (an EC2 rebalance recommendation: the instance is at
+  // elevated risk of interruption), 0 when it has not. Advice, not a notice:
+  // the machine keeps running.
+  int64 rebalance_recommended_unix = 14;
+
+  // runtime_failure says why the guest runtime could not be prepared, when
+  // max_jobs says it is not ready and it never will be: what the machine
+  // cannot run, in the words of what refused it. Empty otherwise.
+  string runtime_failure = 15;
+}
+
+// HeartbeatAck acknowledges a heartbeat, confirming the controller is alive.
+message HeartbeatAck {
+  // timestamp_unix is when the ack was sent.
+  int64 timestamp_unix = 1;
+}
+
+// StreamLogsRequest asks an agent to stream logs for a job it owns. The controller
+// sends this to the agent on behalf of `zctl logs`.
+message StreamLogsRequest {
+  // backend_id identifies the agent that owns the job.
+  string backend_id = 1;
+
+  // job_id is the ZenthrosJob UID (idempotency key).
+  string job_id = 2;
+
+  // handle_name is the backend-native resource name from Submit.
+  string handle_name = 3;
+
+  // follow tails new output (like `kubectl logs -f`). When false, the stream
+  // returns existing logs and closes.
+  bool follow = 4;
+
+  // tail_lines limits initial output (-1 = all).
+  int32 tail_lines = 5;
+
+  // summarize collapses Ray/train/tune progress lines into a summary. Off,
+  // every line the job wrote arrives as written.
+  bool summarize = 6;
+}
+
+// LogChunk is a fragment of user-facing log output. The agent produces these from
+// the backend-native log source; the controller proxies them to zctl.
+message LogChunk {
+  // stream is "stdout" or "stderr".
+  string stream = 1;
+
+  // data is the raw log bytes for this chunk.
+  bytes data = 2;
+
+  // timestamp_unix is when the log line was produced (0 if unknown).
+  int64 timestamp_unix = 3;
+
+  // truncated is set on the last chunk when the Agent hit the per-request
+  // byte cap. data then carries the leftover hint (kubectl logs / journalctl).
+  // The stream ends after this chunk. A later StreamLogs is a new budget.
+  bool truncated = 4;
+}
+
+// LogChannelFromAgent is Agent → Gateway on the log TCP.
+// Hello: backend_id + session_epoch. Pull replies: request_id + chunk/eof/error.
+message LogChannelFromAgent {
+  string backend_id = 1;
+  int64 session_epoch = 2;
+  string request_id = 3;
+  LogChunk chunk = 4;
+  bool eof = 5;
+  string error = 6;
+}
+
+// LogChannelFromGateway is Gateway → Agent: a StreamLogs pull or cancel.
+message LogChannelFromGateway {
+  string request_id = 1;
+  StreamLogsRequest pull = 2;
+  bool cancel = 3;
+}
+
+// JobLogRequest asks the controller for logs of a ZenthrosJob. zctl sends this
+// to the controller's LogService; the controller resolves the owning agent and
+// proxies the response.
+message JobLogRequest {
+  // job_id is the ZenthrosJob name (not UID — the user-facing identifier).
+  string job_id = 1;
+
+  // namespace the ZenthrosJob lives in.
+  string namespace = 2;
+
+  // follow tails new output (like `kubectl logs -f`).
+  bool follow = 3;
+
+  // tail_lines limits initial output (-1 = all).
+  int32 tail_lines = 4;
+
+  // summarize collapses Ray/train/tune progress lines into a summary. Off,
+  // every line the job wrote arrives as written.
+  bool summarize = 5;
+}
+
+// DeleteBackendRequest asks the controller to decommission a backend.
+message DeleteBackendRequest {
+  // backend_id is the backend to decommission (matches spec.target.backend).
+  string backend_id = 1;
+
+  // force decommissions a backend that still runs jobs.
+  bool force = 2;
+}
+
+// DeleteBackendResponse reports the Tailscale devices that were removed.
+message DeleteBackendResponse {
+  reserved 1, 2;
+
+  // devices are the backend's offline tailnet devices that were deleted
+  // (none: it had none).
+  repeated TailnetDevice devices = 3;
+}
+
+// TailnetDevice is one Tailscale device, for confirmation.
+message TailnetDevice {
+  string id = 1;
+  string name = 2;
+}
+
+// ListBackendsRequest asks for the live backend inventory. Admin answers every
+// backend in full and ignores the fields below; the Pipe honors them.
+message ListBackendsRequest {
+  // heartbeats_only answers each backend's backend_id, session_epoch and
+  // last_heartbeat_unix and nothing else: what the liveness sweep reads.
+  bool heartbeats_only = 1;
+
+  // page_bytes bounds the backends of one answer; 0 answers them all. A warm
+  // host's cache lists make it ~14 KB, so a few hundred outgrow gRPC's
+  // default 4 MiB message.
+  int32 page_bytes = 2;
+
+  // page_token is the previous answer's next_page_token.
+  string page_token = 3;
+
+  // include_offline also lists the backends the caller may use whose agent
+  // has no session now (offline: their id, name and access, nothing the
+  // agent declares): a machine reconnecting is not one that is not there.
+  bool include_offline = 4;
+}
+
+// BackendInfo is the controller's view of one registered backend, from the agent
+// registry (architecture §4 BackendRegistry).
+message BackendInfo {
+  // backend_id is the unique backend identifier (matches spec.target.backend).
+  string backend_id = 1;
+
+  // backend_type is the implementation type, e.g. "vm" or "k8s".
+  string backend_type = 2;
+
+  // agent_version is the agent build version reported at registration.
+  string agent_version = 3;
+
+  // addr is the agent's Tailscale IP the controller dials for logs.
+  string addr = 4;
+
+  // healthy is true when the backend has heartbeated within the unhealthy timeout.
+  bool healthy = 5;
+
+  // running_jobs is the active (non-terminal) job count from the last heartbeat.
+  int32 running_jobs = 6;
+
+  // max_jobs is the agent's advertised concurrent-job capacity (0 = unlimited).
+  int32 max_jobs = 7;
+
+  // last_heartbeat_unix is when the last heartbeat arrived (0 if never).
+  int64 last_heartbeat_unix = 8;
+
+  // drained is true when the backend is closed to new submissions (Phase O).
+  bool drained = 9;
+
+  // ownership is External or Managed. Manual registrations default External.
+  string ownership = 10;
+
+  // access_mode is Private or Public and is independent from ownership.
+  string access_mode = 11;
+
+  // workspaces is the durable explicit grant list.
+  repeated string workspaces = 12;
+
+  // age_recipients are the destination public keys advertised by the agent.
+  repeated string age_recipients = 13;
+
+  // session_epoch is the live exclusive-owner generation on the replica that
+  // currently holds this backend. Pipe clients pick the highest epoch.
+  int64 session_epoch = 14;
+
+  // capabilities and host are the agent's latest declaration.
+  repeated WorkloadCapability capabilities = 15;
+  HostFacts host = 16;
+
+  // name is what its Workspace calls it (BackendAccess spec.name); empty
+  // for a backend joined without one.
+  string name = 17;
+
+  // offline is a registered backend whose agent has no session now
+  // (ListBackendsRequest.include_offline).
+  bool offline = 18;
+}
+
+// ListBackendsResponse returns the registered backends.
+message ListBackendsResponse {
+  repeated BackendInfo backends = 1;
+
+  // refused_full are the machines this Gateway refused a session in the
+  // last minutes because it holds its maximum. They are not connected here;
+  // the controller reads that they are alive and calling.
+  repeated RefusedBackend refused_full = 2;
+
+  // next_page_token asks for the backends after this page; empty on the
+  // last. refused_full comes on the first page only.
+  string next_page_token = 3;
+}
+
+// RefusedBackend is a machine a full Gateway refused, after matching its
+// name to the connection's certificate.
+message RefusedBackend {
+  string backend_id = 1;
+
+  // last_refused_unix is when this Gateway last refused it.
+  int64 last_refused_unix = 2;
+}
+
+// DrainBackendRequest asks the controller to close a backend to new submissions.
+message DrainBackendRequest {
+  // backend_id is the backend to drain (matches spec.target.backend).
+  string backend_id = 1;
+}
+
+// DrainBackendResponse acknowledges the drain.
+message DrainBackendResponse {
+  // backend_id echoes the drained backend.
+  string backend_id = 1;
+
+  // active_jobs is the count of jobs still running on the backend at drain time
+  // (jobs with a workload on the backend, not yet terminal).
+  int32 active_jobs = 2;
+}
+
+// UndrainBackendRequest asks the controller to reopen a backend.
+message UndrainBackendRequest {
+  // backend_id is the backend to reopen (matches spec.target.backend).
+  string backend_id = 1;
+}
+
+// UndrainBackendResponse acknowledges the uncordon.
+message UndrainBackendResponse {
+  // backend_id echoes the reopened backend.
+  string backend_id = 1;
+}
+
+// JoinBackendRequest asks for a container join token. workspace is set by
+// the Gateway for zenthros-api (the delegate's Workspace) and by an
+// administrator otherwise; a delegate's own value is ignored.
+message JoinBackendRequest {
+  string workspace = 1;
+  // name is what the Workspace will call the backend (a DNS label), once
+  // per Workspace; empty: it has only its ID.
+  string name = 2;
+  // backend_type is what joins: "container" (empty) or "vm", a machine the
+  // user already has (zenthros.attach), as a systemd agent.
+  string backend_type = 3;
+  // runtime is where a vm runs its jobs: "systemd" (empty), as units on the
+  // machine, or "containerd", each in an image; the installer line carries
+  // it. A container runs its jobs as processes and takes no other.
+  string runtime = 4;
+  // python is the minor ("3.12") a vm that runs its jobs directly installs
+  // with uv, for the caller's functions (cloudpickle needs the caller's
+  // minor); with containerd a function runs in an image of that Python.
+  string python = 5;
+}
+
+// JoinBackendResponse is what the container joins with, as zenadm token
+// create --attach prints it: two steps for the container's shell, each on
+// its standard input (`sh`). join_script holds the token: never an
+// argument, never a log.
+message JoinBackendResponse {
+  string backend_id = 1;
+  string workspace = 2;
+  // expires_unix is when the token ends if no agent enrolled with it.
+  int64 expires_unix = 3;
+  // install_script downloads the agent and zenadm, checked against the
+  // cluster's pin. No secret in it.
+  string install_script = 4;
+  // join_script is the one-time zenadm join.
+  string join_script = 5;
+  string name = 6;
+}
+
+// RetireBackendRequest names the backend to retire; workspace as in
+// JoinBackendRequest.
+message RetireBackendRequest {
+  string backend_id = 1;
+  string workspace = 2;
+}
+
+// RetireBackendResponse says what was ended.
+message RetireBackendResponse {
+  string backend_id = 1;
+  // tokens_revoked counts the tokens this call revoked (0 when all already were).
+  int32 tokens_revoked = 2;
+  // access_removed is whether a BackendAccess record was deleted.
+  bool access_removed = 3;
+}
+
+// ArtifactRef is a data-plane URI stored with an ExecutionReport. Zenthros
+// never transports the bytes; only the reference travels on the control plane.
+message ArtifactRef {
+  string uri = 1;
+  string name = 2;
+}
+
+// ExecutionReport is a complete JSON snapshot for one producer. It is not a
+// patch, merge, log chunk, or Prometheus sample.
+message ExecutionReport {
+  string api_version = 1;
+  string job_id = 2;
+  string producer_id = 3;
+  string report_id = 4;
+  int64 sequence = 5;
+  int64 produced_at_unix = 6;
+  bytes payload_json = 7;
+  repeated ArtifactRef artifacts = 8;
+  bool final = 9;
+  // received_unix_nano: as StatusUpdate's, set by the Gateway.
+  int64 received_unix_nano = 10;
+}
+
+// ExecutionReportAck is the Controller ACK. Accepted means PostgreSQL commit
+// completed. STORE_UNAVAILABLE is retryable; validation errors are not.
+message ExecutionReportAck {
+  string report_id = 1;
+  string job_id = 2;
+  string producer_id = 3;
+  int64 sequence = 4;
+  bool accepted = 5;
+  string error_code = 6;
+  string error = 7;
+}
+
+// ReportService is served by the controller so zctl can retrieve the current
+// snapshot from PostgreSQL. ZenthrosJob.status carries only bounded metadata.
+service ReportService {
+  rpc GetCurrent(GetCurrentReportRequest) returns (GetCurrentReportResponse);
+  rpc ListCurrent(ListCurrentReportsRequest) returns (ListCurrentReportsResponse);
+}
+
+message GetCurrentReportRequest {
+  string job_id = 1;
+  string namespace = 2;
+  string producer_id = 3;
+}
+
+message GetCurrentReportResponse {
+  string workspace_id = 1;
+  string job_id = 2;
+  string producer_id = 3;
+  string report_id = 4;
+  int64 sequence = 5;
+  int64 produced_at_unix = 6;
+  int64 received_at_unix = 7;
+  bytes payload_json = 8;
+  repeated ArtifactRef artifacts = 9;
+  bool final = 10;
+  // resolved_image is the image the job ran, pinned by digest
+  // (status.resolvedImage), when known.
+  string resolved_image = 11;
+}
+
+message ListCurrentReportsRequest {
+  string job_id = 1;
+  string namespace = 2;
+}
+
+message ListCurrentReportsResponse {
+  repeated GetCurrentReportResponse reports = 1;
+}
+
+// NodeSupply is served by the Gateway for a Kubernetes backend's agent: the
+// nodes Zenthros supplies that backend's cluster (docs/design/K8S_NODE_SUPPLY.md).
+// The caller is the backend agent's certificate; it sees only its own slots.
+service NodeSupply {
+  // NodeSlots lists every live slot of the pools joined to the caller's
+  // cluster. A Node with a zenthros:// providerID that is not listed has no
+  // machine behind it.
+  rpc NodeSlots(NodeSlotsRequest) returns (NodeSlotsResponse);
+  // ReportDrained tells the hub a retiring slot's Node has no pods left to
+  // evict: its machine may go.
+  rpc ReportDrained(ReportDrainedRequest) returns (ReportDrainedResponse);
+  // IssueJoin hands the hub a slot's node credential, sealed to the key its
+  // machine asked with (NodeSlot.join_public_key).
+  rpc IssueJoin(IssueJoinRequest) returns (IssueJoinResponse);
+  // ReportRegistered tells the hub a slot's Node exists.
+  rpc ReportRegistered(ReportRegisteredRequest) returns (ReportRegisteredResponse);
+  // ReportCluster tells the hub how the caller's cluster takes nodes and
+  // whether it can now (its BackendAccess status.nodeSupply).
+  rpc ReportCluster(ClusterReport) returns (ClusterReportAck);
+}
+
+message ClusterReport {
+  // join_method is "kubelet" or "k3s".
+  string join_method = 1;
+  string server_version = 2;
+  repeated string cluster_dns = 3;
+  string cluster_domain = 4;
+  // ready says the cluster can take a new node; otherwise reason (a
+  // NodeSupplyReason*) and message say why not.
+  bool ready = 5;
+  string reason = 6;
+  string message = 7;
+}
+
+message ClusterReportAck {}
+
+message NodeSlotsRequest {}
+
+message NodeSlot {
+  // provider_id is zenthros://<pool>/<capacityrequest>; the Node's name is
+  // the capacityrequest's.
+  string provider_id = 1;
+  string pool = 2;
+  // retire_by_unix, when set, is the time Zenthros terminates the machine:
+  // cordon and drain its Node before then.
+  int64 retire_by_unix = 3;
+  string retire_reason = 4;
+  // drained is set once ReportDrained reached the hub.
+  bool drained = 5;
+  // join_public_key, when set, is the X25519 key the slot's machine asked
+  // for a node credential with: issue one bootstrap token for this node and
+  // IssueJoin it sealed to this key.
+  bytes join_public_key = 6;
+  // registered is set once ReportRegistered reached the hub.
+  bool registered = 7;
+}
+
+message NodeSlotsResponse {
+  repeated NodeSlot slots = 1;
+}
+
+message ReportDrainedRequest {
+  string provider_id = 1;
+}
+
+message ReportDrainedResponse {}
+
+message IssueJoinRequest {
+  string provider_id = 1;
+  // public_key is the key the credential is sealed to; the hub accepts it
+  // only while the machine still asks with that key.
+  bytes public_key = 2;
+  bytes sealed = 3;
+  // server_version is the cluster's Kubernetes version (its API's
+  // gitVersion): the node runs a kubelet of the same minor, never newer.
+  string server_version = 4;
+  // join_method ("kubelet" or "k3s"), cluster_dns and cluster_domain are
+  // how the node joins and the DNS its kubelet gives pods.
+  string join_method = 5;
+  repeated string cluster_dns = 6;
+  string cluster_domain = 7;
+}
+
+message IssueJoinResponse {}
+
+message ReportRegisteredRequest {
+  string provider_id = 1;
+}
+
+message ReportRegisteredResponse {}
+
+// NodeJoin is served by the Gateway for a joined pool's machine, after its
+// managed enrollment: the caller is the machine's certificate. The machine
+// holds no cluster credential before this (docs/design/K8S_NODE_SUPPLY.md).
+service NodeJoin {
+  // Credential asks for the machine's node credential, sealed to
+  // public_key by the cluster's agent. Until the agent issued it, ready is
+  // false: ask again after retry_after_seconds with the same key.
+  rpc Credential(NodeJoinCredentialRequest) returns (NodeJoinCredentialResponse);
+  // Report tells the hub why the machine cannot join (a JoinUnreachable or
+  // JoinRejected reason): its slot fails with it.
+  rpc Report(NodeJoinReport) returns (NodeJoinReportAck);
+}
+
+message NodeJoinCredentialRequest {
+  bytes public_key = 1;
+}
+
+message NodeJoinCredentialResponse {
+  bool ready = 1;
+  int32 retry_after_seconds = 2;
+  // sealed opens with the machine's key for provider_id (nodejoin.Open).
+  bytes sealed = 3;
+  // method is how the machine joins: "kubelet" (Kubernetes' kubelet and
+  // containerd, TLS bootstrapping) or "k3s" (a k3s agent).
+  string method = 4;
+  string node_name = 5;
+  string provider_id = 6;
+  map<string, string> labels = 7;
+  // taints are key[=value]:effect.
+  repeated string taints = 8;
+  // k3s_* pin the k3s binary of the cluster's minor (method k3s).
+  string k3s_version = 9;
+  string k3s_url = 10;
+  string k3s_sha256 = 11;
+  // kubelet_* pin the kubelet of the cluster's minor, cni_plugins_* the
+  // CNI plugins archive (method kubelet).
+  string kubelet_version = 12;
+  string kubelet_url = 13;
+  string kubelet_sha256 = 14;
+  string cni_plugins_version = 15;
+  string cni_plugins_url = 16;
+  string cni_plugins_sha256 = 17;
+  // cluster_dns and cluster_domain are the kubelet's (method kubelet).
+  repeated string cluster_dns = 18;
+  string cluster_domain = 19;
+  // kube_reserved_* are what the kubelet holds back for the system
+  // (Kubernetes quantities; nodeshape): the template node Cluster
+  // Autoscaler plans with holds back the same.
+  string kube_reserved_cpu = 20;
+  string kube_reserved_memory = 21;
+  // eviction_hard_memory is the kubelet's hard eviction threshold on
+  // memory.available; the template holds it back too.
+  string eviction_hard_memory = 22;
+}
+
+message NodeJoinReport {
+  string reason = 1;
+  string message = 2;
+}
+
+message NodeJoinReportAck {}
+
+// Pipe is served by the Gateway for the Controller. Submit/Cancel/Status and
+// registry queries travel here; the Controller process never holds an Agent
+// Register listener.
+service Pipe {
+  rpc Submit(SubmitRequest) returns (SubmitResponse);
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+  // Prepare starts or polls a Prewarm on the owning agent.
+  rpc Prepare(PrepareRequest) returns (PrepareResponse);
+  // PowerOff passes on to a managed machine's agent the ask that it power
+  // itself off. It answers once the ask is on the agent's stream.
+  rpc PowerOff(PowerOffRequest) returns (PowerOffResponse);
+  rpc ListBackends(ListBackendsRequest) returns (ListBackendsResponse);
+  rpc GetBackend(GetBackendRequest) returns (BackendInfo);
+  // Fence evicts a local owner whose session_epoch is older than the caller's.
+  // The admitting Gateway replica calls this on every sibling so N=2 cannot
+  // split-brain. Equal or newer local epochs are left in place.
+  rpc Fence(FenceRequest) returns (FenceResponse);
+  // StreamLogs is Pipe fan-out: the replica that holds the LogChannel session
+  // serves it; siblings forward here. zctl still uses LogService.
+  rpc StreamLogs(StreamLogsRequest) returns (stream LogChunk);
+}
+
+message GetBackendRequest {
+  string backend_id = 1;
+}
+
+message PowerOffRequest {
+  string backend_id = 1;
+}
+
+message PowerOffResponse {}
+
+message FenceRequest {
+  string backend_id = 1;
+  int64 session_epoch = 2;
+}
+
+message FenceResponse {
+  bool evicted = 1;
+}
+
+// Hub is served by the Controller for the Gateway. The Gateway forwards enroll,
+// status, reports, managed-register hooks, and drain. ExecutionReport ACK is
+// produced only after the Controller persists the snapshot.
+service Hub {
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  rpc Renew(HubRenewRequest) returns (EnrollResponse);
+  rpc HandleStatusUpdate(StatusUpdate) returns (HubAck);
+  rpc HandleExecutionReport(HubExecutionReport) returns (ExecutionReportAck);
+  rpc HandleCheckpoint(CheckpointCommit) returns (CheckpointAck);
+  rpc HandleChildSpawn(ChildSpawnRequest) returns (ChildSpawnAck);
+  rpc HandleRegister(HubRegisterRequest) returns (HubAck);
+  rpc DrainBackend(DrainBackendRequest) returns (DrainBackendResponse);
+  rpc UndrainBackend(UndrainBackendRequest) returns (UndrainBackendResponse);
+  rpc ListDrained(ListDrainedRequest) returns (ListDrainedResponse);
+  // JoinBackend and RetireBackend do what AdminService's do, for the
+  // Workspace the Gateway set: the Controller holds the token Secrets.
+  rpc JoinBackend(JoinBackendRequest) returns (JoinBackendResponse);
+  rpc RetireBackend(RetireBackendRequest) returns (RetireBackendResponse);
+  // HandleBackendSilent is a Gateway's notice that a machine it holds went
+  // silent, or that its session closed with nothing replacing it. It is a
+  // hint, never a verdict: the Controller looks at the machine's jobs and
+  // judges each when its grace from the machine's last proof of life runs
+  // out, after asking it. A Controller that does not track machines answers
+  // Unimplemented, and the Gateway keeps renewing job leases on heartbeats.
+  // An empty backend_id only asks whether the Controller tracks machines.
+  rpc HandleBackendSilent(BackendSilence) returns (HubAck);
+  // HandlePreemptionNotice carries a machine's interruption notice, heard on
+  // its heartbeat, to the Controller, which writes it onto the machine's
+  // jobs. Sent only to a Controller that tracks machines.
+  rpc HandlePreemptionNotice(PreemptionNoticeRequest) returns (HubAck);
+}
+
+message HubAck {}
+
+enum SilenceKind {
+  SILENCE_UNSPECIFIED = 0;
+  // SILENCE_SILENT: the session is open but no heartbeat came for two
+  // heartbeat intervals.
+  SILENCE_SILENT = 1;
+  // SILENCE_LEFT: the session closed, and no newer session of the machine
+  // replaced it or fenced it on another Gateway.
+  SILENCE_LEFT = 2;
+  // SILENCE_DEPARTED: the agent closed its own session (it was stopped),
+  // and no newer session replaced it. A machine that left on purpose; its
+  // silence says nothing about the path to the others.
+  SILENCE_DEPARTED = 3;
+}
+
+message BackendSilence {
+  string backend_id = 1;
+  SilenceKind kind = 2;
+  // last_heartbeat_unix_nano is when the Gateway last heard the machine.
+  int64 last_heartbeat_unix_nano = 3;
+  int64 session_epoch = 4;
+}
+
+message PreemptionNoticeRequest {
+  string backend_id = 1;
+  string source = 2;
+  string action = 3;
+  // deadline_unix is when the provider acts; 0 when it does not say.
+  int64 deadline_unix = 4;
+}
+
+message HubExecutionReport {
+  string backend_id = 1;
+  ExecutionReport report = 2;
+}
+
+// CheckpointCommit is the control-plane record of one object-storage write.
+// The URI is …/jobs/<uid>/gen/<generation>/…; the controller ACKs onto
+// status.progress only while the job lease is live.
+message CheckpointCommit {
+  string backend_id = 1;
+  string job_id = 2;
+  int64 generation = 3;
+  string phase = 4;
+  int64 seq = 5;
+  string uri = 6;
+  string sha256 = 7;
+  bool complete = 8;
+  // received_unix_nano: as StatusUpdate's, set by the Gateway.
+  int64 received_unix_nano = 9;
+}
+
+// CheckpointAck is the Controller ACK for a CheckpointCommit. Accepted means
+// the job's cursor now points at this URI. Not accepted with no error_code is
+// the controller's refusal: nothing of the commit was kept. error_code
+// STORE_UNAVAILABLE is no decision (the controller could not be reached, or
+// its write failed or was cut off): the commit may have been kept, and the
+// agent answers the job 503, so the job spends the seq instead of reusing it.
+message CheckpointAck {
+  string job_id = 1;
+  string phase = 2;
+  int64 seq = 3;
+  bool accepted = 4;
+  string error = 5;
+  string error_code = 6;
+}
+
+message HubRegisterRequest {
+  string backend_id = 1;
+  string address = 2;
+  string ownership = 3;
+  // The session the Gateway is about to admit. The Controller retires the
+  // Gateway it remembers as the backend's owner before any Gateway holds
+  // this session, so no command is sent to an older one.
+  int64 session_epoch = 4;
+}
+
+message ListDrainedRequest {}
+
+message ListDrainedResponse {
+  repeated string backend_ids = 1;
+}
+
+// PrepareItem is one thing a Prewarm puts in a host's cache. Exactly one of
+// image, artifact_uri or toolchain_name is set.
+message PrepareItem {
+  // ref names the item in status: "image:<ref>", "artifact:<sha256>",
+  // "toolchain:<name>@<version>".
+  string ref = 1;
+  string image = 2;
+  string artifact_uri = 3;
+  string artifact_sha256 = 4;
+  // artifact_path is where jobs find the artifact, relative to the cache's
+  // paths directory.
+  string artifact_path = 5;
+  string toolchain_name = 6;
+  string toolchain_version = 7;
+  repeated string toolchain_packages = 8;
+}
+
+// PrepareRequest starts a Prewarm on the agent, or reports on one already
+// started with the same key: it is idempotent, and the work runs in the
+// background. release unpins the key's items and stops its work.
+message PrepareRequest {
+  string request_id = 1;
+  string backend_id = 2;
+  // key is the Prewarm's name and generation; a new key replaces the old.
+  string key = 3;
+  repeated PrepareItem items = 4;
+  // concurrency is how many items download at once.
+  int32 concurrency = 5;
+  bool release = 6;
+  // kubernetes carries a Kubernetes backend's settings.
+  PrepareKubernetes kubernetes = 7;
+}
+
+message PrepareKubernetes {
+  map<string, string> node_selector = 1;
+  // pvc_name is the claim artifacts are written to.
+  string pvc_name = 2;
+  // image runs the artifact download (wget and sha256sum).
+  string image = 3;
+}
+
+// PrepareItemStatus is one item's progress. message is the destination's own
+// text on failure (a registry's 403, a bad digest).
+message PrepareItemStatus {
+  string ref = 1;
+  // phase is Pending, Running, Ready or Failed.
+  string phase = 2;
+  int64 bytes = 3;
+  int64 duration_millis = 4;
+  string message = 5;
+}
+
+message PrepareResponse {
+  string request_id = 1;
+  repeated PrepareItemStatus items = 2;
+  // error is non-empty when the agent refused the request as a whole.
+  string error = 3;
+  ErrorClass error_class = 4;
+}
+
+// ChildSpawnRequest is a running job asking for child jobs (fan-out), sent
+// by the agent on the job's behalf after it checked the job's token. The
+// controller checks that the job's lease on backend_id, at generation, is
+// live, and creates the group <job>-<group>-<index>, idempotently by name.
+message ChildSpawnRequest {
+  // backend_id is set by the gateway from the agent's link, never trusted
+  // from the wire.
+  string backend_id = 1;
+  // job_id is the parent job's UID.
+  string job_id = 2;
+  // generation is the parent's lease generation (ZENTHROS_GENERATION).
+  int64 generation = 3;
+  // request_id matches the ack to the request.
+  string request_id = 4;
+  // group names the spawn; with count it names every child.
+  string group = 5;
+  int32 count = 6;
+  // command is each child's argv; empty with same=true runs the parent's.
+  repeated string command = 7;
+  bool same = 8;
+  // env is added to (and overrides) what the child inherits.
+  map<string, string> env = 9;
+  // list creates nothing: the ack reports the children of group, or of
+  // every group when group is empty.
+  bool list = 10;
+}
+
+// ChildStatus is one child as the controller last saw it.
+message ChildStatus {
+  string group = 1;
+  int32 index = 2;
+  string name = 3;
+  string phase = 4;
+  // message is the child's status.message, verbatim.
+  string message = 5;
+}
+
+message ChildSpawnAck {
+  string request_id = 1;
+  string job_id = 2;
+  bool accepted = 3;
+  // error_code and error say why nothing was created, in the controller's
+  // words: SPAWN_QUOTA_EXCEEDED, LEASE_NOT_LIVE, NO_GRANDCHILDREN, ...
+  string error_code = 4;
+  string error = 5;
+  repeated ChildStatus children = 6;
+}

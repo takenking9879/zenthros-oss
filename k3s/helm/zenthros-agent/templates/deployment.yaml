@@ -1,0 +1,236 @@
+{{- if not .Values.agent.local.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.agent.replicas }}
+  # A backend ID is a singleton control-plane identity. Recreate prevents old and
+  # new agent pods from racing to register the same ID during an image rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "zenthros-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "zenthros-agent.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: zenthros-agent
+      # ClusterFirst even with a Tailscale sidecar: MagicDNS-only (dnsPolicy
+      # None + 100.100.100.100) SERVFAILs *.svc.cluster.local and the agent
+      # never becomes Ready. In-cluster control uses the Service IP / DNS;
+      # the sidecar is inbound reachability, not the pod resolver.
+      dnsPolicy: ClusterFirst
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.agent.waitForTLS }}
+      initContainers:
+        - name: wait-for-agent-tls
+          image: {{ .Values.agent.waitImage | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - until [ -s /etc/zenthros/tls/agent.crt ] && [ -s /etc/zenthros/tls/agent.key ] && [ -s /etc/zenthros/tls/ca.crt ]; do sleep 1; done
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 65532
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: agent-tls
+              mountPath: /etc/zenthros/tls
+              readOnly: true
+      {{- end }}
+      containers:
+        {{- if .Values.tailscale.enabled }}
+        - name: tailscale
+          image: {{ .Values.tailscale.image | quote }}
+          env:
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tailscale.authKeySecret }}
+                  key: {{ .Values.tailscale.authKeySecretKey }}
+            - name: TS_HOSTNAME
+              value: {{ .Values.tailscale.hostname | quote }}
+            - name: TS_EXTRA_ARGS
+              value: {{ .Values.tailscale.extraArgs | quote }}
+            - name: TS_USERSPACE
+              value: "false"
+            - name: TS_ACCEPT_DNS
+              value: {{ .Values.tailscale.acceptDNS | default "false" | quote }}
+            - name: TS_STATE_DIR
+              value: /tmp/ts-state
+            - name: TS_KUBE_SECRET
+              value: ""
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsNonRoot: false
+          livenessProbe:
+            exec:
+              command: ["tailscale", "status"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: ts-state
+              mountPath: /tmp/ts-state
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+        {{- end }}
+        - name: agent
+          image: {{ .Values.agent.image | quote }}
+          imagePullPolicy: {{ .Values.agent.imagePullPolicy }}
+          env:
+            - name: ZENTHROS_AGENT_MODE
+              value: {{ .Values.agent.mode | quote }}
+            - name: ZENTHROS_CONTROLLER_ADDR
+              value: {{ .Values.agent.controllerAddress | quote }}
+            - name: ZENTHROS_NETWORK
+              value: {{ ternary "tailscale" "direct" .Values.tailscale.enabled | quote }}
+            - name: ZENTHROS_BACKEND_ID
+              value: {{ .Values.agent.backendID | quote }}
+            - name: ZENTHROS_BACKEND_TYPE
+              value: {{ .Values.agent.backendType | quote }}
+            - name: ZENTHROS_BACKEND_OWNERSHIP
+              value: {{ .Values.agent.ownership | quote }}
+            - name: ZENTHROS_NODE_SUPPLY
+              value: {{ .Values.agent.nodeSupply.enabled | quote }}
+            {{- if .Values.agent.nodeSupply.enabled }}
+            - name: ZENTHROS_NODE_SUPPLY_SERVER_URL
+              value: {{ required "agent.nodeSupply.serverURL: the cluster's API URL as its new nodes reach it" .Values.agent.nodeSupply.serverURL | quote }}
+            - name: ZENTHROS_NODE_SUPPLY_CLUSTER_DNS
+              value: {{ .Values.agent.nodeSupply.clusterDNS | default list | join "," | quote }}
+            - name: ZENTHROS_NODE_SUPPLY_CLUSTER_DOMAIN
+              value: {{ .Values.agent.nodeSupply.clusterDomain | default "" | quote }}
+            {{- end }}
+            {{- if .Values.clusterAutoscaler.enabled }}
+            - name: ZENTHROS_CA_PROXY_LISTEN
+              value: {{ printf ":%v" .Values.clusterAutoscaler.proxyPort | quote }}
+            - name: ZENTHROS_CA_PROXY_TLS_DIR
+              value: /etc/zenthros/ca-proxy
+            {{- end }}
+            - name: ZENTHROS_AGENT_VERSION
+              value: {{ .Values.agent.version | quote }}
+            - name: ZENTHROS_TLS_CERT
+              value: /etc/zenthros/tls/agent.crt
+            - name: ZENTHROS_TLS_KEY
+              value: /etc/zenthros/tls/agent.key
+            - name: ZENTHROS_TLS_CA
+              value: /etc/zenthros/tls/ca.crt
+            - name: ZENTHROS_TLS_SERVER_NAME
+              value: {{ .Values.agent.tls.serverName | quote }}
+            # The Secret the files come from: a renewed certificate goes there.
+            - name: ZENTHROS_TLS_SECRET
+              value: {{ .Values.agent.tls.secretName | quote }}
+            - name: ZENTHROS_AGENT_HEALTH_ADDR
+              value: {{ .Values.agent.healthAddress | quote }}
+            - name: ZENTHROS_AGENT_METRICS_ADDR
+              value: {{ .Values.agent.metricsAddress | quote }}
+            - name: ZENTHROS_AGENT_METRICS_PUBLIC
+              value: {{ .Values.agent.metricsPublic | default false | quote }}
+            - name: ZENTHROS_REPORT_LISTEN
+              value: {{ .Values.agent.reportListen | quote }}
+            - name: ZENTHROS_REPORT_ENDPOINT
+              value: {{ .Values.agent.reportEndpoint | default (printf "http://%s.%s.svc.cluster.local:%s" (include "zenthros-agent.fullname" .) .Release.Namespace (.Values.agent.reportListen | trimPrefix ":")) | quote }}
+            - name: ZENTHROS_REPORT_SPOOL
+              value: {{ .Values.agent.reportSpoolPath | quote }}
+            - name: ZENTHROS_AGENT_MAX_LOG_BYTES
+              value: {{ .Values.agent.maxLogBytes | default "8388608" | toString | quote }}
+            - name: ZENTHROS_AGENT_MAX_LOG_BYTES_HOURLY
+              value: {{ .Values.agent.maxLogBytesHourly | default "52428800" | toString | quote }}
+            {{- if .Values.agent.maxJobs }}
+            - name: ZENTHROS_AGENT_MAX_JOBS
+              value: {{ .Values.agent.maxJobs | quote }}
+            {{- end }}
+            - name: ZENTHROS_HEARTBEAT_INTERVAL
+              value: {{ .Values.agent.heartbeatInterval | default "15s" | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ZENTHROS_AGE_IDENTITY_SECRET
+              value: {{ .Values.agent.ageIdentitySecret | quote }}
+            - name: ZENTHROS_JOB_SECRETS_CLUSTER_ROLE
+              value: {{ include "zenthros-agent.fullname" . }}-job-secrets
+            - name: ZENTHROS_SERVICE_ACCOUNT
+              value: zenthros-agent
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+            - name: reports
+              containerPort: 9445
+            {{- if .Values.clusterAutoscaler.enabled }}
+            - name: ca-proxy
+              containerPort: {{ .Values.clusterAutoscaler.proxyPort }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+          volumeMounts:
+            - name: agent-tls
+              mountPath: /etc/zenthros/tls
+              readOnly: true
+            - name: report-spool
+              mountPath: /var/lib/zenthros
+            {{- if .Values.clusterAutoscaler.enabled }}
+            - name: ca-proxy-tls
+              mountPath: /etc/zenthros/ca-proxy
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- if .Values.tailscale.enabled }}
+        - name: ts-state
+          emptyDir: {}
+        {{- end }}
+        - name: agent-tls
+          secret:
+            secretName: {{ .Values.agent.tls.secretName }}
+        {{- if .Values.clusterAutoscaler.enabled }}
+        - name: ca-proxy-tls
+          secret:
+            secretName: {{ include "zenthros-agent.fullname" . }}-ca-proxy-tls
+            items:
+              - {key: ca.crt, path: ca.crt}
+              - {key: server.crt, path: server.crt}
+              - {key: server.key, path: server.key}
+        {{- end }}
+        - name: report-spool
+          {{- if .Values.agent.reportSpoolEmptyDir }}
+          emptyDir: {}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "zenthros-agent.fullname" . }}-reports
+          {{- end }}
+{{- end }}

@@ -1,0 +1,2803 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: zenthrosjobs.zenthros.ai
+spec:
+  group: zenthros.ai
+  names:
+    kind: ZenthrosJob
+    listKind: ZenthrosJobList
+    plural: zenthrosjobs
+    shortNames:
+    - zj
+    singular: zenthrosjob
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.target.backends[0]
+      name: Backend
+      type: string
+    - jsonPath: .spec.workload.kind
+      name: Kind
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: ZenthrosJob is the domain entity describing a distributed workload.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ZenthrosJobSpec describes intent, not infrastructure.
+            properties:
+              activeDeadlineSeconds:
+                description: |-
+                  ActiveDeadlineSeconds is the wall from status.startTime, or from
+                  status.submissionTime when start is unset. Empty or zero means no wall.
+                  Heartbeats renew the worker-lost lease; they do not move this deadline.
+                format: int64
+                minimum: 0
+                type: integer
+              cancel:
+                description: |-
+                  Cancel stops the job and keeps it: the workload is cancelled, any
+                  capacity it held is released, and the ZenthrosJob stays as Cancelled
+                  with its history until its TTL. Deleting the ZenthrosJob also cancels,
+                  but loses the record. Once true it cannot be set back to false.
+                type: boolean
+              capacity:
+                description: Capacity is the first-seat walk. Omitted acquire uses
+                  the mode default.
+                properties:
+                  acquire:
+                    description: |-
+                      Acquire is the first-seat walk. Empty/omitted uses the mode default;
+                      do not send [].
+                    items:
+                      description: SeatStep is one walk step for first seat (acquire)
+                        or worker-lost (replace).
+                      enum:
+                      - Backends
+                      - Reuse
+                      - Create
+                      type: string
+                    maxItems: 3
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: spec.capacity.acquire must not contain duplicates
+                      rule: self.all(x, self.exists_one(y, x == y))
+                type: object
+              compute:
+                description: |-
+                  Compute constrains placement. instanceType and purchaseOption apply to
+                  Create; CPU/RAM/GPU apply to Reuse/Backends fit. backendKind/region/zone
+                  remain scheduler-only when poolRef is set.
+                properties:
+                  architecture:
+                    description: Architecture pins the Catalog architecture, e.g.
+                      "x86_64" or "arm64".
+                    type: string
+                  backendKind:
+                    description: BackendKind narrows placement to "k8s", "vm" or "container".
+                    enum:
+                    - k8s
+                    - vm
+                    - container
+                    type: string
+                  cpu:
+                    description: CPU is the per-machine vCPU requirement, e.g. "8".
+                    type: string
+                  gpuCount:
+                    description: GPUCount is the minimum accelerator count per machine.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  gpuModel:
+                    description: GPUModel pins the accelerator model, e.g. "H100"
+                      or "A10G".
+                    type: string
+                  instanceType:
+                    description: |-
+                      InstanceType pins Create to a VMPool.spec.instancePolicy.allowedTypes
+                      entry. Ignored by Reuse and Backends.
+                    type: string
+                  lifespan:
+                    description: |-
+                      Lifespan is Ephemeral (delete native Job/Pod after GC) or Retain (keep the
+                      finished object for debug). Empty derives from gcPolicy and pool vs target.
+                    enum:
+                    - Ephemeral
+                    - Retain
+                    type: string
+                  maxHourlyPriceCents:
+                    description: |-
+                      MaxHourlyPriceCents is the maximum estimated hourly price, in US cents,
+                      accepted for a selected offer. Zero means unconstrained. Cents (not a
+                      float) keep the value exact across every API surface.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  memory:
+                    description: Memory is the per-machine memory requirement, e.g.
+                      "32Gi".
+                    type: string
+                  purchaseOption:
+                    description: |-
+                      PurchaseOption restricts the allowed purchase mode. OnDemand permits only
+                      On-Demand capacity; Spot permits Spot. Empty permits either.
+                    enum:
+                    - OnDemand
+                    - Spot
+                    type: string
+                  region:
+                    description: Region constrains placement to a provider region.
+                    type: string
+                  runtime:
+                    description: |-
+                      Runtime selects how a machine runs the job: on a VM systemd (default),
+                      containerd, or workspace-containers; in a container, process. Ignored on
+                      k8s backends. Do not infer this from image.
+                    enum:
+                    - systemd
+                    - containerd
+                    - workspace-containers
+                    - process
+                    type: string
+                  zone:
+                    description: Zone constrains placement to one availability zone
+                      within Region.
+                    type: string
+                type: object
+              dependsOn:
+                description: DependsOn chains ZenthrosJobs by name for multi-stage
+                  pipelines.
+                items:
+                  type: string
+                type: array
+              fleetRef:
+                description: |-
+                  FleetRef names the VMFleet that provides managed capacity: the seat
+                  walk tries its member pools, heaviest weight first, within the
+                  fleet's constraints. Excludes PoolRef.
+                minLength: 1
+                type: string
+              gcPolicy:
+                description: |-
+                  GCPolicy controls garbage collection of the job's resources after it
+                  finishes (Phase L). Nil applies the controller's configured defaults.
+                properties:
+                  cleanupPolicy:
+                    description: CleanupPolicy selects whether finished resources
+                      are deleted or retained.
+                    enum:
+                    - Delete
+                    - Retain
+                    type: string
+                  retainLogsForSeconds:
+                    description: |-
+                      RetainLogsForSeconds is how long the backend workload (and therefore its
+                      logs) is kept after completion before GC cancels it, independent of the CRD
+                      TTL. On k8s pod logs die with the workload; on a VM journald retention
+                      bounds how long journal entries survive unit removal.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  retainWorkdir:
+                    description: |-
+                      RetainWorkdir keeps the VM work directory (/var/lib/zenthros/jobs/<id>)
+                      when the job is cleaned up. Ignored by the k8s backend.
+                    type: boolean
+                  ttlSecondsAfterFinished:
+                    description: |-
+                      TTLSecondsAfterFinished is how long the CRD is kept after the job reaches a
+                      terminal phase before GC deletes it. Deletion cascades workload cleanup via
+                      the finalizer, so it also bounds the workload's lifetime. 0 deletes as soon
+                      as the job finishes.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                type: object
+              placement:
+                description: |-
+                  Placement constrains where the job's seats go: with or apart from
+                  other jobs, spread over zones or regions, only in some regions.
+                properties:
+                  affinity:
+                    description: |-
+                      Affinity seats the job in the same domain as another job's seat (data
+                      locality, same machine as a producer).
+                    items:
+                      description: |-
+                        JobAffinityTerm names other jobs, in this job's namespace, by name or by
+                        labels.
+                      properties:
+                        jobName:
+                          type: string
+                        jobSelector:
+                          description: |-
+                            A label selector is a label query over a set of resources. The result of matchLabels and
+                            matchExpressions are ANDed. An empty label selector matches all objects. A null
+                            label selector matches no objects.
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              items:
+                                description: |-
+                                  A label selector requirement is a selector that contains values, a key, and an operator that
+                                  relates the key and values.
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    type: string
+                                  operator:
+                                    description: |-
+                                      operator represents a key's relationship to a set of values.
+                                      Valid operators are In, NotIn, Exists and DoesNotExist.
+                                    type: string
+                                  values:
+                                    description: |-
+                                      values is an array of string values. If the operator is In or NotIn,
+                                      the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                      the values array must be empty. This array is replaced during a strategic
+                                      merge patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            matchLabels:
+                              additionalProperties:
+                                type: string
+                              description: |-
+                                matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                operator is "In", and the values array contains only "value". The requirements are ANDed.
+                              type: object
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        topologyKey:
+                          description: "TopologyKey names a placement domain. Every
+                            seat has one per key:\n\n\tmachine   the backend (one
+                            VM, one cluster)\n\tzone      the failure domain (AWS
+                            availability zone, GCP zone)\n\tregion    the provider
+                            region\n\tprovider  the cloud provider, or the operator's
+                            name for a site\n\nManaged machines take zone, region
+                            and provider from their CapacityRequest;\nmachines brought
+                            by their owner from BackendAccess.spec.compute (zone,\nregion)
+                            and its topology.zenthros.ai/provider label, which the
+                            operator\nsets, and otherwise from what the agent observed
+                            (instance metadata)."
+                          enum:
+                          - machine
+                          - zone
+                          - region
+                          - provider
+                          type: string
+                      required:
+                      - topologyKey
+                      type: object
+                      x-kubernetes-validations:
+                      - message: set exactly one of jobName and jobSelector
+                        rule: (has(self.jobName) && size(self.jobName) > 0) != has(self.jobSelector)
+                    maxItems: 8
+                    type: array
+                  antiAffinity:
+                    description: AntiAffinity keeps the job out of every domain a
+                      matching job is in.
+                    items:
+                      description: |-
+                        JobAffinityTerm names other jobs, in this job's namespace, by name or by
+                        labels.
+                      properties:
+                        jobName:
+                          type: string
+                        jobSelector:
+                          description: |-
+                            A label selector is a label query over a set of resources. The result of matchLabels and
+                            matchExpressions are ANDed. An empty label selector matches all objects. A null
+                            label selector matches no objects.
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              items:
+                                description: |-
+                                  A label selector requirement is a selector that contains values, a key, and an operator that
+                                  relates the key and values.
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    type: string
+                                  operator:
+                                    description: |-
+                                      operator represents a key's relationship to a set of values.
+                                      Valid operators are In, NotIn, Exists and DoesNotExist.
+                                    type: string
+                                  values:
+                                    description: |-
+                                      values is an array of string values. If the operator is In or NotIn,
+                                      the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                      the values array must be empty. This array is replaced during a strategic
+                                      merge patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            matchLabels:
+                              additionalProperties:
+                                type: string
+                              description: |-
+                                matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                operator is "In", and the values array contains only "value". The requirements are ANDed.
+                              type: object
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        topologyKey:
+                          description: "TopologyKey names a placement domain. Every
+                            seat has one per key:\n\n\tmachine   the backend (one
+                            VM, one cluster)\n\tzone      the failure domain (AWS
+                            availability zone, GCP zone)\n\tregion    the provider
+                            region\n\tprovider  the cloud provider, or the operator's
+                            name for a site\n\nManaged machines take zone, region
+                            and provider from their CapacityRequest;\nmachines brought
+                            by their owner from BackendAccess.spec.compute (zone,\nregion)
+                            and its topology.zenthros.ai/provider label, which the
+                            operator\nsets, and otherwise from what the agent observed
+                            (instance metadata)."
+                          enum:
+                          - machine
+                          - zone
+                          - region
+                          - provider
+                          type: string
+                      required:
+                      - topologyKey
+                      type: object
+                      x-kubernetes-validations:
+                      - message: set exactly one of jobName and jobSelector
+                        rule: (has(self.jobName) && size(self.jobName) > 0) != has(self.jobSelector)
+                    maxItems: 8
+                    type: array
+                  pack:
+                    description: |-
+                      Pack puts every member of the job in one domain (one zone, one
+                      machine). It concerns the members of a distributed job.
+                    properties:
+                      topologyKey:
+                        description: "TopologyKey names a placement domain. Every
+                          seat has one per key:\n\n\tmachine   the backend (one VM,
+                          one cluster)\n\tzone      the failure domain (AWS availability
+                          zone, GCP zone)\n\tregion    the provider region\n\tprovider
+                          \ the cloud provider, or the operator's name for a site\n\nManaged
+                          machines take zone, region and provider from their CapacityRequest;\nmachines
+                          brought by their owner from BackendAccess.spec.compute (zone,\nregion)
+                          and its topology.zenthros.ai/provider label, which the operator\nsets,
+                          and otherwise from what the agent observed (instance metadata)."
+                        enum:
+                        - machine
+                        - zone
+                        - region
+                        - provider
+                        type: string
+                    required:
+                    - topologyKey
+                    type: object
+                  regions:
+                    description: Regions allows only seats in these regions.
+                    items:
+                      type: string
+                    maxItems: 16
+                    type: array
+                  separateMachines:
+                    description: |-
+                      SeparateMachines puts each member of a distributed job on its own
+                      machine. Default true for distributed jobs.
+                    type: boolean
+                  spread:
+                    description: |-
+                      Spread keeps the jobs JobSelector matches (this one included) balanced
+                      across domains: after this job is seated, no domain has more than
+                      maxSkew jobs over the least loaded one.
+                    items:
+                      description: SpreadRule balances matching jobs across domains
+                        of TopologyKey.
+                      properties:
+                        jobSelector:
+                          description: |-
+                            JobSelector picks the jobs, in this job's namespace, that are counted.
+                            Empty counts the jobs with all of this job's labels.
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              items:
+                                description: |-
+                                  A label selector requirement is a selector that contains values, a key, and an operator that
+                                  relates the key and values.
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    type: string
+                                  operator:
+                                    description: |-
+                                      operator represents a key's relationship to a set of values.
+                                      Valid operators are In, NotIn, Exists and DoesNotExist.
+                                    type: string
+                                  values:
+                                    description: |-
+                                      values is an array of string values. If the operator is In or NotIn,
+                                      the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                      the values array must be empty. This array is replaced during a strategic
+                                      merge patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            matchLabels:
+                              additionalProperties:
+                                type: string
+                              description: |-
+                                matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                operator is "In", and the values array contains only "value". The requirements are ANDed.
+                              type: object
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        maxSkew:
+                          default: 1
+                          description: MaxSkew is the most a domain may have over
+                            the least loaded one.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        minDomains:
+                          description: |-
+                            MinDomains counts domains that have no matching job and no candidate
+                            seat as empty until there are this many: with minDomains 2 and one
+                            zone to offer, a second job does not go to the same zone.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        topologyKey:
+                          description: "TopologyKey names a placement domain. Every
+                            seat has one per key:\n\n\tmachine   the backend (one
+                            VM, one cluster)\n\tzone      the failure domain (AWS
+                            availability zone, GCP zone)\n\tregion    the provider
+                            region\n\tprovider  the cloud provider, or the operator's
+                            name for a site\n\nManaged machines take zone, region
+                            and provider from their CapacityRequest;\nmachines brought
+                            by their owner from BackendAccess.spec.compute (zone,\nregion)
+                            and its topology.zenthros.ai/provider label, which the
+                            operator\nsets, and otherwise from what the agent observed
+                            (instance metadata)."
+                          enum:
+                          - machine
+                          - zone
+                          - region
+                          - provider
+                          type: string
+                      required:
+                      - topologyKey
+                      type: object
+                    maxItems: 4
+                    type: array
+                type: object
+              poolRef:
+                description: |-
+                  PoolRef names the VMPool that must provide managed capacity for this
+                  job. Combines with Target.Backends.
+                minLength: 1
+                type: string
+              priority:
+                description: |-
+                  Priority ranks waiters of the same exclusive unit. Higher admits first.
+                  Equal priority stays FIFO (creationTimestamp, then name). Occupancy 1/1
+                  for exclusive VM/raycluster is unchanged. It ranks one Workspace's own
+                  jobs only: while jobs of several Workspaces wait for a unit, the queue
+                  is FIFO.
+                format: int32
+                minimum: 0
+                type: integer
+              resilience:
+                description: |-
+                  Resilience controls worker-lost recovery. It is not RetryPolicy (submit
+                  backoff) and not gcPolicy (post-success cleanup).
+                properties:
+                  jobGrace:
+                    description: |-
+                      JobGrace is the Allocated/running silence window before WORKER_LOST.
+                      Empty uses the cluster default (45s). Must be at least twice the
+                      heartbeat interval; shorter values are raised to that floor.
+                    type: string
+                  onWorkerLost:
+                    default: Reschedule
+                    description: |-
+                      OnWorkerLost is Fail or Reschedule. Empty defaults to Reschedule.
+                      Fail ignores Replace.
+                    enum:
+                    - Fail
+                    - Reschedule
+                    type: string
+                  preemptNotice:
+                    description: |-
+                      PreemptNotice says how the process learns its machine is being taken
+                      back. The agent always writes the notice to $ZENTHROS_PREEMPT_FILE; a
+                      signal is sent only when asked for here.
+                    properties:
+                      signal:
+                        description: |-
+                          Signal is sent to the process after the notice file is written.
+                          Empty sends none: the process polls the file (the SDK does).
+                        enum:
+                        - SIGTERM
+                        - SIGINT
+                        - SIGUSR1
+                        - SIGUSR2
+                        type: string
+                    type: object
+                  replace:
+                    description: |-
+                      Replace is the worker-lost walk. Empty/omitted uses the mode default;
+                      do not send []. Ignored when OnWorkerLost is Fail.
+                    items:
+                      description: SeatStep is one walk step for first seat (acquire)
+                        or worker-lost (replace).
+                      enum:
+                      - Backends
+                      - Reuse
+                      - Create
+                      type: string
+                    maxItems: 3
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: spec.resilience.replace must not contain duplicates
+                      rule: self.all(x, self.exists_one(y, x == y))
+                  workerLostRetryLimit:
+                    default: 3
+                    description: WorkerLostRetryLimit bounds Reschedule replacements.
+                      Empty defaults to 3.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+              resumeFrom:
+                description: |-
+                  ResumeFrom starts this job from the last acked checkpoint of an ended job
+                  of its namespace. It names the job, never a place: the controller reads
+                  the cursor, and the runner checks each blob against its digest.
+                properties:
+                  job:
+                    description: Job is the name of a job of this namespace.
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: 'UID is that job''s: another job of the same name
+                      is another job.'
+                    minLength: 1
+                    type: string
+                required:
+                - job
+                - uid
+                type: object
+              target:
+                description: Target selects enrolled backends. Combines with PoolRef.
+                properties:
+                  backends:
+                    description: |-
+                      Backends is the ordered enrolled backend id list. Token any is last-only
+                      and means Scheduler among enrolled backends outside the named prefix.
+                    items:
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    maxItems: 16
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  rayCluster:
+                    description: |-
+                      RayCluster runs this RayJob on an existing RayCluster instead of a
+                      dedicated one. The cluster must be in the job's namespace on the one
+                      backend named in Backends. Zenthros owns only the per-job RayJob and
+                      never changes the cluster.
+                    properties:
+                      name:
+                        description: Name is the exact RayCluster name.
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace must equal the ZenthrosJob namespace. It is explicit so a
+                          cross-Workspace reference is rejected rather than silently redirected.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: spec.target.backends must be unique
+                  rule: '!has(self.backends) || self.backends.all(x, self.backends.exists_one(y,
+                    x == y))'
+                - message: any may appear only last in spec.target.backends
+                  rule: '!has(self.backends) || size(self.backends.filter(x, x ==
+                    ''any'')) == 0 || (size(self.backends.filter(x, x == ''any''))
+                    == 1 && self.backends[self.backends.size()-1] == ''any'')'
+              workload:
+                description: Workload is the logical work to execute.
+                properties:
+                  kind:
+                    description: Kind selects the native resource the adapter creates.
+                    enum:
+                    - Job
+                    - RayJob
+                    - RayCluster
+                    - SparkApplication
+                    - Manifest
+                    type: string
+                  template:
+                    description: Template is the logical workload specification.
+                    properties:
+                      args:
+                        description: |-
+                          Args are appended to Command verbatim (no shell interpretation). Only valid
+                          with Command.
+                        items:
+                          type: string
+                        type: array
+                      artifacts:
+                        description: Artifacts references object-storage URIs for
+                          inputs and outputs.
+                        properties:
+                          input:
+                            description: Input URI, e.g. s3://bucket/dataset.
+                            type: string
+                          output:
+                            description: Output URI, e.g. s3://bucket/models.
+                            type: string
+                        type: object
+                      command:
+                        description: |-
+                          Command is the structured executable, e.g. ["python", "train.py"]. Mutually
+                          exclusive with Entrypoint. Tokens pass to the backend uninterpreted by any
+                          shell: k8s renders them quoted into the RayJob entrypoint, a VM runs them
+                          directly as the systemd ExecStart.
+                        items:
+                          type: string
+                        minItems: 1
+                        type: array
+                      distribution:
+                        description: |-
+                          Distribution splits the Job into Independent tasks across machines.
+                          Workers still sizes each task.
+                        properties:
+                          count:
+                            description: Count is how many tasks run.
+                            format: int32
+                            maximum: 256
+                            minimum: 1
+                            type: integer
+                          failurePolicy:
+                            description: FailurePolicy is FailFast (default) or ContinueOnFailure.
+                            enum:
+                            - FailFast
+                            - ContinueOnFailure
+                            type: string
+                          mode:
+                            description: Mode is Independent.
+                            enum:
+                            - Independent
+                            type: string
+                          tasksPerNode:
+                            description: |-
+                              TasksPerNode is how many tasks may share one machine; the machine must
+                              run that many jobs at once. Default 1.
+                            format: int32
+                            maximum: 64
+                            minimum: 1
+                            type: integer
+                        required:
+                        - count
+                        - mode
+                        type: object
+                      entrypoint:
+                        description: |-
+                          Entrypoint is the shell string submitted to the engine, e.g. "python train.py".
+                          Mutually exclusive with the structured Command; prefer Command, which runs
+                          without shell interpretation (Phase O).
+                        type: string
+                      env:
+                        description: Env holds plain name/value pairs injected into
+                          the workload process.
+                        items:
+                          description: EnvVar is a plain environment variable.
+                          properties:
+                            name:
+                              description: Name is a POSIX environment variable name.
+                              maxLength: 256
+                              pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                              type: string
+                            value:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      image:
+                        description: |-
+                          Image is the runtime-only container image (no user code baked in): an
+                          OCI reference, [registry[:port]/]path[:tag][@digest]. Agents hand it to
+                          root-run tooling, so nothing outside that grammar is admitted. A Job
+                          that runs as a process on the machine (runtime systemd) needs none;
+                          every containerized runtime does, which admission checks once the
+                          runtime is resolved.
+                        maxLength: 512
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$
+                        type: string
+                      manifest:
+                        description: |-
+                          Manifest is the Kubernetes object a Manifest workload applies and how
+                          to read its status. Valid only when workload.kind is Manifest.
+                        properties:
+                          endpointFrom:
+                            description: |-
+                              EndpointFrom reads the URLs a Service object publishes in its own
+                              status (an InferenceService's status.url) into status.endpoints, once
+                              the object runs by its contract. Only with lifecycle Service.
+                            items:
+                              description: EndpointSource is where a Manifest's object
+                                publishes one URL.
+                              properties:
+                                name:
+                                  description: Name names the endpoint in status.endpoints.
+                                  maxLength: 63
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
+                                path:
+                                  description: |-
+                                    Path is the dotted path of a string field holding an absolute URL,
+                                    e.g. status.url.
+                                  pattern: ^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$
+                                  type: string
+                              required:
+                              - name
+                              - path
+                              type: object
+                            maxItems: 8
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          failureWhen:
+                            description: FailureWhen lists conditions any of which
+                              means the object failed.
+                            items:
+                              description: ConditionMatch matches one entry of the
+                                object's status.conditions.
+                              properties:
+                                status:
+                                  default: "True"
+                                  description: Status is the condition status that
+                                    matches.
+                                  enum:
+                                  - "True"
+                                  - "False"
+                                  - Unknown
+                                  type: string
+                                type:
+                                  description: Type is the condition type, e.g. Succeeded.
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - type
+                              type: object
+                            type: array
+                          lifecycle:
+                            description: |-
+                              Lifecycle is RunToCompletion (default) or Service, for an object that
+                              runs until it is cancelled.
+                            enum:
+                            - RunToCompletion
+                            - Service
+                            type: string
+                          logSelector:
+                            description: |-
+                              LogSelector picks the pods whose logs are the job's logs. Without it,
+                              the pods the object owns (through up to three owner levels) are read.
+                            properties:
+                              matchExpressions:
+                                description: matchExpressions is a list of label selector
+                                  requirements. The requirements are ANDed.
+                                items:
+                                  description: |-
+                                    A label selector requirement is a selector that contains values, a key, and an operator that
+                                    relates the key and values.
+                                  properties:
+                                    key:
+                                      description: key is the label key that the selector
+                                        applies to.
+                                      type: string
+                                    operator:
+                                      description: |-
+                                        operator represents a key's relationship to a set of values.
+                                        Valid operators are In, NotIn, Exists and DoesNotExist.
+                                      type: string
+                                    values:
+                                      description: |-
+                                        values is an array of string values. If the operator is In or NotIn,
+                                        the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                        the values array must be empty. This array is replaced during a strategic
+                                        merge patch.
+                                      items:
+                                        type: string
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                  required:
+                                  - key
+                                  - operator
+                                  type: object
+                                type: array
+                                x-kubernetes-list-type: atomic
+                              matchLabels:
+                                additionalProperties:
+                                  type: string
+                                description: |-
+                                  matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                  map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                  operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                type: object
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          object:
+                            description: |-
+                              Object is the object to apply, as written. Its namespace, if set, must
+                              be the job's; its name is replaced by the job's.
+                            type: object
+                            x-kubernetes-embedded-resource: true
+                            x-kubernetes-preserve-unknown-fields: true
+                          phasePath:
+                            description: PhasePath reads a phase string instead of
+                              conditions.
+                            properties:
+                              failed:
+                                description: Failed lists phases that mean failure.
+                                items:
+                                  type: string
+                                type: array
+                              path:
+                                description: Path is the dotted path of the phase
+                                  field, e.g. status.state.phase.
+                                pattern: ^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$
+                                type: string
+                              running:
+                                description: Running lists phases that mean the object
+                                  runs.
+                                items:
+                                  type: string
+                                type: array
+                              succeeded:
+                                description: Succeeded lists phases that mean success.
+                                items:
+                                  type: string
+                                type: array
+                            required:
+                            - path
+                            type: object
+                          runningWhen:
+                            description: RunningWhen lists conditions any of which
+                              means the object runs.
+                            items:
+                              description: ConditionMatch matches one entry of the
+                                object's status.conditions.
+                              properties:
+                                status:
+                                  default: "True"
+                                  description: Status is the condition status that
+                                    matches.
+                                  enum:
+                                  - "True"
+                                  - "False"
+                                  - Unknown
+                                  type: string
+                                type:
+                                  description: Type is the condition type, e.g. Succeeded.
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - type
+                              type: object
+                            type: array
+                          successWhen:
+                            description: SuccessWhen lists conditions any of which
+                              means the object succeeded.
+                            items:
+                              description: ConditionMatch matches one entry of the
+                                object's status.conditions.
+                              properties:
+                                status:
+                                  default: "True"
+                                  description: Status is the condition status that
+                                    matches.
+                                  enum:
+                                  - "True"
+                                  - "False"
+                                  - Unknown
+                                  type: string
+                                type:
+                                  description: Type is the condition type, e.g. Succeeded.
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - type
+                              type: object
+                            type: array
+                        required:
+                        - object
+                        type: object
+                        x-kubernetes-validations:
+                        - message: 'endpointFrom reads a Service''s URLs; set lifecycle:
+                            Service'
+                          rule: '!has(self.endpointFrom) || size(self.endpointFrom)
+                            == 0 || (has(self.lifecycle) && self.lifecycle == ''Service'')'
+                      restartPolicy:
+                        description: RestartPolicy configures backend-native resilience
+                          (delegated, not reimplemented).
+                        properties:
+                          backoffLimit:
+                            description: |-
+                              BackoffLimit is how many times the job's process is re-run after it
+                              fails, on every target: a Kubernetes Job's own backoffLimit, KubeRay's
+                              for a RayJob, and the controller's on a machine (each re-run is a new
+                              unit, zenthros-<id>-a<n>, with ZENTHROS_ATTEMPT set). A lost worker is
+                              not a failure of the process and does not count. SparkApplication
+                              restarts through spark.restartPolicy and a Manifest through its own
+                              object, so neither takes it.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                        type: object
+                      secretSources:
+                        description: |-
+                          SecretSources carries destination-local references only. Secret values must
+                          never be placed in this API or resolved by the controller.
+                        items:
+                          description: |-
+                            SecretSourceRef identifies secret material that is resolved only in the
+                            destination environment. It never contains a secret value.
+                          properties:
+                            awsSecretsManager:
+                              description: |-
+                                AWSSecretsManager identifies an AWS Secrets Manager secret resolved by the
+                                destination worker identity. Required when type is aws-secrets-manager.
+                              properties:
+                                jsonKey:
+                                  description: |-
+                                    JSONKey extracts one field from a JSON secret string. When omitted the
+                                    agent materializes the raw secret string.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[-._a-zA-Z0-9]+$
+                                  type: string
+                                region:
+                                  description: |-
+                                    Region is the AWS region that hosts the secret. The destination agent
+                                    uses this region and does not inherit controller or provisioner region.
+                                  maxLength: 32
+                                  minLength: 1
+                                  pattern: ^[a-z]{2}-[a-z0-9-]+-\d+$
+                                  type: string
+                                secretId:
+                                  description: SecretID is a secret name or full ARN.
+                                  maxLength: 512
+                                  minLength: 1
+                                  pattern: ^(arn:aws:secretsmanager:[a-z0-9-]+:\d{12}:secret:.+|[A-Za-z0-9/_+=.@-]+)$
+                                  type: string
+                                versionId:
+                                  description: VersionID pins a specific secret version.
+                                    Mutually exclusive with VersionStage.
+                                  pattern: ^[A-Za-z0-9-]+$
+                                  type: string
+                                versionStage:
+                                  description: |-
+                                    VersionStage selects a staging label such as AWSCURRENT. When omitted
+                                    together with VersionID, the agent reads AWSCURRENT at resolve time.
+                                  pattern: ^[A-Za-z0-9/_+=.@-]+$
+                                  type: string
+                              required:
+                              - region
+                              - secretId
+                              type: object
+                              x-kubernetes-validations:
+                              - message: versionId and versionStage are mutually exclusive
+                                rule: '!has(self.versionId) || !has(self.versionStage)'
+                            encryptedPayload:
+                              description: |-
+                                EncryptedPayload is age ciphertext sealed to destination recipients.
+                                Required when type is encrypted-payload. It never contains plaintext.
+                              properties:
+                                ciphertext:
+                                  description: Ciphertext is ASCII-armored age ciphertext.
+                                  maxLength: 65536
+                                  minLength: 64
+                                  type: string
+                                keyId:
+                                  description: KeyID is an optional short fingerprint
+                                    of the primary recipient.
+                                  maxLength: 32
+                                  pattern: ^[A-Za-z0-9]+$
+                                  type: string
+                                recipients:
+                                  description: Recipients are the age1 X25519 public
+                                    keys this ciphertext was sealed to.
+                                  items:
+                                    type: string
+                                  maxItems: 8
+                                  minItems: 1
+                                  type: array
+                                workspaceSecret:
+                                  description: |-
+                                    WorkspaceSecret is the Workspace secret the controller sealed this
+                                    from, never set in a ZenthrosJob. age seals with fresh randomness, so
+                                    a resent job is known by this name rather than by its ciphertext.
+                                  type: string
+                              required:
+                              - ciphertext
+                              - recipients
+                              type: object
+                              x-kubernetes-validations:
+                              - message: 'workspaceSecret is set by the controller
+                                  when it seals a Workspace secret: name it with type
+                                  workspace-secret'
+                                rule: '!has(self.workspaceSecret)'
+                            key:
+                              description: Key selects one entry in the destination
+                                Kubernetes Secret.
+                              maxLength: 253
+                              minLength: 1
+                              pattern: ^[-._a-zA-Z0-9]+$
+                              type: string
+                            materialization:
+                              description: Materialization controls how the destination
+                                workload receives the value.
+                              properties:
+                                envName:
+                                  description: |-
+                                    EnvName overrides the environment variable name. When omitted, the Secret
+                                    key (or AWS JSON key / secret name) is normalized to upper snake case.
+                                    Required for encrypted-payload env materialization.
+                                  pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                  type: string
+                                mode:
+                                  description: Mode selects an environment variable
+                                    or a read-only 0600 file.
+                                  enum:
+                                  - env
+                                  - file
+                                  type: string
+                                path:
+                                  description: |-
+                                    Path overrides the absolute file path. When omitted, the value is mounted
+                                    below /var/run/zenthros/secrets/<secret-name>/<key>.
+                                  pattern: ^/[^\n\r]*$
+                                  type: string
+                              required:
+                              - mode
+                              type: object
+                            name:
+                              description: |-
+                                Name is the destination Kubernetes Secret name; for workspace-secret,
+                                the Workspace secret's name.
+                              maxLength: 253
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                              type: string
+                            namespace:
+                              description: |-
+                                Namespace is the destination Kubernetes namespace containing the Secret.
+                                It must equal the namespace selected for the workload.
+                              maxLength: 63
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                            type:
+                              description: Type selects the destination-side resolver.
+                              enum:
+                              - k8s-secret
+                              - aws-secrets-manager
+                              - encrypted-payload
+                              - workspace-secret
+                              type: string
+                          required:
+                          - materialization
+                          - type
+                          type: object
+                          x-kubernetes-validations:
+                          - message: unsupported secret source type
+                            rule: self.type == 'k8s-secret' || self.type == 'aws-secrets-manager'
+                              || self.type == 'encrypted-payload' || self.type ==
+                              'workspace-secret'
+                          - message: workspace-secret requires name and forbids other
+                              source coordinates
+                            rule: self.type != 'workspace-secret' || (has(self.name)
+                              && !has(self.namespace) && !has(self.key) && !has(self.awsSecretsManager)
+                              && !has(self.encryptedPayload))
+                          - message: k8s-secret requires namespace, name, and key
+                            rule: self.type != 'k8s-secret' || (has(self.namespace)
+                              && has(self.name) && has(self.key) && !has(self.awsSecretsManager)
+                              && !has(self.encryptedPayload))
+                          - message: aws-secrets-manager requires awsSecretsManager
+                              and forbids Kubernetes coordinates
+                            rule: self.type != 'aws-secrets-manager' || (has(self.awsSecretsManager)
+                              && !has(self.namespace) && !has(self.name) && !has(self.key)
+                              && !has(self.encryptedPayload))
+                          - message: encrypted-payload requires encryptedPayload and
+                              forbids other source coordinates
+                            rule: self.type != 'encrypted-payload' || (has(self.encryptedPayload)
+                              && !has(self.namespace) && !has(self.name) && !has(self.key)
+                              && !has(self.awsSecretsManager))
+                          - message: encrypted-payload env materialization requires
+                              envName
+                            rule: self.type != 'encrypted-payload' || self.materialization.mode
+                              != 'env' || has(self.materialization.envName)
+                          - message: key cannot be . or ..
+                            rule: self.type != 'k8s-secret' || (self.key != '.' &&
+                              self.key != '..')
+                          - message: path is only valid for file materialization
+                            rule: self.materialization.mode != 'env' || !has(self.materialization.path)
+                          - message: envName is only valid for env materialization
+                            rule: self.materialization.mode != 'file' || !has(self.materialization.envName)
+                        type: array
+                      service:
+                        description: |-
+                          Service makes a Job a Service: a process that listens on these ports
+                          and runs until it is cancelled. It never Succeeds; its agent publishes
+                          each port's URL in status.endpoints once the port accepts connections.
+                          Valid only when workload.kind is Job.
+                        properties:
+                          ports:
+                            description: Ports the process listens on, on every interface
+                              of its machine.
+                            items:
+                              description: |-
+                                ServicePort is one port a Service listens on. Not 8080 or 8081: the
+                                Zenthros agent holds them on the machine (ExposedPort).
+                              properties:
+                                name:
+                                  description: Name names the port's endpoint in status.endpoints.
+                                  maxLength: 63
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
+                                port:
+                                  description: Port is the port number the process
+                                    listens on.
+                                  format: int32
+                                  maximum: 65535
+                                  minimum: 1
+                                  type: integer
+                                protocol:
+                                  default: HTTP
+                                  description: Protocol is HTTP (the default) or TCP.
+                                  enum:
+                                  - HTTP
+                                  - TCP
+                                  type: string
+                              required:
+                              - name
+                              - port
+                              type: object
+                              x-kubernetes-validations:
+                              - message: 8080 and 8081 are the Zenthros agent's metrics
+                                  and health ports on the machine; a Service cannot
+                                  listen there
+                                rule: self.port != 8080 && self.port != 8081
+                            maxItems: 8
+                            minItems: 1
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                            x-kubernetes-validations:
+                            - message: each port appears once
+                              rule: self.all(p, self.exists_one(q, q.port == p.port))
+                          stopAfterSeconds:
+                            description: |-
+                              StopAfterSeconds stops the Service once it has served this long,
+                              from its first start (a re-run or a new machine does not move it):
+                              a server nobody remembers does not run, and cost, forever. It ends
+                              Cancelled, reason STOP_AFTER. spec.activeDeadlineSeconds, which
+                              fails a job, does not apply to a Service.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                        required:
+                        - ports
+                        type: object
+                      source:
+                        description: Source declares where the user code comes from
+                          (exactly one mode set).
+                        properties:
+                          git:
+                            description: |-
+                              Git repository cloned into the workload (production). Use the SSH URL
+                              (git@github.com:OWNER/REPO.git) when authenticating with a deploy key.
+                            type: string
+                          gitRef:
+                            description: 'GitRef is the branch/tag/hash to check out
+                              (default: HEAD of the default branch).'
+                            type: string
+                          gitSecretRef:
+                            description: |-
+                              GitSecretRef names an opaque Secret (keys: ssh, known_hosts) for SSH auth.
+                              Empty means a public repo (no auth). Referenced by name only, never read here.
+                            type: string
+                          hostPath:
+                            description: HostPath mounts a node directory (dev/local,
+                              single-node only).
+                            type: string
+                          inline:
+                            description: |-
+                              Inline is a base64-encoded tarball of user code embedded in the submission.
+                              It lives in the object, which etcd rewrites on every status write: the
+                              controller admits 512 KiB by default and the API refuses more than 1 MiB.
+                              Larger projects should use git or an artifact.
+                            maxLength: 1048576
+                            type: string
+                          ref:
+                            description: |-
+                              Ref names a ConfigMap in the job's namespace whose binaryData
+                              "source.tar.gz" is a gzipped tarball of user code. It keeps the code out
+                              of the ZenthrosJob, which etcd rewrites on every status write. The
+                              Controller reads it at each Submit, so it must outlive the job's run;
+                              `zctl run` creates it content-addressed and owned by the job.
+                            maxLength: 253
+                            type: string
+                          s3:
+                            description: S3 bundle (zip/tar) downloaded and mounted
+                              (production).
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: hostPath, git, s3, inline, and ref are mutually
+                            exclusive
+                          rule: '(has(self.hostPath) ? 1 : 0) + (has(self.git) ? 1
+                            : 0) + (has(self.s3) ? 1 : 0) + (has(self.inline) ? 1
+                            : 0) + (has(self.ref) ? 1 : 0) <= 1'
+                      spark:
+                        description: |-
+                          Spark contains Spark-native intent. It is valid only when workload.kind is
+                          SparkApplication; common image, env, source, and workspace fields stay outside it.
+                        properties:
+                          arguments:
+                            description: Arguments are passed to the Spark driver
+                              without shell interpretation.
+                            items:
+                              type: string
+                            type: array
+                          driver:
+                            description: SparkResourceSpec declares CPU and memory
+                              for one Spark role.
+                            properties:
+                              cpu:
+                                type: string
+                              memory:
+                                type: string
+                            type: object
+                          executor:
+                            description: SparkResourceSpec declares CPU and memory
+                              for one Spark role.
+                            properties:
+                              cpu:
+                                type: string
+                              memory:
+                                type: string
+                            type: object
+                          executorCount:
+                            description: ExecutorCount is the fixed initial executor
+                              count. Zero defaults to one.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          mainApplicationFile:
+                            description: MainApplicationFile is a local://, s3a://,
+                              or other Spark-supported application URI.
+                            minLength: 1
+                            type: string
+                          mainClass:
+                            description: MainClass is required for JVM applications
+                              and omitted for Python applications.
+                            type: string
+                          restartPolicy:
+                            description: SparkRestartPolicy is delegated to Spark
+                              Operator.
+                            properties:
+                              maxRestartAttempts:
+                                description: MaxRestartAttempts bounds operator-managed
+                                  restarts.
+                                format: int32
+                                minimum: 0
+                                type: integer
+                              type:
+                                default: Never
+                                description: Type selects the Spark Operator restart
+                                  behavior.
+                                enum:
+                                - Never
+                                - Always
+                                - OnFailure
+                                - OnInfrastructureFailure
+                                type: string
+                            type: object
+                          sparkConf:
+                            additionalProperties:
+                              type: string
+                            description: SparkConf contains Spark-native key/value
+                              configuration.
+                            type: object
+                        required:
+                        - mainApplicationFile
+                        type: object
+                      storageClass:
+                        description: StorageClass referenced by the workload; admin
+                          pre-provisions it.
+                        type: string
+                      workers:
+                        description: Workers describes the worker group sizing.
+                        properties:
+                          cpu:
+                            description: CPU request per worker, e.g. "2".
+                            type: string
+                          gpusPerNode:
+                            description: GPUsPerNode requested per worker.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          interconnect:
+                            description: Interconnect preference, e.g. "nvlink" (intra-node,
+                              owned by Ray/Spark).
+                            type: string
+                          max:
+                            description: Max replica count.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          memory:
+                            description: Memory request per worker, e.g. "8Gi".
+                            type: string
+                          min:
+                            description: Min replica count.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          resourceClass:
+                            description: ResourceClass is a coarse label the scheduler
+                              uses for placement.
+                            type: string
+                        required:
+                        - max
+                        - min
+                        type: object
+                        x-kubernetes-validations:
+                        - message: max must be >= min
+                          rule: self.max >= self.min
+                      workingDir:
+                        description: |-
+                          WorkingDir is the working directory the workload runs in. Overrides the
+                          working directory derived from Source (the mount path on k8s, the prepared
+                          source dir on a VM). Use an absolute path valid on the target backend.
+                        maxLength: 4096
+                        pattern: ^/[^\x00-\x1f\x7f]*$
+                        type: string
+                    type: object
+                required:
+                - kind
+                - template
+                type: object
+                x-kubernetes-validations:
+                - message: spark must be set only for SparkApplication workloads
+                  rule: 'self.kind == ''SparkApplication'' ? has(self.template.spark)
+                    : !has(self.template.spark)'
+                - message: manifest must be set exactly when workload.kind is Manifest
+                  rule: 'self.kind == ''Manifest'' ? has(self.template.manifest) :
+                    !has(self.template.manifest)'
+                - message: 'a Manifest carries its own object: entrypoint, command,
+                    image, source and secretSources do not apply'
+                  rule: self.kind != 'Manifest' || (!has(self.template.entrypoint)
+                    && !has(self.template.command) && !has(self.template.image) &&
+                    !has(self.template.secretSources) && (!has(self.template.source)
+                    || (!has(self.template.source.hostPath) && !has(self.template.source.git)
+                    && !has(self.template.source.s3) && !has(self.template.source.inline)
+                    && !has(self.template.source.ref))))
+                - message: Job and RayJob workloads require exactly one of entrypoint
+                    or command
+                  rule: self.kind in ['SparkApplication', 'RayCluster', 'Manifest']
+                    || (has(self.template.entrypoint) != has(self.template.command))
+                - message: a RayCluster runs no command; submit RayJobs to it with
+                    spec.target.rayCluster
+                  rule: self.kind != 'RayCluster' || (!has(self.template.entrypoint)
+                    && !has(self.template.command))
+                - message: args requires command
+                  rule: self.kind == 'SparkApplication' || !has(self.template.args)
+                    || has(self.template.command)
+                - message: restartPolicy.backoffLimit does not apply to SparkApplication
+                    (use spark.restartPolicy) or Manifest (the object sets its own)
+                  rule: '!(self.kind in [''SparkApplication'', ''Manifest'']) || !has(self.template.restartPolicy)
+                    || !has(self.template.restartPolicy.backoffLimit)'
+                - message: distribution splits a Job; RayJob, RayCluster, SparkApplication
+                    and Manifest distribute through their own operator
+                  rule: '!has(self.template.distribution) || self.kind == ''Job'''
+                - message: 'service makes a Job a Service; a Manifest declares lifecycle:
+                    Service and endpointFrom instead'
+                  rule: '!has(self.template.service) || self.kind == ''Job'''
+                - message: a Service is one replica; distribution does not apply
+                  rule: '!has(self.template.service) || !has(self.template.distribution)
+                    || self.template.distribution.count <= 1'
+              workspace:
+                description: |-
+                  Workspace is an optional assertion checked against the identity derived
+                  from metadata.namespace. It never overrides namespace authorization.
+                type: string
+            required:
+            - workload
+            type: object
+            x-kubernetes-validations:
+            - message: spec.cancel cannot be unset once true
+              rule: '!has(oldSelf.cancel) || !oldSelf.cancel || (has(self.cancel)
+                && self.cancel)'
+            - message: spec.target.rayCluster is valid only for RayJob workloads
+              rule: '!(has(self.target) && has(self.target.rayCluster)) || self.workload.kind
+                == ''RayJob'''
+            - message: spec.target.rayCluster requires exactly one named backend in
+                spec.target.backends
+              rule: '!(has(self.target) && has(self.target.rayCluster)) || (has(self.target.backends)
+                && size(self.target.backends) == 1 && self.target.backends[0] != ''any'')'
+            - message: spec.target.rayCluster cannot be combined with spec.poolRef
+              rule: '!(has(self.target) && has(self.target.rayCluster)) || !has(self.poolRef)
+                || size(self.poolRef) == 0'
+            - message: spec.capacity.acquire Backends requires spec.target.backends
+              rule: '!(has(self.capacity) && has(self.capacity.acquire) && (''Backends''
+                in self.capacity.acquire) && !(has(self.target) && has(self.target.backends)
+                && size(self.target.backends) > 0))'
+            - message: spec.capacity.acquire Reuse/Create require spec.poolRef, spec.fleetRef
+                or scheduler mode
+              rule: '!(has(self.capacity) && has(self.capacity.acquire) && ((''Reuse''
+                in self.capacity.acquire) || (''Create'' in self.capacity.acquire))
+                && !(has(self.poolRef) && size(self.poolRef) > 0) && !has(self.fleetRef)
+                && has(self.target) && has(self.target.backends) && size(self.target.backends)
+                > 0)'
+            - message: spec.resilience.replace Backends requires spec.target.backends
+              rule: '!(has(self.resilience) && has(self.resilience.replace) && (''Backends''
+                in self.resilience.replace) && !(has(self.target) && has(self.target.backends)
+                && size(self.target.backends) > 0))'
+            - message: spec.resilience.replace Reuse/Create require spec.poolRef,
+                spec.fleetRef or scheduler mode
+              rule: '!(has(self.resilience) && has(self.resilience.replace) && ((''Reuse''
+                in self.resilience.replace) || (''Create'' in self.resilience.replace))
+                && !(has(self.poolRef) && size(self.poolRef) > 0) && !has(self.fleetRef)
+                && has(self.target) && has(self.target.backends) && size(self.target.backends)
+                > 0)'
+            - message: spec.fleetRef and spec.poolRef are exclusive
+              rule: '!has(self.fleetRef) || !has(self.poolRef) || size(self.poolRef)
+                == 0'
+            - message: 'a distributed job needs spec.target.backends, spec.poolRef
+                or spec.fleetRef: the Scheduler keeps its members apart among the
+                places it names'
+              rule: '!has(self.workload.template.distribution) || self.workload.template.distribution.count
+                <= 1 || (has(self.poolRef) && size(self.poolRef) > 0) || has(self.fleetRef)
+                || (has(self.target) && has(self.target.backends) && size(self.target.backends)
+                > 0)'
+            - message: spec.target.rayCluster cannot be combined with spec.fleetRef
+              rule: '!has(self.fleetRef) || !(has(self.target) && has(self.target.rayCluster))'
+            - message: 'spec.placement does not apply to a RayJob on spec.target.rayCluster:
+                its pods are the standing cluster''s'
+              rule: '!has(self.placement) || !(has(self.target) && has(self.target.rayCluster))'
+            - message: 'spec.placement does not apply to a Manifest: its object says
+                where its pods run'
+              rule: '!has(self.placement) || self.workload.kind != ''Manifest'''
+            - message: a Service runs until it is cancelled; spec.activeDeadlineSeconds
+                does not apply
+              rule: '!has(self.workload.template.service) || !has(self.activeDeadlineSeconds)'
+            - message: 'a Service needs spec.poolRef, spec.fleetRef or spec.target.backends:
+                its ports are published by the pool or machine it runs on'
+              rule: '!has(self.workload.template.service) || (has(self.poolRef) &&
+                size(self.poolRef) > 0) || has(self.fleetRef) || (has(self.target)
+                && has(self.target.backends) && size(self.target.backends) > 0)'
+          status:
+            description: ZenthrosJobStatus reflects the observed state, derived from
+              the backend resource.
+            properties:
+              abandonedWorkloads:
+                description: |-
+                  AbandonedWorkloads are workloads left on backends the job was lost
+                  from. A lost machine can come back with the work still running; the
+                  garbage collector cancels each one once its backend is connected
+                  again, so the job neither keeps a dead attempt alive nor runs twice.
+                items:
+                  description: |-
+                    AbandonedWorkload is one attempt of a job left on a backend it was lost
+                    from.
+                  properties:
+                    backendID:
+                      description: BackendID is the backend the attempt ran on.
+                      type: string
+                    generation:
+                      description: |-
+                        Generation is the lease generation the attempt was left under. A job
+                        whose lease is back on BackendID under a later generation, with the
+                        same handle, came back to the attempt: it is the job's own again.
+                      format: int64
+                      type: integer
+                    handle:
+                      description: |-
+                        Handle is the backend job name of the attempt. Empty for an attempt
+                        whose Submit reply was lost: it is cancelled by the job's ID.
+                      type: string
+                    submit:
+                      description: |-
+                        Submit numbers the Submits in doubt (no handle) on BackendID under
+                        Generation: one the GC cancelled is never the job's again, so the next
+                        Submit there in doubt is the next number, its own attempt.
+                      format: int32
+                      type: integer
+                  required:
+                  - backendID
+                  - handle
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              attempts:
+                description: |-
+                  Attempts records the attempts the controller re-ran on a machine,
+                  oldest first; at most the last 10 are kept.
+                items:
+                  description: Attempt is one run of the job's process that failed
+                    and was re-run.
+                  properties:
+                    backend:
+                      description: Backend is the backend it ran on.
+                      type: string
+                    cleaned:
+                      description: |-
+                        Cleaned is set once the attempt's workload was cancelled; the next
+                        attempt is submitted only after that.
+                      type: boolean
+                    endTime:
+                      format: date-time
+                      type: string
+                    handle:
+                      description: Handle is the backend's name for this attempt's
+                        workload.
+                      type: string
+                    message:
+                      description: Message is how the attempt ended, as its backend
+                        said it.
+                      type: string
+                    number:
+                      description: Number is 0 for the first run, n for the n-th re-run.
+                      format: int32
+                      type: integer
+                    startTime:
+                      description: StartTime and EndTime bound the attempt.
+                      format: date-time
+                      type: string
+                  required:
+                  - number
+                  type: object
+                maxItems: 10
+                type: array
+              backendJobName:
+                description: BackendJobName is the name of the native resource created
+                  in the backend.
+                type: string
+              capacityRequest:
+                description: |-
+                  CapacityRequest references the managed capacity attempt created for a
+                  poolRef job. Absent for explicit-target jobs.
+                properties:
+                  name:
+                    description: Name of the pool-owned CapacityRequest.
+                    type: string
+                  namespace:
+                    description: Namespace is the pool capacity management namespace.
+                    type: string
+                  requestID:
+                    description: RequestID is the request's stable provider idempotency
+                      key.
+                    type: string
+                  reservationID:
+                    description: ReservationID is the stable compare-and-swap token
+                      for this job lease.
+                    type: string
+                  uid:
+                    description: |-
+                      UID is the CapacityRequest's: slot names are reused, and the name
+                      alone named the next incarnation too.
+                    type: string
+                required:
+                - name
+                - namespace
+                - requestID
+                - reservationID
+                type: object
+              children:
+                description: |-
+                  Children are the groups of child jobs this job spawned while it ran
+                  (fan-out), each recorded before its first child was created.
+                items:
+                  description: |-
+                    ChildGroup is one spawn of child jobs. It is recorded on the parent
+                    before any child exists, so a replay of the spawn (a replacement parent
+                    after its machine was lost) finds it and creates nothing twice.
+                  properties:
+                    children:
+                      description: Children are the group's children by index, as
+                        each says.
+                      items:
+                        description: ChildStatus is one child as its own job says.
+                        properties:
+                          index:
+                            format: int32
+                            type: integer
+                          job:
+                            type: string
+                          message:
+                            description: |-
+                              Message is the child's status.message, verbatim up to 4 KiB (head
+                              and tail kept); the child job has it whole.
+                            type: string
+                          phase:
+                            description: |-
+                              Phase is the lifecycle phase of a ZenthrosJob, derived from the native
+                              phase of the backend resource (RayJob, SparkApplication) that the agent observes.
+                            type: string
+                        required:
+                        - index
+                        - job
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - index
+                      x-kubernetes-list-type: map
+                    count:
+                      format: int32
+                      type: integer
+                    failed:
+                      format: int32
+                      type: integer
+                    generation:
+                      description: Generation is the parent's lease generation that
+                        spawned it.
+                      format: int64
+                      type: integer
+                    name:
+                      type: string
+                    running:
+                      format: int32
+                      type: integer
+                    spawnedAt:
+                      format: date-time
+                      type: string
+                    specHash:
+                      description: |-
+                        SpecHash is what the group runs (command, same, env): a replay that
+                        asks for something else under the same name is refused.
+                      type: string
+                    succeeded:
+                      format: int32
+                      type: integer
+                  required:
+                  - count
+                  - name
+                  - spawnedAt
+                  - specHash
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              completionTime:
+                description: CompletionTime when the job reached a terminal phase.
+                format: date-time
+                type: string
+              conditions:
+                description: |-
+                  Conditions carry what went wrong without ending the job, in the
+                  backend's own words: a Status query the backend refused
+                  (ConditionStatusQuery) or a cancel it could not perform
+                  (ConditionCleanup).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              distribution:
+                description: Distribution is a distributed job's own progress.
+                properties:
+                  failed:
+                    format: int32
+                    type: integer
+                  running:
+                    format: int32
+                    type: integer
+                  succeeded:
+                    format: int32
+                    type: integer
+                type: object
+              drainingLease:
+                description: |-
+                  DrainingLease is the interrupted worker's lease after its notice. Its
+                  lease ended at once so a replacement starts now, but until Until (the
+                  provider's warning, capped) or progress.frozenAt the worker may still
+                  commit checkpoints, so the replacement resumes from the latest one.
+                properties:
+                  backendID:
+                    description: BackendID is the interrupted worker.
+                    type: string
+                  generation:
+                    description: Generation is the interrupted lease generation.
+                    format: int64
+                    type: integer
+                  source:
+                    description: Source is who gave the notice (aws-imds, gcp-metadata).
+                    type: string
+                  until:
+                    description: Until is the end of the window.
+                    format: date-time
+                    type: string
+                required:
+                - backendID
+                - generation
+                - until
+                type: object
+              endpoints:
+                description: |-
+                  Endpoints are where a Service answers, as the run that serves it
+                  published them: one per port of workload.template.service (once the
+                  port accepts connections) or per manifest.endpointFrom. Empty while no
+                  run serves: before it is ready, between attempts, on another machine
+                  until that one is ready, and once the job ends. A replacement publishes
+                  new URLs; read them again rather than keeping one.
+                items:
+                  description: Endpoint is one URL a Service answers on.
+                  properties:
+                    attempt:
+                      format: int32
+                      type: integer
+                    backend:
+                      description: |-
+                        Backend and Attempt are the run that published it: a replacement on
+                        another machine, or a re-run, publishes its own.
+                      type: string
+                    name:
+                      description: Name is the port's (or the endpointFrom entry's)
+                        name.
+                      type: string
+                    port:
+                      description: Port is the port the process listens on; 0 for
+                        a Manifest's.
+                      format: int32
+                      type: integer
+                    readyAt:
+                      description: ReadyAt is when the run first published it.
+                      format: date-time
+                      type: string
+                    scope:
+                      description: Scope is Public, Private or Cluster.
+                      type: string
+                    url:
+                      description: URL is where clients reach it.
+                      maxLength: 2048
+                      type: string
+                  required:
+                  - name
+                  - url
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              exitCode:
+                description: |-
+                  ExitCode is what the workload's process returned, once it ended and
+                  returned one: a test that failed reads 1 here, a machine that was lost
+                  reads none. It says how the process ended, not what happens next: the
+                  phase and the reasons do.
+                format: int32
+                type: integer
+              firstStartTime:
+                description: |-
+                  FirstStartTime is when the job's first attempt started running. It never
+                  moves on a re-run, so spec.activeDeadlineSeconds spans every attempt.
+                format: date-time
+                type: string
+              fleetPool:
+                description: |-
+                  FleetPool is the member of spec.fleetRef the job's slot comes from. It
+                  is written in the same status update as capacityRequest.
+                type: string
+              lease:
+                description: |-
+                  Lease is the submitted-job liveness token. Grant on successful Submit;
+                  renew on heartbeat from that backend. Expiry is WORKER_LOST.
+                properties:
+                  backendID:
+                    description: |-
+                      BackendID is the worker that currently holds the lease. Empty while a
+                      replacement is being substituted (stale StatusUpdate is dropped).
+                    type: string
+                  expiresAt:
+                    description: |-
+                      ExpiresAt is now+jobGrace at grant/renew. Cluster default 45s; a job
+                      may override spec.resilience.jobGrace (≥ 2 × heartbeat interval).
+                    format: date-time
+                    type: string
+                  generation:
+                    description: |-
+                      Generation is the worker-lost generation. StatusUpdate / Succeeded from
+                      an older generation is ignored.
+                    format: int64
+                    type: integer
+                  grantedAt:
+                    description: |-
+                      GrantedAt is when this generation's lease was first granted to
+                      BackendID. Evidence about the machine older than it (a provider-gone
+                      stamp) is about an earlier seat.
+                    format: date-time
+                    type: string
+                  preemptedAt:
+                    description: |-
+                      PreemptedAt is when BackendID announced its preemption. The lease then
+                      expires at once and nothing extends it again; a new seat grants a new
+                      lease without it.
+                    format: date-time
+                    type: string
+                type: object
+              lifecycle:
+                description: |-
+                  Lifecycle is how the job ends: RunToCompletion ends when the work
+                  does; Service (a RayCluster, a Job with workload.template.service, a
+                  Manifest that says so) runs until it is cancelled, deleted, or fails,
+                  and never Succeeds.
+                type: string
+              machineOffers:
+                description: |-
+                  MachineOffers are the offers of the machines that took the job, sealed
+                  when each does: its capacity request goes with the machine, minutes after
+                  the job ends, and what the job cost does not change with that.
+                items:
+                  description: MachineOffer is the offer a machine that took the job
+                    was made from.
+                  properties:
+                    backend:
+                      description: Backend is the machine.
+                      type: string
+                    id:
+                      description: ID is the catalog's identifier of the offer.
+                      type: string
+                    instanceType:
+                      description: InstanceType is the provider's name of the machine's
+                        type.
+                      type: string
+                    purchaseOption:
+                      description: PurchaseOption is OnDemand or Spot.
+                      type: string
+                    region:
+                      description: Region and Zone are where it ran.
+                      type: string
+                    zone:
+                      type: string
+                  required:
+                  - backend
+                  type: object
+                maxItems: 10
+                type: array
+              members:
+                description: |-
+                  Members are a distributed job's members, in rank order, as each
+                  member job reports itself. Empty on a member and on a job of one.
+                items:
+                  description: MemberStatus is one task of a distributed job, as the
+                    task job says.
+                  properties:
+                    backendID:
+                      description: BackendID is the machine the task is on.
+                      type: string
+                    capacityRequest:
+                      type: string
+                    expiresAt:
+                      format: date-time
+                      type: string
+                    job:
+                      description: Job is the task's ZenthrosJob.
+                      type: string
+                    message:
+                      description: Message is the task's status.message, verbatim.
+                      type: string
+                    phase:
+                      description: |-
+                        Phase is the lifecycle phase of a ZenthrosJob, derived from the native
+                        phase of the backend resource (RayJob, SparkApplication) that the agent observes.
+                      type: string
+                    preemptedAt:
+                      format: date-time
+                      type: string
+                    rank:
+                      format: int32
+                      type: integer
+                    region:
+                      type: string
+                    zone:
+                      type: string
+                  required:
+                  - job
+                  - rank
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - rank
+                x-kubernetes-list-type: map
+              message:
+                description: Message is a one-line human-readable summary of the current
+                  state.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the spec generation last reconciled.
+                format: int64
+                type: integer
+              pendingTerminal:
+                description: |-
+                  PendingTerminal holds a Succeeded the backend reported while a
+                  checkpointed phase has no acked COMPLETE. A COMPLETE that arrives within
+                  two heartbeats lets it through; otherwise the job fails
+                  CHECKPOINT_INCOMPLETE instead of staying Running forever.
+                properties:
+                  message:
+                    description: Message is why it is held.
+                    type: string
+                  phase:
+                    description: Phase is what the backend reported.
+                    type: string
+                  since:
+                    description: Since is when it was first reported.
+                    format: date-time
+                    type: string
+                required:
+                - phase
+                - since
+                type: object
+              phase:
+                description: Phase is the current lifecycle phase.
+                type: string
+              progress:
+                description: |-
+                  Progress is the controller-acked checkpoint cursor. Replacement loads
+                  this URI; object-storage listings are not the source of truth. Frozen
+                  on lease expiry.
+                properties:
+                  complete:
+                    description: Complete is true when this cursor is a phase COMPLETE.
+                    type: boolean
+                  frozenAt:
+                    description: |-
+                      FrozenAt is when a replacement was submitted after an interruption
+                      notice. It was persisted before the replacement's resume env was built
+                      from this cursor, so a commit from the interrupted worker after it is
+                      refused: it would not reach the replacement.
+                    format: date-time
+                    type: string
+                  phase:
+                    description: Phase is the @zenthros.phase name that produced this
+                      cursor.
+                    type: string
+                  phases:
+                    description: |-
+                      Phases is the acked cursor of every phase the job checkpointed. A
+                      resumed job reads all of them (ZENTHROS_CHECKPOINT_CURSORS), so it skips
+                      every phase it completed, not only the latest.
+                    items:
+                      description: PhaseCursor is one phase's latest acked checkpoint.
+                      properties:
+                        complete:
+                          description: Complete is true once the phase's COMPLETE
+                            was acked.
+                          type: boolean
+                        name:
+                          description: Name is the @zenthros.phase name.
+                          type: string
+                        seq:
+                          description: Seq is its sequence within the phase.
+                          format: int64
+                          type: integer
+                        sha256:
+                          description: SHA256 is the blob's digest.
+                          type: string
+                        uri:
+                          description: URI is the acked blob.
+                          type: string
+                      required:
+                      - name
+                      - seq
+                      - uri
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  seq:
+                    description: Seq is the monotonic checkpoint sequence within Phase.
+                    format: int64
+                    type: integer
+                  sha256:
+                    description: SHA256 is the hex digest of the committed blob.
+                    type: string
+                  uri:
+                    description: URI is the object-storage location of the acked blob.
+                    type: string
+                type: object
+              reasons:
+                description: Reasons explain the current phase.
+                items:
+                  description: Reason is a structured explanation attached to a phase.
+                  properties:
+                    code:
+                      description: Code is a machine-readable reason, e.g. INSUFFICIENT_CPU.
+                      type: string
+                    detail:
+                      description: Detail is a human-readable message with context.
+                      type: string
+                  required:
+                  - code
+                  type: object
+                type: array
+              resolvedImage:
+                description: |-
+                  ResolvedImage is the digest the job's image resolved to on the first
+                  run that pulled it. Later attempts (a replacement backend, a Spot
+                  standby, a process retry) run that digest, so a tag that moves cannot
+                  change the code in the middle of a job or under a resumed checkpoint.
+                properties:
+                  attempt:
+                    format: int32
+                    type: integer
+                  backend:
+                    description: |-
+                      Backend and Attempt identify the run that resolved it. That run keeps
+                      the reference it was submitted with; every other run gets Ref.
+                    type: string
+                  ref:
+                    description: 'Ref is Requested pinned by digest: repository@sha256:....'
+                    type: string
+                  requested:
+                    description: Requested is the image as the job's template names
+                      it.
+                    type: string
+                required:
+                - ref
+                - requested
+                type: object
+              restarts:
+                description: |-
+                  Restarts counts re-runs after the workload's process failed, within
+                  workload.template.restartPolicy.backoffLimit: the backend's own
+                  (Kubernetes Job pods, KubeRay, Spark) or, on a machine, the
+                  controller's. A lost worker is not a restart.
+                format: int32
+                type: integer
+              results:
+                description: |-
+                  Results are the SHA-256s the job's runners reported for the results
+                  they wrote (the zenthros.result report), each accepted from a live
+                  generation; a distributed job's tasks report into it too. A reader
+                  unpickles a result only when its bytes match one: the store is not the
+                  job's to vouch for. Only the control plane writes status, and it
+                  outlives the report store.
+                items:
+                  description: ResultDigest is the SHA-256 a runner reported for the
+                    result it wrote at URI.
+                  properties:
+                    sha256:
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                    uri:
+                      maxLength: 2048
+                      type: string
+                  required:
+                  - sha256
+                  - uri
+                  type: object
+                maxItems: 1024
+                type: array
+                x-kubernetes-list-type: atomic
+              runtime:
+                description: |-
+                  Runtime is the runtime the job was submitted under: the one it asked
+                  for in spec.compute.runtime, or its backend's declared default.
+                type: string
+              scheduling:
+                description: |-
+                  Scheduling is the Scheduler-owned durable placement decision, for
+                  every job: the controller seats a job only where it says.
+                properties:
+                  abandon:
+                    description: |-
+                      Abandon is the Controller giving the current decision back: its
+                      backend refused the job before it ran (unavailable, or busy past the
+                      retry bound), its pool found no capacity where the job's machine was
+                      asked for, or its worker was lost or is draining. The Scheduler places
+                      the job again without that place: a refusal as one replan, a lost
+                      worker as its replacement. The Controller does not seat the job on a
+                      decision it gave back.
+                    properties:
+                      backend:
+                        description: Backend is the decided backend given back.
+                        type: string
+                      kind:
+                        description: 'Kind is why: Refused, Busy, NoCapacity, WorkerLost
+                          or Draining.'
+                        type: string
+                      leaseGeneration:
+                        description: |-
+                          LeaseGeneration is the generation of the job's lease once it gave
+                          the decision back: the one its next machine is asked under.
+                        format: int64
+                        type: integer
+                      offer:
+                        description: |-
+                          Offer is where the pool's machine was asked for: the decision's
+                          offer, or the pool's own when the decision named none.
+                        properties:
+                          hourlyPriceCents:
+                            description: |-
+                              HourlyPriceCents is the estimated hourly price known at decision time.
+                              Persisted so a later Catalog refresh cannot rewrite historical cost.
+                            format: int64
+                            type: integer
+                          id:
+                            description: ID is the catalog offering identifier.
+                            type: string
+                          instanceType:
+                            description: InstanceType is the provider instance type
+                              name.
+                            type: string
+                          purchaseOption:
+                            description: PurchaseOption is OnDemand or Spot.
+                            type: string
+                          region:
+                            description: Region and Zone are the provider placement
+                              location.
+                            type: string
+                          zone:
+                            type: string
+                        type: object
+                      pool:
+                        description: Pool is the decided pool given back.
+                        type: string
+                      reason:
+                        description: |-
+                          Reason is the refusal: its reason code, then the backend's or the
+                          provider's words.
+                        type: string
+                      slot:
+                        description: Slot is the CapacityRequest that failed.
+                        type: string
+                    required:
+                    - reason
+                    type: object
+                  admissionAction:
+                    description: |-
+                      AdmissionAction is Hold or Fail when ExhaustionBound is a quota,
+                      budget, or suspension gate. Empty for T13 placement bounds.
+                    type: string
+                  attempts:
+                    description: |-
+                      Attempts is the append-only history of selections for this generation,
+                      including the current one. Restart-safe explanation is reconstructed
+                      from this list, never from a live recomputation.
+                    items:
+                      description: |-
+                        SchedulingAttempt is one persisted placement try, including abandoned
+                        selections. The list is append-only historical evidence; it is never
+                        recomputed after a restart.
+                      properties:
+                        abandonKind:
+                          description: |-
+                            AbandonKind is the kind of the Controller's give-back that left this
+                            attempt (SchedulingAbandon.Kind), empty when the Scheduler left it on
+                            its own. A lost or draining worker's (Replaced) says nothing against
+                            the place: the machine was lost, not the place.
+                          type: string
+                        abandonedAt:
+                          description: |-
+                            AbandonedAt is when the Scheduler abandoned this selection. Nil while
+                            the attempt is still the current decision.
+                          format: date-time
+                          type: string
+                        costDeltaCents:
+                          description: |-
+                            CostDeltaCents is this attempt's estimated hourly price minus the
+                            original selection's price. Zero when either price is unknown.
+                          format: int64
+                          type: integer
+                        decision:
+                          description: Decision is the placement chosen for this attempt.
+                          properties:
+                            alternatives:
+                              description: |-
+                                Alternatives is how many other candidates could take the job: a
+                                decision with none is the job's only place, where it queues and is
+                                never given back as Busy.
+                              format: int32
+                              type: integer
+                            backend:
+                              description: Backend is the selected existing backend
+                                id when Mode is Backend.
+                              type: string
+                            domain:
+                              description: |-
+                                Domain is the failure domain (zone) the seat must be in, when the
+                                job's placement chose one; empty when any.
+                              type: string
+                            leaseGeneration:
+                              description: |-
+                                LeaseGeneration is the lease generation the decision was made for
+                                when the job had lost its worker (its lease fenced): the decision is
+                                that generation's replacement, and the Controller seats a fenced job
+                                only on its own generation's. Zero for a job that had not.
+                              format: int64
+                              type: integer
+                            mode:
+                              description: Mode is Backend, Pool, or None (no compatible
+                                candidate).
+                              type: string
+                            offering:
+                              description: Offering is the selected catalog offer
+                                when Mode is Pool.
+                              properties:
+                                hourlyPriceCents:
+                                  description: |-
+                                    HourlyPriceCents is the estimated hourly price known at decision time.
+                                    Persisted so a later Catalog refresh cannot rewrite historical cost.
+                                  format: int64
+                                  type: integer
+                                id:
+                                  description: ID is the catalog offering identifier.
+                                  type: string
+                                instanceType:
+                                  description: InstanceType is the provider instance
+                                    type name.
+                                  type: string
+                                purchaseOption:
+                                  description: PurchaseOption is OnDemand or Spot.
+                                  type: string
+                                region:
+                                  description: Region and Zone are the provider placement
+                                    location.
+                                  type: string
+                                zone:
+                                  type: string
+                              type: object
+                            pool:
+                              description: Pool is the selected VMPool name when Mode
+                                is Pool.
+                              type: string
+                            queued:
+                              description: |-
+                                Queued is a decision made while none of the job's destinations could
+                                take it (a backend at its maxJobs, a pool with no free slot at its
+                                bound): the job queues on this one, and until it is sent or seated
+                                there the Scheduler moves it to the first that can.
+                              type: boolean
+                            reason:
+                              description: Reason summarizes why this decision was
+                                made (or why none was).
+                              type: string
+                            score:
+                              description: Score is the deterministic score of the
+                                selected candidate.
+                              format: int64
+                              type: integer
+                            step:
+                              description: |-
+                                Step is how the job takes its seat: Backends (a named or enrolled
+                                backend), Reuse (a Ready slot of the pool) or Create (a new machine
+                                of the pool, on Offering).
+                              enum:
+                              - Backends
+                              - Reuse
+                              - Create
+                              type: string
+                          required:
+                          - mode
+                          type: object
+                        fallbackStep:
+                          description: |-
+                            FallbackStep is the policy step used to reach this attempt from the
+                            previous one. Empty on the original selection.
+                          type: string
+                        index:
+                          description: Index is 1-based attempt order. The original
+                            selection is index 1.
+                          format: int32
+                          type: integer
+                        nextSelection:
+                          description: |-
+                            NextSelection identifies the candidate chosen after this one was
+                            abandoned (pool/offering or backend id).
+                          type: string
+                        providerReason:
+                          description: |-
+                            ProviderReason is the durable provider/class reason that forced the
+                            replan, e.g. "replan-required".
+                          type: string
+                      required:
+                      - decision
+                      - index
+                      type: object
+                    type: array
+                  candidates:
+                    description: Candidates records every evaluated candidate and
+                      its outcome.
+                    items:
+                      description: |-
+                        SchedulingCandidate records one evaluated candidate with its outcome. This is a
+                        historical explanation, never a live recomputation.
+                      properties:
+                        fallbackStep:
+                          description: |-
+                            FallbackStep is the bounded replan step this candidate represents relative
+                            to the abandoned selection. Empty on the original decision.
+                          type: string
+                        id:
+                          description: ID is the backend id (Backend) or VMPool name
+                            (Pool).
+                          type: string
+                        kind:
+                          description: Kind is Backend or Pool.
+                          type: string
+                        offering:
+                          description: Offering records the exact Catalog choice evaluated
+                            for a Pool candidate.
+                          properties:
+                            hourlyPriceCents:
+                              description: |-
+                                HourlyPriceCents is the estimated hourly price known at decision time.
+                                Persisted so a later Catalog refresh cannot rewrite historical cost.
+                              format: int64
+                              type: integer
+                            id:
+                              description: ID is the catalog offering identifier.
+                              type: string
+                            instanceType:
+                              description: InstanceType is the provider instance type
+                                name.
+                              type: string
+                            purchaseOption:
+                              description: PurchaseOption is OnDemand or Spot.
+                              type: string
+                            region:
+                              description: Region and Zone are the provider placement
+                                location.
+                              type: string
+                            zone:
+                              type: string
+                          type: object
+                        rejectionReason:
+                          description: RejectionReason explains a filtered candidate;
+                            empty when accepted.
+                          type: string
+                        score:
+                          description: Score is the deterministic score; zero when
+                            the candidate was rejected.
+                          format: int64
+                          type: integer
+                        scoreComponents:
+                          additionalProperties:
+                            format: int64
+                            type: integer
+                          description: ScoreComponents is the per-component breakdown
+                            for accepted candidates.
+                          type: object
+                        selected:
+                          description: Selected is true only for the chosen candidate.
+                          type: boolean
+                      required:
+                      - id
+                      - kind
+                      type: object
+                    type: array
+                  catalogTimestamp:
+                    format: date-time
+                    type: string
+                  catalogVersion:
+                    description: CatalogVersion and CatalogTimestamp identify the
+                      catalog snapshot used.
+                    format: int64
+                    type: integer
+                  cumulativeFallbackCostCents:
+                    description: |-
+                      CumulativeFallbackCostCents is the running sum of positive cost
+                      deltas across abandoned attempts, persisted so a restart cannot
+                      reset the fallback spend bound.
+                    format: int64
+                    type: integer
+                  decidedAt:
+                    description: DecidedAt is when the current decision was persisted.
+                    format: date-time
+                    type: string
+                  decision:
+                    description: Decision is the selected placement.
+                    properties:
+                      alternatives:
+                        description: |-
+                          Alternatives is how many other candidates could take the job: a
+                          decision with none is the job's only place, where it queues and is
+                          never given back as Busy.
+                        format: int32
+                        type: integer
+                      backend:
+                        description: Backend is the selected existing backend id when
+                          Mode is Backend.
+                        type: string
+                      domain:
+                        description: |-
+                          Domain is the failure domain (zone) the seat must be in, when the
+                          job's placement chose one; empty when any.
+                        type: string
+                      leaseGeneration:
+                        description: |-
+                          LeaseGeneration is the lease generation the decision was made for
+                          when the job had lost its worker (its lease fenced): the decision is
+                          that generation's replacement, and the Controller seats a fenced job
+                          only on its own generation's. Zero for a job that had not.
+                        format: int64
+                        type: integer
+                      mode:
+                        description: Mode is Backend, Pool, or None (no compatible
+                          candidate).
+                        type: string
+                      offering:
+                        description: Offering is the selected catalog offer when Mode
+                          is Pool.
+                        properties:
+                          hourlyPriceCents:
+                            description: |-
+                              HourlyPriceCents is the estimated hourly price known at decision time.
+                              Persisted so a later Catalog refresh cannot rewrite historical cost.
+                            format: int64
+                            type: integer
+                          id:
+                            description: ID is the catalog offering identifier.
+                            type: string
+                          instanceType:
+                            description: InstanceType is the provider instance type
+                              name.
+                            type: string
+                          purchaseOption:
+                            description: PurchaseOption is OnDemand or Spot.
+                            type: string
+                          region:
+                            description: Region and Zone are the provider placement
+                              location.
+                            type: string
+                          zone:
+                            type: string
+                        type: object
+                      pool:
+                        description: Pool is the selected VMPool name when Mode is
+                          Pool.
+                        type: string
+                      queued:
+                        description: |-
+                          Queued is a decision made while none of the job's destinations could
+                          take it (a backend at its maxJobs, a pool with no free slot at its
+                          bound): the job queues on this one, and until it is sent or seated
+                          there the Scheduler moves it to the first that can.
+                        type: boolean
+                      reason:
+                        description: Reason summarizes why this decision was made
+                          (or why none was).
+                        type: string
+                      score:
+                        description: Score is the deterministic score of the selected
+                          candidate.
+                        format: int64
+                        type: integer
+                      step:
+                        description: |-
+                          Step is how the job takes its seat: Backends (a named or enrolled
+                          backend), Reuse (a Ready slot of the pool) or Create (a new machine
+                          of the pool, on Offering).
+                        enum:
+                        - Backends
+                        - Reuse
+                        - Create
+                        type: string
+                    required:
+                    - mode
+                    type: object
+                  exhaustionBound:
+                    description: |-
+                      ExhaustionBound is the exact policy bound that stopped further
+                      fallback. Empty while a current selection is still in play.
+                    type: string
+                  observedGeneration:
+                    description: ObservedGeneration is the spec generation the decision
+                      was computed for.
+                    format: int64
+                    type: integer
+                  originalOffer:
+                    description: |-
+                      OriginalOffer is the first Pool selection for this generation. Cost
+                      bounds are measured against it so fallback cannot ratchet silently.
+                    properties:
+                      hourlyPriceCents:
+                        description: |-
+                          HourlyPriceCents is the estimated hourly price known at decision time.
+                          Persisted so a later Catalog refresh cannot rewrite historical cost.
+                        format: int64
+                        type: integer
+                      id:
+                        description: ID is the catalog offering identifier.
+                        type: string
+                      instanceType:
+                        description: InstanceType is the provider instance type name.
+                        type: string
+                      purchaseOption:
+                        description: PurchaseOption is OnDemand or Spot.
+                        type: string
+                      region:
+                        description: Region and Zone are the provider placement location.
+                        type: string
+                      zone:
+                        type: string
+                    type: object
+                  policyVersion:
+                    description: PolicyVersion identifies the scheduler policy that
+                      produced the decision.
+                    type: string
+                  purchaseOptionChanges:
+                    description: PurchaseOptionChanges counts fallback steps that
+                      changed OnDemand/Spot.
+                    format: int32
+                    type: integer
+                  replacementAttempts:
+                    description: |-
+                      ReplacementAttempts counts abandoned Pool selections for this
+                      generation. Distinct from ReplanCount so backend-only replans do
+                      not consume the replacement cap.
+                    format: int32
+                    type: integer
+                  replanCount:
+                    description: |-
+                      ReplanCount is how many times the Scheduler has abandoned a selection
+                      for this generation.
+                    format: int32
+                    type: integer
+                type: object
+              standby:
+                description: |-
+                  Standby is the replacement prepared while the interrupted worker
+                  drains: a slot reserved for this job, asked for so it is Ready when
+                  the window ends, and used then. Its pool's interruption.standby says
+                  where it comes from.
+                properties:
+                  capacityRequest:
+                    description: CapacityRequest is the slot, reserved by this job;
+                      empty until asked for.
+                    properties:
+                      name:
+                        description: Name of the pool-owned CapacityRequest.
+                        type: string
+                      namespace:
+                        description: Namespace is the pool capacity management namespace.
+                        type: string
+                      requestID:
+                        description: RequestID is the request's stable provider idempotency
+                          key.
+                        type: string
+                      reservationID:
+                        description: ReservationID is the stable compare-and-swap
+                          token for this job lease.
+                        type: string
+                      uid:
+                        description: |-
+                          UID is the CapacityRequest's: slot names are reused, and the name
+                          alone named the next incarnation too.
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    - requestID
+                    - reservationID
+                    type: object
+                  generation:
+                    description: Generation is the lease generation the replacement
+                      runs at.
+                    format: int64
+                    type: integer
+                  plan:
+                    description: Plan says how StartAt was chosen, in words.
+                    type: string
+                  pool:
+                    description: Pool is the slot's VMPool.
+                    type: string
+                  source:
+                    description: Source is Idle or Created, once the slot is asked
+                      for.
+                    type: string
+                  startAt:
+                    description: StartAt is when the slot was, or will be, asked for.
+                    format: date-time
+                    type: string
+                required:
+                - generation
+                - startAt
+                type: object
+              startTime:
+                description: StartTime when the backend resource started running.
+                format: date-time
+                type: string
+              stateObservedAt:
+                description: |-
+                  StateObservedAt is when the backend state this status shows (phase,
+                  message, times, restarts) last changed by an observation: the
+                  controller's poll or the agent's push. Of two observations of one
+                  attempt, the later one is kept.
+                format: date-time
+                type: string
+              submissionTime:
+                description: |-
+                  SubmissionTime when the workload was accepted by the backend. Paired with
+                  StartTime/CompletionTime it bounds the workload execution window; the
+                  capacity wait is derived by joining CapacityRequest.status timestamps.
+                format: date-time
+                type: string
+              submitRetries:
+                description: |-
+                  SubmitRetries counts consecutive submissions the backend refused
+                  transiently (busy, unavailable); it drives the controller's backoff and
+                  resets when a submission is accepted.
+                format: int32
+                type: integer
+              upstreamResults:
+                additionalProperties:
+                  type: string
+                description: |-
+                  UpstreamResults pins, for each spec.dependsOn job that reported
+                  results, the digest of its results (resultdigest.Pin), taken when the
+                  dependencies were met. The machine reads it as
+                  ZENTHROS_UPSTREAM_RESULTS and unpickles an upstream's result only when
+                  what it read hashes to it.
+                type: object
+              upstreamsEndedAt:
+                description: |-
+                  UpstreamsEndedAt is when the controller saw every spec.dependsOn job
+                  end well. The Scheduler places a job with dependsOn only after it.
+                format: date-time
+                type: string
+              workerLostRetries:
+                description: WorkerLostRetries counts worker-lost replacements already
+                  consumed.
+                format: int32
+                type: integer
+            type: object
+        type: object
+    selectableFields:
+    - jsonPath: .status.lease.backendID
+    - jsonPath: .spec.poolRef
+    - jsonPath: .status.scheduling.decision.backend
+    - jsonPath: .status.scheduling.decision.pool
+    - jsonPath: .status.fleetPool
+    - jsonPath: .status.phase
+    served: true
+    storage: true
+    subresources:
+      status: {}

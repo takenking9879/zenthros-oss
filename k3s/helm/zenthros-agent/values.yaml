@@ -1,0 +1,165 @@
+agent:
+  # No hub: the SDK installs this on a person's own cluster (on="local-k8s")
+  # and talks to the agent by kubectl exec. templates/local.yaml is then all
+  # the chart makes, and most of what follows does not apply.
+  local:
+    enabled: false
+    # The folder every node has at this same path, which job pods mount there.
+    sharedFolder: ""
+    # uid:gid of a job's processes, so that its files are that person's.
+    user: ""
+  image: zenthros/agent:dev
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  mode: k8s
+  backendID: cluster-b
+  backendType: k8s
+  ownership: External
+  version: k8s-cluster-b
+  controllerAddress: zenthros-controller.zenthros-system.svc.cluster.local:9443
+  tls:
+    secretName: zenthros-agent-tls
+    serverName: zenthros-controller
+  healthAddress: ":8081"
+  metricsAddress: "127.0.0.1:8080"
+  metricsPublic: false
+  reportListen: ":9445"
+  # Empty: this release's Service in its namespace, on reportListen's port
+  # (audit 2026-10-16 AUD-069).
+  reportEndpoint: ""
+  reportSpoolPath: "/var/lib/zenthros/reports.sqlite"
+  # k3s has a default StorageClass. Managed EKS in this blueprint does not
+  # install EBS CSI, so the EKS helm values set this true (emptyDir spool).
+  reportSpoolEmptyDir: false
+  # Per-request StreamLogs byte cap at the Agent (Q-13). 8388608 = 8 MiB.
+  # When hit, zctl logs ends with a truncated signal; leftover stays on the
+  # Ray/worker pod (kubectl logs) or the systemd unit (journalctl).
+  maxLogBytes: "8388608"
+  # Agent-wide StreamLogs hourly budget (P5). Distinct from maxLogBytes.
+  maxLogBytesHourly: "52428800"
+  # Concurrent jobs advertised in the heartbeat. Unset uses the binary default:
+  # 1 on a dedicated VM, unlimited on a Kubernetes agent.
+  maxJobs: ""
+  # One control-stream send interval. Miss count is ceil(grace / this).
+  heartbeatInterval: 15s
+  reportSpoolSize: 1Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # This cluster takes nodes from Zenthros (operator/docs/design/K8S_NODE_SUPPLY.md):
+  # the agent reconciles its zenthros:// Nodes with their slots on the hub. It
+  # cordons and drains (evictions, PodDisruptionBudgets respected) the Nodes
+  # Zenthros retires, deletes NotReady Nodes whose machine is gone, and taints
+  # Ready ones no slot claims. Grants the agent node patch/delete and pod
+  # eviction.
+  #
+  # New machines get a node credential the agent issues for each one: a
+  # bootstrap token for that node (15 minutes), sealed to a key only the
+  # machine holds; the hub never holds a token it could use. Grants the agent
+  # create and delete (never read) of Secrets in kube-system.
+  nodeSupply:
+    enabled: false
+    # The cluster's API URL as its new nodes reach it (https), on the network
+    # the cluster and its nodes share. Required when enabled.
+    serverURL: ""
+    # A kubelet node's clusterDNS and clusterDomain. Empty: the kube-dns
+    # Service and kube-system/kubelet-config (kubeadm), else cluster.local.
+    clusterDNS: []
+    clusterDomain: ""
+  waitForTLS: true
+  waitImage: busybox:1.36.1
+  ageIdentitySecret: zenthros-agent-age
+
+# Cluster Autoscaler for this cluster, with Zenthros as its cloud provider
+# (operator/docs/design/K8S_NODE_SUPPLY.md). Needs agent.nodeSupply.enabled.
+# CA dials the agent's in-cluster proxy, which forwards every call to the hub
+# on the agent's own connection: CA never holds the agent's certificate, and
+# a renewed one is used with no restart. The proxy's mTLS is local: a CA this
+# chart makes once and keeps across upgrades.
+clusterAutoscaler:
+  enabled: false
+  # CA's minor must be the cluster's: the chart picks by the cluster's
+  # Kubernetes minor. image, when set, is used instead.
+  images:
+    "1.32": registry.k8s.io/autoscaling/cluster-autoscaler:v1.32.7@sha256:b3a6d87dbd23b17c6bc8cf8436fc5eeca668f343d3a0fd86202a4ffaa2f8eb06
+    "1.33": registry.k8s.io/autoscaling/cluster-autoscaler:v1.33.6@sha256:7b44e0f075b2c8f9952e339b6c396cd4d1c3831c24c0fe092a3e708c45e6ec51
+    "1.34": registry.k8s.io/autoscaling/cluster-autoscaler:v1.34.1@sha256:1cd9b79f742e2f8da273f6492baedecc50a6203bb97d82c2de25202841450993
+    "1.35": registry.k8s.io/autoscaling/cluster-autoscaler:v1.35.2@sha256:aac369dc283927a623deb1af54696efcc722ae79255aa07788422e495bab887d
+    "1.36": registry.k8s.io/autoscaling/cluster-autoscaler:v1.36.1@sha256:461388d03eb5b55db58941ee7a81d9a619dd15302b01cbab9f5a9946715994b4
+    "1.37": registry.k8s.io/autoscaling/cluster-autoscaler:v1.37.0@sha256:bad6629616b9544dc5e358ee030f6d1d4047192e484d2e15bffb0c9fcd90b949
+  image: ""
+  proxyPort: 8086
+  grpcTimeout: 10s
+  scanInterval: 10s
+  # priority first (cluster-autoscaler-priority-expander below), then the
+  # cheapest fit among equals.
+  expander: priority,least-waste
+  # The priority expander's groups. The documented Spot + on-demand pattern:
+  # pools named *-spot* first; when Zenthros reports one out of capacity, CA
+  # backs it off and asks the next. Empty: no ConfigMap (and drop priority
+  # from expander).
+  priorities: |-
+    10:
+      - .*
+    50:
+      - .*-spot.*
+  # More CA flags, e.g. --scale-down-unneeded-time=5m.
+  extraArgs: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+tailscale:
+  enabled: true
+  image: tailscale/tailscale:v1.98.9
+  hostname: cluster-b
+  extraArgs: "--advertise-tags=tag:zenthros-agent"
+  authKeySecret: zenthros-tailnet-authkey-agent
+  authKeySecretKey: authkey
+  # Must stay false. Accepting MagicDNS as the pod resolver shadows
+  # cluster DNS and breaks the in-cluster controller control stream.
+  acceptDNS: "false"
+  dnsNameserver: 100.100.100.100
+  # Your tailnet's MagicDNS suffix (tailXXXX.ts.net), for the enrollment
+  # job's short names when enrollment.tailscale is set. Empty: none.
+  dnsSearch: ""
+
+enrollment:
+  enabled: true
+  image: ""
+  controllerAddress: zenthros-controller.zenthros-system.svc.cluster.local:9443
+  token: ""
+  caCertHash: ""
+  tokenSecretName: zenthros-agent-enrollment
+  manageTLSSecret: true
+  stateDir: /tmp
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  providerIdentity: ""
+  clusterName: ""
+  roleARN: ""
+  tailscale: false
+  tailscaleAuthKeySecret: ""
+  tlsServerName: ""
+
+# kind: Manifest applies any namespaced object the agent may create. Each
+# entry grants create/get/list/watch/patch/delete on those resources in every
+# namespace. Empty by default: a Manifest the agent has no rights for fails
+# with the API server's own "forbidden" text.
+manifest:
+  allowedResources: []
+  # - apiGroups: ["kubeflow.org"]
+  #   resources: [pytorchjobs]
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Private registry pull. Empty = none.
+imagePullSecrets: []

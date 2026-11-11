@@ -1,0 +1,7 @@
+# Heavy packages, apart from requirements-dev.txt: make env ENV_ML=1 adds
+# them to the same venv. Only examples/ (checkpoints, Ray) import them; the
+# tests that need them skip, saying so, without them.
+--extra-index-url https://download.pytorch.org/whl/cpu
+# The CPU build.
+torch==2.15.0+cpu
+ray==2.60.0

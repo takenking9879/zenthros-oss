@@ -1,0 +1,33 @@
+{
+  "_about": "Every zenthros.ai/* label and annotation key the SDK (sdk/python/zenthros) names, with its owner on each side: go is the constant of operator/api/v1 with that value (null when only the SDK names it), sdk the SDK's constant. set_by and read_by say who writes and who reads it, on is what carries it. operator/test/lint TestTheSDKsKeysAreTheOperators holds api/v1 and the chart's policy to it; sdk/python/tests/test_keys.py holds the SDK to it, and finds a key the SDK names that is not here.",
+  "keys": [
+    {"key": "zenthros.ai/gc-workload-cleaned", "on": "ZenthrosJob annotation", "set_by": "controller", "read_by": "sdk", "go": "AnnotationWorkloadCleaned", "sdk": "zenthros.jobs.handle.WORKLOAD_CLEANED"},
+    {"key": "zenthros.ai/gc-orphan-reaped", "on": "ZenthrosJob annotation", "set_by": "controller", "read_by": "sdk", "go": "AnnotationOrphanReaped", "sdk": "zenthros.jobs.handle.ORPHAN_REAPED"},
+    {"key": "zenthros.ai/result-count", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "controller", "go": "AnnotationResultCount", "sdk": "zenthros.remote.call.RESULT_COUNT"},
+    {"key": "zenthros.ai/secrets-on-untrusted-host", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "controller", "go": "AnnotationSecretsOnUntrustedHost", "sdk": "zenthros.remote.call.UNTRUSTED_HOST_SECRETS"},
+    {"key": "zenthros.ai/spawn-on-untrusted-host", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "controller", "go": "AnnotationSpawnOnUntrustedHost", "sdk": "zenthros.remote.call.UNTRUSTED_HOST_SPAWN"},
+    {"key": "zenthros.ai/code-sha256", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.remote.snapshot.CODE_SHA256"},
+    {"key": "zenthros.ai/code-base", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.remote.snapshot.CODE_BASE"},
+    {"key": "zenthros.ai/code-dirty", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.remote.snapshot.CODE_DIRTY"},
+    {"key": "zenthros.ai/cache-key", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.cache.KEY_LABEL"},
+    {"key": "zenthros.ai/cache-parts", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.cache.PARTS_ANNOTATION"},
+    {"key": "zenthros.ai/pipeline", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.pipeline.PIPELINE_LABEL"},
+    {"key": "zenthros.ai/step", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.pipeline.STEP_LABEL"},
+    {"key": "zenthros.ai/agent-session", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.agents.SESSION"},
+    {"key": "zenthros.ai/agent-target", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.agents.TARGET"},
+    {"key": "zenthros.ai/machine-backend", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "k8s backend", "go": "LabelMachineBackend", "sdk": "zenthros.machines.POD_LABEL"},
+    {"key": "zenthros.ai/submission", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.jobs.http.SUBMISSION"},
+    {"key": "zenthros.ai/remote", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "people", "go": null, "sdk": "zenthros.remote.call.REMOTE_LABEL"},
+    {"key": "zenthros.ai/map", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.remote.call.MAP_GROUP"},
+    {"key": "zenthros.ai/map-indices", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.remote.call.MAP_INDICES"},
+    {"key": "zenthros.ai/map-on", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.remote.call.MAP_ON"},
+    {"key": "zenthros.ai/map-size", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.remote.call.MAP_SIZE"},
+    {"key": "zenthros.ai/backend", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.local.BACKEND_LABEL"},
+    {"key": "zenthros.ai/local", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.jobs.local.LOCAL_LABEL"},
+    {"key": "zenthros.ai/local-config", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.jobs.local.CONFIG_LABEL"},
+    {"key": "zenthros.ai/local-mounts", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.jobs.local.MOUNTS_LABEL"},
+    {"key": "zenthros.ai/workspace", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": "LabelWorkspace", "sdk": "zenthros.local.WORKSPACE_LABEL"},
+    {"key": "zenthros.ai/name", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.local.NAME_LABEL"},
+    {"key": "zenthros.ai/ports", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.local.PORTS_LABEL"}
+  ]
+}

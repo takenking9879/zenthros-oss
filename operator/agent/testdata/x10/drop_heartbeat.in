@@ -1,0 +1,5 @@
+[synth] Starting training pipeline
+(PlacementGroupCleaner pid=33795) Failed to query Ray Train Controller actor state. State API may be temporarily unavailable. Continuing to monitor.
+(PlacementGroupCleaner pid=33795) Failed to query Ray Train Controller actor state. State API may be temporarily unavailable. Continuing to monitor.
+(PlacementGroupCleaner pid=33795) Failed to query Ray Train Controller actor state. State API may be temporarily unavailable. Continuing to monitor.
+[synth] Training completed successfully metrics=None

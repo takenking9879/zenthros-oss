@@ -1,0 +1,176 @@
+{
+  "_about": "One job's wire bytes, shared by pkg/jobcli (Go) and sdk/python/tests/test_job_protocol.py. Both must send exactly these bodies.",
+  "env": {
+    "ZENTHROS_JOB_ID": "0f5c-uid",
+    "ZENTHROS_GENERATION": "3",
+    "ZENTHROS_REPORT_TOKEN": "tok-abc",
+    "ZENTHROS_PRODUCER_ID": "m1",
+    "ZENTHROS_CHECKPOINT_PREFIX": "file:///var/lib/zenthros/ckpt",
+    "ZENTHROS_CHECKPOINT_CURSORS": "{\"train\": {\"seq\": 1, \"uri\": \"file:///var/lib/zenthros/ckpt/jobs/0f5c-uid/gen/2/train/1\", \"sha256\": \"\", \"complete\": false}}"
+  },
+  "job_env": {
+    "_about": "Every variable Zenthros or the job's author puts in a job's environment, by who sets it. controller: every job's spec, on the control plane (pkg/jobspec, pkg/backend). task: a distributed task or a spawned child (pkg/distribution, pkg/controller). child: a spawned child (pkg/controller). agent: the agent on the machine, at submit (agent). user: the job's author, optional. sdk: the SDK, for the children it spawns. Each Go setter puts exactly its keys; the SDK and the job CLI read none outside this list.",
+    "ZENTHROS_GENERATION": "controller",
+    "ZENTHROS_CHECKPOINT_PREFIX": "controller",
+    "ZENTHROS_CHECKPOINT_URI": "controller",
+    "ZENTHROS_CHECKPOINT_PHASE": "controller",
+    "ZENTHROS_CHECKPOINT_SEQ": "controller",
+    "ZENTHROS_CHECKPOINT_SHA256": "controller",
+    "ZENTHROS_CHECKPOINT_COMPLETE": "controller",
+    "ZENTHROS_CHECKPOINT_CURSORS": "controller",
+    "ZENTHROS_UPSTREAM_RESULTS": "controller",
+    "ZENTHROS_DATA_INPUT": "controller",
+    "ZENTHROS_DATA_OUTPUT": "controller",
+    "TASK_INDEX": "task",
+    "TASK_COUNT": "task",
+    "ZENTHROS_PARENT_JOB_ID": "child",
+    "ZENTHROS_CHILD_GROUP": "child",
+    "ZENTHROS_JOB_ID": "agent",
+    "ZENTHROS_REPORT_TOKEN": "agent",
+    "ZENTHROS_REPORT_ENDPOINT": "agent",
+    "ZENTHROS_PREEMPT_FILE": "agent",
+    "ZENTHROS_ATTEMPT": "agent",
+    "ZENTHROS_AGENT_BIN": "agent",
+    "ZENTHROS_CACHE_DIR": "agent",
+    "ZENTHROS_SECRETS_DIR": "agent",
+    "ZENTHROS_ENV_CACHE": "agent",
+    "ZENTHROS_PRODUCER_ID": "user",
+    "ZENTHROS_CHECKPOINT_LOCAL_ROOT": "user",
+    "ZENTHROS_JOB_STATE_DIR": "user",
+    "ZENTHROS_MAP_ITEMS": "sdk"
+  },
+  "retry": {
+    "_about": "Seconds a call to the agent waits before each new try on a transient answer. Ten tries 2 s apart, then five 5.4 s apart: the fifteenth leaves 45 s after the first, a job's grace.",
+    "waits_seconds": [2, 2, 2, 2, 2, 2, 2, 2, 2, 5.4, 5.4, 5.4, 5.4, 5.4],
+    "total_seconds": 45,
+    "_about_statuses": "Answers a call to the agent tries again: a timeout, a rate limit and any 5xx (a 507 SPOOL_FULL is the spool waiting on the controller's acks, not a refusal), and a connection closed with no answer (the agent restarting). Every other answer is the controller's, raised at once. Every route may be sent again: a report and a commit by their seq, a spawn by its name.",
+    "retried_statuses": [408, 429, 500, 502, 503, 504, 507],
+    "final_statuses": [400, 401, 404, 409, 413, 422]
+  },
+  "authorization": "Bearer tok-abc",
+  "checkpoint": {
+    "path": "/v1/checkpoints",
+    "phase": "train",
+    "state": {
+      "step": 2,
+      "note": "a \"quoted\" é"
+    },
+    "blob": "{\"kind\":\"Checkpoint\",\"state\":{\"note\":\"a \\\"quoted\\\" \\u00e9\",\"step\":2}}",
+    "body": {
+      "job_id": "0f5c-uid",
+      "generation": 3,
+      "phase": "train",
+      "seq": 2,
+      "uri": "file:///var/lib/zenthros/ckpt/jobs/0f5c-uid/gen/3/train/2",
+      "sha256": "54fcfb4e60b635759e08c6efb7b3baa0757d3070140da0beb4d1dc3738b68ac3",
+      "complete": false
+    }
+  },
+  "report": {
+    "path": "/v1/reports",
+    "report_id": "7d1e0c7a-0000-4000-8000-000000000001",
+    "produced_at": "2026-01-02T03:04:05Z",
+    "set": [
+      "loss=0.25",
+      "epoch=3",
+      "note=hello world",
+      "tags=[\"a\",\"b\"]"
+    ],
+    "payload": {
+      "loss": 0.25,
+      "epoch": 3,
+      "note": "hello world",
+      "tags": [
+        "a",
+        "b"
+      ]
+    },
+    "final": true,
+    "body": {
+      "apiVersion": "zenthros.ai/v1",
+      "kind": "ExecutionReport",
+      "job_id": "0f5c-uid",
+      "producer_id": "m1",
+      "report_id": "7d1e0c7a-0000-4000-8000-000000000001",
+      "produced_at": "2026-01-02T03:04:05Z",
+      "payload": {
+        "loss": 0.25,
+        "epoch": 3,
+        "note": "hello world",
+        "tags": [
+          "a",
+          "b"
+        ]
+      },
+      "artifacts": [],
+      "final": true
+    }
+  },
+  "spawn": {
+    "path": "/v1/children",
+    "args": [
+      "--name",
+      "shards",
+      "--count",
+      "4",
+      "--env",
+      "MODE=fast",
+      "--env",
+      "NOTE=two words",
+      "--cmd",
+      "python3",
+      "work.py",
+      "--in",
+      "s3://b/in"
+    ],
+    "body": {
+      "job_id": "0f5c-uid",
+      "generation": 3,
+      "group": "shards",
+      "count": 4,
+      "command": [
+        "python3",
+        "work.py",
+        "--in",
+        "s3://b/in"
+      ],
+      "env": {
+        "MODE": "fast",
+        "NOTE": "two words"
+      }
+    },
+    "same_body": {
+      "job_id": "0f5c-uid",
+      "generation": 3,
+      "group": "again",
+      "count": 2,
+      "same": true
+    },
+    "list_body": {
+      "job_id": "0f5c-uid",
+      "generation": 3,
+      "group": "shards",
+      "count": 0,
+      "list": true
+    },
+    "reply": {
+      "accepted": true,
+      "children": [
+        {
+          "group": "shards",
+          "index": 0,
+          "name": "train-shards-0",
+          "phase": "Succeeded",
+          "message": "exited 0"
+        },
+        {
+          "group": "shards",
+          "index": 1,
+          "name": "train-shards-1",
+          "phase": "Failed",
+          "message": "process exited with status 3: shard 1: bad row 17\nsecond line"
+        }
+      ]
+    }
+  }
+}

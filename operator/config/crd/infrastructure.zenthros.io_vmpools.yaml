@@ -1,0 +1,748 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: vmpools.infrastructure.zenthros.io
+spec:
+  group: infrastructure.zenthros.io
+  names:
+    kind: VMPool
+    listKind: VMPoolList
+    plural: vmpools
+    shortNames:
+    - vmp
+    singular: vmpool
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.providerRef.name
+      name: Provider
+      type: string
+    - jsonPath: .spec.placementRef.region
+      name: Region
+      type: string
+    - jsonPath: .spec.purchasingMode
+      name: Mode
+      type: string
+    - jsonPath: .status.ready
+      name: Ready
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          VMPool declares managed VM capacity policy. It does not itself call a provider.
+          The name global is the installation-wide suspension's (N9).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VMPoolSpec declares a bounded source of VM capacity.
+            properties:
+              access:
+                description: |-
+                  Access is the Workspace allowlist for poolRef selection. Visibility and
+                  infrastructure ownership are intentionally independent.
+                properties:
+                  mode:
+                    default: Private
+                    description: Mode is Private for one Workspace or Public for multiple
+                      explicit grants.
+                    enum:
+                    - Private
+                    - Public
+                    type: string
+                  workspaces:
+                    description: Workspaces is the explicit allowlist. Public does
+                      not mean anonymous.
+                    items:
+                      maxLength: 63
+                      type: string
+                    maxItems: 64
+                    minItems: 1
+                    type: array
+                type: object
+                x-kubernetes-validations:
+                - message: private access requires exactly one Workspace and public
+                    access requires explicit grants
+                  rule: 'has(self.workspaces) ? self.mode != ''Private'' || size(self.workspaces)
+                    == 1 : self.mode == ''Private'''
+              exposedPorts:
+                description: |-
+                  ExposedPorts are the ports every machine of the pool publishes when
+                  the provider creates it, so a Service (workload.template.service) can
+                  be reached on them. A machine exists before its job, so they belong to
+                  the pool; they cannot change: another set of ports is another pool.
+                items:
+                  description: |-
+                    ExposedPort is a port every machine of a pool publishes, so a Service on
+                    it can be reached. 8080 and 8081 are the Zenthros agent's own (metrics and
+                    health) on every machine: a Service there fails to bind and restarts until
+                    its retries run out (measured on EC2, 2026-10-04).
+                  properties:
+                    port:
+                      description: Port is the port number.
+                      format: int32
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    protocol:
+                      default: HTTP
+                      description: |-
+                        Protocol is HTTP (the default) or TCP. A provider that publishes only
+                        one of them refuses the other.
+                      enum:
+                      - HTTP
+                      - TCP
+                      type: string
+                  required:
+                  - port
+                  type: object
+                  x-kubernetes-validations:
+                  - message: 8080 and 8081 are the Zenthros agent's metrics and health
+                      ports on the machine; a Service cannot listen there
+                    rule: self.port != 8080 && self.port != 8081
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - port
+                x-kubernetes-list-type: map
+              identity:
+                description: IdentitySpec contains references only; it never carries
+                  credentials.
+                properties:
+                  instanceProfile:
+                    description: InstanceProfile is the provider-native workload identity
+                      reference.
+                    type: string
+                  serviceAccountName:
+                    description: |-
+                      ServiceAccountName is the Kubernetes service account used by managed
+                      cluster capacity when applicable.
+                    type: string
+                type: object
+              instancePolicy:
+                description: InstancePolicy bounds which machine images and instance
+                  shapes a pool may use.
+                properties:
+                  allowedTypes:
+                    description: AllowedTypes is the bounded set of provider instance
+                      types the pool may use.
+                    items:
+                      type: string
+                    minItems: 1
+                    type: array
+                  diskGB:
+                    description: |-
+                      DiskGB is the machine's disk in GB, for providers whose default is too
+                      small for an image and its data (a model's weights). Empty keeps the
+                      provider's default. Only new machines take a change. A provider that
+                      cannot size the disk refuses the pool.
+                    format: int32
+                    maximum: 2000
+                    minimum: 10
+                    type: integer
+                  image:
+                    description: Image is a provider image reference (for example
+                      an AMI id or fake image).
+                    minLength: 1
+                    type: string
+                  minCUDA:
+                    description: |-
+                      MinCUDA is the least CUDA version the host's driver must support
+                      (e.g. "12.9"), for an image built against a newer CUDA. A provider
+                      that cannot filter hosts by it refuses the pool.
+                    pattern: ^[0-9]+\.[0-9]+$
+                    type: string
+                  securityGroupIDs:
+                    description: |-
+                      SecurityGroupIDs are the security groups the machines launch in, in
+                      place of the network's default one (AWS). Zenthros neither creates
+                      nor edits them: they must allow the agent's egress, and the ingress
+                      of any exposedPorts.
+                    items:
+                      type: string
+                    maxItems: 5
+                    type: array
+                required:
+                - allowedTypes
+                - image
+                type: object
+              interruption:
+                description: |-
+                  Interruption is what the pool does for a job whose machine receives
+                  an interruption notice (a Spot reclaim): where its replacement is
+                  prepared while the machine drains.
+                properties:
+                  capacityRebalance:
+                    description: |-
+                      CapacityRebalance replaces a joined Spot pool's node when its provider
+                      says the machine is at elevated risk of interruption (an EC2 rebalance
+                      recommendation; other providers send none). The replacement is created
+                      first, only in a zone whose availability is the same or better, and
+                      the node drains once the replacement is up (docs/interruptions.md,
+                      "Rebalance recommendations"). Off by default: a recommendation is not
+                      always followed by an interruption, and acting on it restarts pods.
+                    type: boolean
+                  standby:
+                    description: Standby is where the replacement is prepared. IdleFirst
+                      by default.
+                    enum:
+                    - IdleFirst
+                    - NewMachine
+                    - None
+                    type: string
+                type: object
+              join:
+                description: |-
+                  Join makes the pool's machines nodes of a Kubernetes cluster
+                  (docs/design/K8S_NODE_SUPPLY.md). A joined pool serves no job directly;
+                  its size is scaling.replicas, which the cluster's autoscaler sets.
+                properties:
+                  kubernetes:
+                    description: KubernetesJoin is the cluster a joined pool's machines
+                      become nodes of.
+                    properties:
+                      backendID:
+                        description: |-
+                          BackendID is the enrolled Kubernetes backend (its agent's identity)
+                          whose cluster the machines join. Its BackendAccess must allow the
+                          pool's provider in spec.nodeSupply.providers.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      joinMethod:
+                        default: Auto
+                        description: |-
+                          JoinMethod is how the machines join. Auto (the default) takes the
+                          cluster's: k3s' agent on a k3s cluster, Kubernetes' kubelet with TLS
+                          bootstrapping on any other. Kubelet or K3s requires that one: on a
+                          cluster that runs the other, the pool gets no machines.
+                        enum:
+                        - Auto
+                        - Kubelet
+                        - K3s
+                        type: string
+                      nodeLabels:
+                        additionalProperties:
+                          type: string
+                        description: NodeLabels are set on every node, next to the
+                          pool label.
+                        maxProperties: 16
+                        type: object
+                      nodeTaints:
+                        description: |-
+                          NodeTaints are set on every node, next to the pool taint
+                          (infrastructure.zenthros.io/vmpool=<pool>:NoSchedule).
+                        items:
+                          description: NodeTaint is a taint a joined node registers
+                            with.
+                          properties:
+                            effect:
+                              enum:
+                              - NoSchedule
+                              - PreferNoSchedule
+                              - NoExecute
+                              type: string
+                            key:
+                              maxLength: 253
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9./_-]+$
+                              type: string
+                            value:
+                              maxLength: 63
+                              pattern: ^[A-Za-z0-9._-]*$
+                              type: string
+                          required:
+                          - effect
+                          - key
+                          type: object
+                        maxItems: 8
+                        type: array
+                    required:
+                    - backendID
+                    type: object
+                required:
+                - kubernetes
+                type: object
+              machineKind:
+                default: VM
+                description: |-
+                  MachineKind is what the provider hands out: a VM (the default) or an
+                  unprivileged container whose entrypoint is the agent. A Container
+                  pool's instancePolicy.image is the container image every job runs in.
+                enum:
+                - VM
+                - Container
+                type: string
+              networkRef:
+                description: |-
+                  NetworkRef is required for VM pools; a container has no network of
+                  its own to choose.
+                properties:
+                  name:
+                    description: |-
+                      Name is the stable network configuration identifier. A VM pool must
+                      set it (VMPoolSpec validation).
+                    type: string
+                  zones:
+                    description: |-
+                      Zones are the networks of further availability zones, for a provider
+                      whose network lives in one zone (an AWS subnet). Name is then the
+                      network of placementRef.zone, and the pool places machines only in
+                      that zone and these: a create that finds no capacity in one tries the
+                      next, and a Spot node can move to a zone at less risk
+                      (interruption.capacityRebalance).
+                    items:
+                      description: ZonalNetwork is the network of one availability
+                        zone.
+                      properties:
+                        name:
+                          minLength: 1
+                          type: string
+                        zone:
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      - zone
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - zone
+                    x-kubernetes-list-type: map
+                required:
+                - name
+                type: object
+              ownership:
+                allOf:
+                - enum:
+                  - External
+                  - Managed
+                - enum:
+                  - External
+                  - Managed
+                default: Managed
+                description: |-
+                  Ownership declares whether Zenthros manages this pool's infrastructure.
+                  Managed pools may be provisioned, scaled, and terminated by the platform;
+                  External pools describe capacity owned elsewhere and can never be used by
+                  poolRef workloads or scaled by Zenthros.
+                type: string
+              placementRef:
+                description: |-
+                  PlacementReference constrains provider placement without making a live
+                  provider query part of reconciliation.
+                properties:
+                  region:
+                    description: Region is the provider region identifier.
+                    minLength: 1
+                    type: string
+                  zone:
+                    description: Zone optionally pins one availability zone within
+                      Region.
+                    type: string
+                required:
+                - region
+                type: object
+              providerRef:
+                description: ProviderReference selects a configured provider capability
+                  by name.
+                properties:
+                  account:
+                    description: |-
+                      Account names the CloudAccount the pool's machines are created in.
+                      Empty is the installation's own account. The network, the instance
+                      profile and the image the pool names are that account's.
+                    maxLength: 253
+                    type: string
+                  name:
+                    description: Name is the stable provider identifier, for example
+                      "fake" or "aws".
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              purchasingMode:
+                default: OnDemand
+                description: |-
+                  PurchasingMode is explicit so later Spot support cannot silently change
+                  the cost and interruption behavior of an existing pool.
+                enum:
+                - OnDemand
+                - Spot
+                type: string
+              runtime:
+                description: |-
+                  Runtime is what the installer prepares on every machine of the pool,
+                  beyond the agent itself. It is language neutral: a container engine
+                  runs jobs in OCI images of any language; host toolchains are optional.
+                properties:
+                  container:
+                    description: ContainerRuntime is the machine's container engine.
+                    properties:
+                      engine:
+                        description: Engine installs containerd and runc. none runs
+                          jobs on the host only.
+                        enum:
+                        - containerd
+                        - none
+                        type: string
+                      gpu:
+                        description: |-
+                          GPU installs the NVIDIA driver and, with containerd, its container
+                          toolkit: nvidia always, auto when the machine has an NVIDIA device.
+                        enum:
+                        - auto
+                        - nvidia
+                        - none
+                        type: string
+                    type: object
+                  defaultJobRuntime:
+                    description: |-
+                      DefaultJobRuntime is what a job that names no compute.runtime runs
+                      under on these machines.
+                    enum:
+                    - systemd
+                    - containerd
+                    type: string
+                  packages:
+                    description: |-
+                      Packages are system packages, installed with the distribution's
+                      package manager (apt or dnf) under the names it knows.
+                    items:
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9.+_:=~-]*$
+                      type: string
+                    maxItems: 64
+                    type: array
+                  toolchains:
+                    description: |-
+                      Toolchains are host toolchains installer modules add (python, node,
+                      go, java). A name without a module fails the machine's install with
+                      the installer's message.
+                    items:
+                      description: Toolchain is one host toolchain.
+                      properties:
+                        name:
+                          maxLength: 32
+                          pattern: ^[a-z][a-z0-9-]*$
+                          type: string
+                        packages:
+                          description: Packages are the toolchain's own packages (uv
+                            pip, npm -g, go install).
+                          items:
+                            pattern: ^[^\s'"]+$
+                            type: string
+                          maxItems: 64
+                          type: array
+                        version:
+                          description: |-
+                            Version is a prefix of the pinned version: "24" takes the locked 24.x.
+                            Empty takes the locked version.
+                          maxLength: 32
+                          pattern: ^[0-9A-Za-z.+_-]*$
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                type: object
+                x-kubernetes-validations:
+                - message: defaultJobRuntime containerd needs container.engine containerd
+                  rule: '!has(self.defaultJobRuntime) || self.defaultJobRuntime !=
+                    ''containerd'' || (has(self.container) && has(self.container.engine)
+                    && self.container.engine == ''containerd'')'
+              scaling:
+                description: ScalingPolicy controls the pool's ready-capacity envelope.
+                properties:
+                  idleGrace:
+                    description: |-
+                      IdleGrace is how long a Ready slot with no job may stay silent before
+                      it is treated as lost. Empty uses the cluster default (30s). Distinct
+                      from IdleTTL (healthy excess scale-down) and from jobGrace (running jobs).
+                    type: string
+                  idleTTL:
+                    default: 10m
+                    description: IdleTTL is how long unallocated capacity may remain
+                      idle before scale-down.
+                    type: string
+                  maxLifetime:
+                    description: |-
+                      MaxLifetime is how long one machine of this pool may live, counted from
+                      its CapacityRequest's creation, job or no job, so a machine somebody
+                      forgot does not bill for ever. Past it the machine ends and the pool
+                      keeps none up (minReady 0) until a job asks for one again. A job on it
+                      is told as by a cloud's notice, and ends or moves with
+                      MACHINE_LIFETIME. Empty is no limit.
+                    type: string
+                  maxReady:
+                    description: MaxReady is the maximum ready capacity retained by
+                      this pool.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minReady:
+                    description: MinReady is the minimum ready, unallocated capacity
+                      to retain.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  replicas:
+                    description: |-
+                      Replicas is a size an external driver asks for (the scale subresource:
+                      kubectl scale, or the cluster autoscaler of a joined pool). Unset, the
+                      pool sizes itself from minReady and its jobs. Set, the pool keeps
+                      replicas machines, never fewer than its reserved ones, within
+                      minReady and maxReady.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - maxReady
+                type: object
+                x-kubernetes-validations:
+                - message: minReady must be less than or equal to maxReady
+                  rule: '!has(self.minReady) || self.minReady <= self.maxReady'
+                - message: replicas must be less than or equal to maxReady
+                  rule: '!has(self.replicas) || self.replicas <= self.maxReady'
+            required:
+            - instancePolicy
+            - placementRef
+            - providerRef
+            - scaling
+            type: object
+            x-kubernetes-validations:
+            - message: ownership is immutable
+              rule: self.ownership == oldSelf.ownership
+            - message: machineKind is immutable
+              rule: self.machineKind == oldSelf.machineKind
+            - message: 'providerRef is immutable: a pool''s machines belong to its
+                provider; create another pool'
+              rule: self.providerRef.name == oldSelf.providerRef.name
+            - message: 'providerRef.account is immutable: a pool''s machines are in
+                its cloud account; create another pool'
+              rule: '(has(self.providerRef.account) && size(self.providerRef.account)
+                > 0 ? [self.providerRef.account] : []) == (has(oldSelf.providerRef.account)
+                && size(oldSelf.providerRef.account) > 0 ? [oldSelf.providerRef.account]
+                : [])'
+            - message: 'exposedPorts is immutable: a machine gets its ports when it
+                is created; create another pool'
+              rule: '(has(self.exposedPorts) ? self.exposedPorts : []) == (has(oldSelf.exposedPorts)
+                ? oldSelf.exposedPorts : [])'
+            - message: a VM pool needs networkRef.name
+              rule: self.machineKind == 'Container' || (has(self.networkRef) && size(self.networkRef.name)
+                > 0)
+            - message: 'a Container pool cannot install system packages: they need
+                root and a package manager; put them in the image'
+              rule: self.machineKind != 'Container' || !has(self.runtime) || !has(self.runtime.packages)
+                || size(self.runtime.packages) == 0
+            - message: 'a Container pool runs its jobs as processes in its image:
+                runtime.container and runtime.defaultJobRuntime do not apply'
+              rule: self.machineKind != 'Container' || !has(self.runtime) || ((!has(self.runtime.container)
+                || (!has(self.runtime.container.engine) && !has(self.runtime.container.gpu)))
+                && !has(self.runtime.defaultJobRuntime))
+            - message: a Container pool completes only the image's python; other toolchains
+                belong in the image
+              rule: self.machineKind != 'Container' || !has(self.runtime) || !has(self.runtime.toolchains)
+                || self.runtime.toolchains.all(t, t.name == 'python')
+            - message: 'join is immutable: a machine joins its cluster when it is
+                created; create another pool'
+              rule: '(has(self.join) ? [self.join] : []) == (has(oldSelf.join) ? [oldSelf.join]
+                : [])'
+            - message: 'a joined pool is a Managed VM pool with exactly one allowed
+                type: a node group is homogeneous'
+              rule: '!has(self.join) || (self.machineKind != ''Container'' && self.ownership
+                != ''External'' && size(self.instancePolicy.allowedTypes) == 1)'
+            - message: 'a joined pool declares scaling.replicas (0 is fine): its cluster''s
+                autoscaler sizes it through /scale, and /scale needs the field'
+              rule: '!has(self.join) || has(self.scaling.replicas)'
+            - message: 'networkRef.zones adds zones to placementRef.zone, whose network
+                is networkRef.name: set placementRef.zone and do not list it again'
+              rule: '!has(self.networkRef) || !has(self.networkRef.zones) || size(self.networkRef.zones)
+                == 0 || (has(self.placementRef.zone) && size(self.placementRef.zone)
+                > 0 && self.networkRef.zones.all(z, z.zone != self.placementRef.zone))'
+            - message: interruption.capacityRebalance replaces the nodes of a joined
+                Spot pool; set it on a joined pool with purchasingMode Spot
+              rule: '!has(self.interruption) || !has(self.interruption.capacityRebalance)
+                || !self.interruption.capacityRebalance || (has(self.join) && self.purchasingMode
+                == ''Spot'')'
+          status:
+            description: |-
+              VMPoolStatus is an observed summary. CapacityRequest objects remain the source
+              of truth for individual machine attempts.
+            properties:
+              allocated:
+                format: int32
+                type: integer
+              awaitingEnrollment:
+                format: int32
+                type: integer
+              booting:
+                format: int32
+                type: integer
+              cleaning:
+                format: int32
+                type: integer
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              desired:
+                format: int32
+                type: integer
+              draining:
+                format: int32
+                type: integer
+              failed:
+                format: int32
+                type: integer
+              inFlight:
+                format: int32
+                type: integer
+              observedGeneration:
+                format: int64
+                type: integer
+              provisioning:
+                format: int32
+                type: integer
+              provisioningTimes:
+                description: |-
+                  ProvisioningTimes are the pool's most recent request-to-Ready times,
+                  oldest first. A standby replacement is timed from them.
+                items:
+                  description: |-
+                    ProvisioningSample is how long one of the pool's machines took from its
+                    request to Ready.
+                  properties:
+                    request:
+                      description: Request is the CapacityRequest measured, so a machine
+                        counts once.
+                      type: string
+                    seconds:
+                      description: Seconds is requestedAt to readyAt.
+                      format: int32
+                      type: integer
+                  required:
+                  - request
+                  - seconds
+                  type: object
+                maxItems: 20
+                type: array
+                x-kubernetes-list-type: atomic
+              ready:
+                format: int32
+                type: integer
+              replicas:
+                description: |-
+                  Replicas is how many slots occupy the pool (the scale subresource's
+                  current size).
+                format: int32
+                type: integer
+              reserved:
+                format: int32
+                type: integer
+              selector:
+                description: |-
+                  Selector selects the pool's CapacityRequests (the scale subresource's
+                  label selector).
+                type: string
+              terminating:
+                format: int32
+                type: integer
+              unhealthy:
+                format: int32
+                type: integer
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: 'global is reserved: it names the suspension of every pool'
+          rule: self.metadata.name != 'global'
+    served: true
+    storage: true
+    subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.scaling.replicas
+        statusReplicasPath: .status.replicas
+      status: {}

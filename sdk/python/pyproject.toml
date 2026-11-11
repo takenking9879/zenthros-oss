@@ -1,0 +1,68 @@
+[build-system]
+# 77: the license as an SPDX expression (PEP 639).
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zenthros"
+version = "0.1.0"
+description = "Run a Python function on a machine of yours (any cloud, a GPU pod, your other computer) from a notebook, and get its value back"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+readme = "README.md"
+# What a notebook needs through zenthros-api: a call is pickled here
+# (cloudpickle, pure Python); the store is reached by URLs the API signs.
+dependencies = ["cloudpickle>=3"]
+keywords = ["remote execution", "machine learning", "notebook", "gpu", "spot"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.scripts]
+zenthros = "zenthros.cli:entry"
+
+[project.urls]
+Homepage = "https://zenthros.app"
+
+[project.optional-dependencies]
+# The store straight from this process: S3 (your own bucket, an
+# administrator's kubeconfig path) or GCS.
+s3 = ["boto3"]
+gcs = ["google-cloud-storage"]
+# Secret.encrypted sealed in this process (age), without zctl.
+seal = ["cryptography>=40"]
+
+[tool.setuptools.packages.find]
+include = ["zenthros*"]
+
+[tool.setuptools.package-data]
+zenthros = ["_data/*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I"]
+# E501: lines wrap where they read best, about 120. B905: zip() over lists
+# of one length by construction. E731: a named lambda is clearer in a table.
+ignore = ["E501", "B905", "E731"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["zenthros"]
+# The tests' own modules, after the package's.
+known-local-folder = ["support", "test_*"]
+
+[tool.ruff.lint.per-file-ignores]
+"zenthros/**/__init__.py" = ["F401"]  # re-exports
+# Tests put examples/ on sys.path before importing them, and call lambdas
+# made in a loop inside that same loop.
+"tests/**" = ["E402", "B023", "B017"]
+"examples/**" = ["E402", "B023"]

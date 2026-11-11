@@ -1,0 +1,8 @@
+{
+  "_about": "zenthros-api's wire number (pkg/apiwire Wire, zctl's too, the SDK's zenthros.jobs.wire.WIRE) and the fingerprint (sha256 of routes.json then refusals.json) of the format each number named. TestWireChangeBumpsTheNumber fails on a format changed under the same number; -record-wire records a new number's.",
+  "wire": 2,
+  "fingerprints": {
+    "1": "30cd68d421de6abfbba9e579a0299b99884d581ebfd475505394baae48cd3dbc",
+    "2": "3b0c06c6ef8a81ba694c5b486f5b583b2ac7ca64022246cac95f388ea9719f88"
+  }
+}

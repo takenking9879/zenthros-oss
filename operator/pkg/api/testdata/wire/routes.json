@@ -1,0 +1,1177 @@
+{
+  "_about": "One sample of every route of zenthros-api, shared by pkg/api (TestTheWireSamplesFitTheRoutes: each sample fits the Go type the route decodes or encodes, and an answer whose type the API owns sets every key, \"full\") and sdk/python/tests/test_api_wire.py (the SDK sends exactly the request's keys and reads only keys the answer has). {ws} is risk; {name} any. \"sdk\": the SDK calls the route.",
+  "routes": {
+    "GET /v1/signup": {
+      "sdk": true,
+      "answer": {
+        "firebase": {
+          "apiKey": "x",
+          "authDomain": "x",
+          "projectId": "x"
+        },
+        "provider": "x",
+        "terms": {
+          "privacyURL": "https://x/privacy",
+          "termsURL": "https://x/terms",
+          "version": "v"
+        }
+      },
+      "full": true
+    },
+    "POST /v1/signup": {
+      "sdk": true,
+      "request": {
+        "acceptedTerms": "v",
+        "idToken": "t"
+      },
+      "answer": {
+        "created": true,
+        "email": "x",
+        "key": "x",
+        "workspace": "x"
+      },
+      "full": true
+    },
+    "GET /v1/version": {
+      "sdk": false,
+      "answer": {
+        "release": "x",
+        "wire": 1,
+        "sdkInstall": "x"
+      },
+      "full": true
+    },
+    "GET /v1/whoami": {
+      "sdk": true,
+      "answer": {
+        "extra": {
+          "KEY": [
+            "x"
+          ]
+        },
+        "groups": [
+          "x"
+        ],
+        "uid": "x",
+        "username": "x"
+      },
+      "full": true
+    },
+    "GET /v1/workspaces/{ws}": {
+      "sdk": true,
+      "answer": {
+        "name": "risk",
+        "namespace": "tenant-risk",
+        "store": "s3://calls/zenthros/risk",
+        "storeJobEndpoint": "http://floci:4566",
+        "storeRegion": "us-east-1"
+      },
+      "full": true
+    },
+    "GET /v1/workspaces/{ws}/backends": {
+      "sdk": true,
+      "answer": {
+        "backends": [
+          {
+            "accessMode": "x",
+            "addr": "x",
+            "ageRecipients": [
+              "x"
+            ],
+            "agentVersion": "x",
+            "backendId": "x",
+            "backendType": "x",
+            "capabilities": [
+              {
+                "defaultRuntime": "x",
+                "endpoints": true,
+                "kind": "x",
+                "lifecycle": "x",
+                "runtimes": [
+                  "x"
+                ]
+              }
+            ],
+            "drained": true,
+            "healthy": true,
+            "host": {
+              "arch": "x",
+              "cachedArtifacts": [
+                "x"
+              ],
+              "cachedImages": [
+                "x"
+              ],
+              "containerImage": "x",
+              "cpu": 1,
+              "gpuCount": 1,
+              "gpuModel": "x",
+              "gpuVendor": "x",
+              "jobGraceSeconds": 1,
+              "memoryBytes": "1",
+              "milliCpu": 1,
+              "networkId": "x",
+              "nodes": [
+                {
+                  "freeMemoryBytes": "1",
+                  "freeMilliCpu": "1",
+                  "gpuCount": 1,
+                  "memoryBytes": "1",
+                  "milliCpu": "1",
+                  "name": "x"
+                }
+              ],
+              "nvidiaContainerRuntime": true,
+              "osId": "x",
+              "osVersion": "x",
+              "peerAddr": "x",
+              "provider": "x",
+              "region": "x",
+              "secretStores": [
+                "x"
+              ],
+              "zone": "x"
+            },
+            "lastHeartbeatUnix": "1",
+            "maxJobs": 1,
+            "name": "x",
+            "offline": true,
+            "ownership": "x",
+            "runningJobs": 1,
+            "sessionEpoch": "1",
+            "workspaces": [
+              "x"
+            ]
+          }
+        ],
+        "nextPageToken": "x",
+        "refusedFull": [
+          {
+            "backendId": "x",
+            "lastRefusedUnix": "1"
+          }
+        ]
+      },
+      "full": true
+    },
+    "POST /v1/workspaces/{ws}/backends": {
+      "sdk": true,
+      "request": {
+        "name": "lab",
+        "type": "vm",
+        "runtime": "containerd",
+        "python": "3.12"
+      },
+      "answer": {
+        "backendId": "x",
+        "expiresUnix": "1",
+        "installScript": "x",
+        "joinScript": "x",
+        "name": "x",
+        "workspace": "x"
+      },
+      "full": true
+    },
+    "DELETE /v1/workspaces/{ws}/backends/{name}": {
+      "sdk": true,
+      "answer": {
+        "accessRemoved": true,
+        "backendId": "x",
+        "tokensRevoked": 1
+      },
+      "full": true
+    },
+    "POST /v1/workspaces/{ws}/backends/{name}/drain": {
+      "sdk": false,
+      "answer": {
+        "activeJobs": 1,
+        "backendId": "x",
+        "drained": true
+      },
+      "full": true
+    },
+    "POST /v1/workspaces/{ws}/backends/{name}/undrain": {
+      "sdk": false,
+      "answer": {
+        "activeJobs": 1,
+        "backendId": "x",
+        "drained": true
+      },
+      "full": true
+    },
+    "GET /v1/workspaces/{ws}/jobs": {
+      "sdk": true,
+      "answer": {
+        "apiVersion": "zenthros.ai/v1",
+        "kind": "ZenthrosJobList",
+        "metadata": {
+          "continue": ""
+        },
+        "items": [
+          {
+            "apiVersion": "zenthros.ai/v1",
+            "kind": "ZenthrosJob",
+            "metadata": {
+              "name": "j",
+              "namespace": "tenant-risk",
+              "uid": "0f5c-uid",
+              "creationTimestamp": "2026-10-29T00:00:00Z",
+              "labels": {
+                "zenthros.ai/name": "j"
+              },
+              "generation": 2,
+              "annotations": {
+                "zenthros.ai/submission": "nonce"
+              }
+            },
+            "spec": {
+              "target": {
+                "backends": [
+                  "vm-a"
+                ]
+              },
+              "workload": {
+                "kind": "Job",
+                "template": {
+                  "entrypoint": "echo hi",
+                  "image": "python:3.13"
+                }
+              }
+            },
+            "status": {
+              "phase": "Running",
+              "lifecycle": "Running",
+              "message": "running on vm-a",
+              "restarts": 1,
+              "exitCode": 1,
+              "workerLostRetries": 1,
+              "reasons": [
+                {
+                  "code": "WORKER_LOST",
+                  "detail": "vm-a went silent"
+                }
+              ],
+              "conditions": [
+                {
+                  "type": "Ready",
+                  "status": "True",
+                  "reason": "Running",
+                  "message": "x",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-10-29T00:00:00Z"
+                }
+              ],
+              "progress": {
+                "phase": "train",
+                "seq": 2,
+                "uri": "s3://b/ckpt/2",
+                "sha256": "ab",
+                "complete": false,
+                "phases": [
+                  {
+                    "name": "train",
+                    "seq": 2,
+                    "uri": "s3://b/ckpt/2",
+                    "sha256": "ab",
+                    "complete": false
+                  }
+                ]
+              },
+              "endpoints": [
+                {
+                  "name": "http",
+                  "port": 8000,
+                  "url": "https://j.example",
+                  "scope": "Workspace",
+                  "backend": "vm-a",
+                  "attempt": 1,
+                  "readyAt": "2026-10-29T00:00:00Z"
+                }
+              ],
+              "members": [
+                {
+                  "rank": 0,
+                  "job": "j",
+                  "phase": "Running",
+                  "backendID": "vm-a",
+                  "message": "x"
+                }
+              ],
+              "children": [
+                {
+                  "name": "map",
+                  "generation": 1,
+                  "count": 1,
+                  "running": 1,
+                  "succeeded": 0,
+                  "failed": 0,
+                  "children": [
+                    {
+                      "index": 0,
+                      "job": "j-map-0",
+                      "phase": "Running",
+                      "message": "x"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "POST /v1/workspaces/{ws}/jobs": {
+      "sdk": true,
+      "request": {
+        "apiVersion": "zenthros.ai/v1",
+        "kind": "ZenthrosJob",
+        "metadata": {
+          "name": "j",
+          "annotations": {
+            "zenthros.ai/submission": "nonce"
+          }
+        },
+        "spec": {
+          "workload": {
+            "kind": "Job",
+            "template": {
+              "entrypoint": "echo hi",
+              "image": "python:3.13"
+            }
+          }
+        }
+      },
+      "answer": {
+        "apiVersion": "zenthros.ai/v1",
+        "kind": "ZenthrosJob",
+        "metadata": {
+          "name": "j",
+          "namespace": "tenant-risk",
+          "uid": "0f5c-uid",
+          "creationTimestamp": "2026-10-29T00:00:00Z",
+          "labels": {
+            "zenthros.ai/name": "j"
+          },
+          "generation": 2,
+          "annotations": {
+            "zenthros.ai/submission": "nonce"
+          }
+        },
+        "spec": {
+          "target": {
+            "backends": [
+              "vm-a"
+            ]
+          },
+          "workload": {
+            "kind": "Job",
+            "template": {
+              "entrypoint": "echo hi",
+              "image": "python:3.13"
+            }
+          }
+        },
+        "status": {
+          "phase": "Running",
+          "lifecycle": "Running",
+          "message": "running on vm-a",
+          "restarts": 1,
+          "exitCode": 1,
+          "workerLostRetries": 1,
+          "reasons": [
+            {
+              "code": "WORKER_LOST",
+              "detail": "vm-a went silent"
+            }
+          ],
+          "conditions": [
+            {
+              "type": "Ready",
+              "status": "True",
+              "reason": "Running",
+              "message": "x",
+              "observedGeneration": 2,
+              "lastTransitionTime": "2026-10-29T00:00:00Z"
+            }
+          ],
+          "progress": {
+            "phase": "train",
+            "seq": 2,
+            "uri": "s3://b/ckpt/2",
+            "sha256": "ab",
+            "complete": false,
+            "phases": [
+              {
+                "name": "train",
+                "seq": 2,
+                "uri": "s3://b/ckpt/2",
+                "sha256": "ab",
+                "complete": false
+              }
+            ]
+          },
+          "endpoints": [
+            {
+              "name": "http",
+              "port": 8000,
+              "url": "https://j.example",
+              "scope": "Workspace",
+              "backend": "vm-a",
+              "attempt": 1,
+              "readyAt": "2026-10-29T00:00:00Z"
+            }
+          ],
+          "members": [
+            {
+              "rank": 0,
+              "job": "j",
+              "phase": "Running",
+              "backendID": "vm-a",
+              "message": "x"
+            }
+          ],
+          "children": [
+            {
+              "name": "map",
+              "generation": 1,
+              "count": 1,
+              "running": 1,
+              "succeeded": 0,
+              "failed": 0,
+              "children": [
+                {
+                  "index": 0,
+                  "job": "j-map-0",
+                  "phase": "Running",
+                  "message": "x"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "DELETE /v1/workspaces/{ws}/jobs/{name}": {
+      "sdk": true
+    },
+    "GET /v1/workspaces/{ws}/jobs/{name}": {
+      "sdk": true,
+      "answer": {
+        "apiVersion": "zenthros.ai/v1",
+        "kind": "ZenthrosJob",
+        "metadata": {
+          "name": "j",
+          "namespace": "tenant-risk",
+          "uid": "0f5c-uid",
+          "creationTimestamp": "2026-10-29T00:00:00Z",
+          "labels": {
+            "zenthros.ai/name": "j"
+          },
+          "generation": 2,
+          "annotations": {
+            "zenthros.ai/submission": "nonce"
+          }
+        },
+        "spec": {
+          "target": {
+            "backends": [
+              "vm-a"
+            ]
+          },
+          "workload": {
+            "kind": "Job",
+            "template": {
+              "entrypoint": "echo hi",
+              "image": "python:3.13"
+            }
+          }
+        },
+        "status": {
+          "phase": "Running",
+          "lifecycle": "Running",
+          "message": "running on vm-a",
+          "restarts": 1,
+          "exitCode": 1,
+          "workerLostRetries": 1,
+          "reasons": [
+            {
+              "code": "WORKER_LOST",
+              "detail": "vm-a went silent"
+            }
+          ],
+          "conditions": [
+            {
+              "type": "Ready",
+              "status": "True",
+              "reason": "Running",
+              "message": "x",
+              "observedGeneration": 2,
+              "lastTransitionTime": "2026-10-29T00:00:00Z"
+            }
+          ],
+          "progress": {
+            "phase": "train",
+            "seq": 2,
+            "uri": "s3://b/ckpt/2",
+            "sha256": "ab",
+            "complete": false,
+            "phases": [
+              {
+                "name": "train",
+                "seq": 2,
+                "uri": "s3://b/ckpt/2",
+                "sha256": "ab",
+                "complete": false
+              }
+            ]
+          },
+          "endpoints": [
+            {
+              "name": "http",
+              "port": 8000,
+              "url": "https://j.example",
+              "scope": "Workspace",
+              "backend": "vm-a",
+              "attempt": 1,
+              "readyAt": "2026-10-29T00:00:00Z"
+            }
+          ],
+          "members": [
+            {
+              "rank": 0,
+              "job": "j",
+              "phase": "Running",
+              "backendID": "vm-a",
+              "message": "x"
+            }
+          ],
+          "children": [
+            {
+              "name": "map",
+              "generation": 1,
+              "count": 1,
+              "running": 1,
+              "succeeded": 0,
+              "failed": 0,
+              "children": [
+                {
+                  "index": 0,
+                  "job": "j-map-0",
+                  "phase": "Running",
+                  "message": "x"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "GET /v1/workspaces/{ws}/jobs/{name}/wait": {
+      "sdk": true,
+      "answer": {
+        "job": {
+          "apiVersion": "zenthros.ai/v1",
+          "kind": "ZenthrosJob",
+          "metadata": {
+            "name": "j",
+            "namespace": "tenant-risk",
+            "uid": "0f5c-uid",
+            "creationTimestamp": "2026-10-29T00:00:00Z",
+            "labels": {
+              "zenthros.ai/name": "j"
+            },
+            "generation": 2,
+            "annotations": {
+              "zenthros.ai/submission": "nonce"
+            }
+          },
+          "status": {
+            "phase": "Running",
+            "lifecycle": "Running",
+            "message": "running on vm-a",
+            "restarts": 1,
+            "exitCode": 1,
+            "workerLostRetries": 1,
+            "reasons": [
+              {
+                "code": "WORKER_LOST",
+                "detail": "vm-a went silent"
+              }
+            ],
+            "conditions": [
+              {
+                "type": "Ready",
+                "status": "True",
+                "reason": "Running",
+                "message": "x",
+                "observedGeneration": 2,
+                "lastTransitionTime": "2026-10-29T00:00:00Z"
+              }
+            ],
+            "progress": {
+              "phase": "train",
+              "seq": 2,
+              "uri": "s3://b/ckpt/2",
+              "sha256": "ab",
+              "complete": false,
+              "phases": [
+                {
+                  "name": "train",
+                  "seq": 2,
+                  "uri": "s3://b/ckpt/2",
+                  "sha256": "ab",
+                  "complete": false
+                }
+              ]
+            },
+            "endpoints": [
+              {
+                "name": "http",
+                "port": 8000,
+                "url": "https://j.example",
+                "scope": "Workspace",
+                "backend": "vm-a",
+                "attempt": 1,
+                "readyAt": "2026-10-29T00:00:00Z"
+              }
+            ],
+            "members": [
+              {
+                "rank": 0,
+                "job": "j",
+                "phase": "Running",
+                "backendID": "vm-a",
+                "message": "x"
+              }
+            ],
+            "children": [
+              {
+                "name": "map",
+                "generation": 1,
+                "count": 1,
+                "running": 1,
+                "succeeded": 0,
+                "failed": 0,
+                "children": [
+                  {
+                    "index": 0,
+                    "job": "j-map-0",
+                    "phase": "Running",
+                    "message": "x"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "seen": "6c1f0a9e2b7d4c3a5e8f9d10"
+      }
+    },
+    "POST /v1/workspaces/{ws}/jobs/{name}/cancel": {
+      "sdk": true,
+      "answer": {
+        "apiVersion": "zenthros.ai/v1",
+        "kind": "ZenthrosJob",
+        "metadata": {
+          "name": "j",
+          "namespace": "tenant-risk",
+          "uid": "0f5c-uid",
+          "creationTimestamp": "2026-10-29T00:00:00Z",
+          "labels": {
+            "zenthros.ai/name": "j"
+          },
+          "generation": 2,
+          "annotations": {
+            "zenthros.ai/submission": "nonce"
+          }
+        },
+        "spec": {
+          "target": {
+            "backends": [
+              "vm-a"
+            ]
+          },
+          "workload": {
+            "kind": "Job",
+            "template": {
+              "entrypoint": "echo hi",
+              "image": "python:3.13"
+            }
+          }
+        },
+        "status": {
+          "phase": "Running",
+          "lifecycle": "Running",
+          "message": "running on vm-a",
+          "restarts": 1,
+          "exitCode": 1,
+          "workerLostRetries": 1,
+          "reasons": [
+            {
+              "code": "WORKER_LOST",
+              "detail": "vm-a went silent"
+            }
+          ],
+          "conditions": [
+            {
+              "type": "Ready",
+              "status": "True",
+              "reason": "Running",
+              "message": "x",
+              "observedGeneration": 2,
+              "lastTransitionTime": "2026-10-29T00:00:00Z"
+            }
+          ],
+          "progress": {
+            "phase": "train",
+            "seq": 2,
+            "uri": "s3://b/ckpt/2",
+            "sha256": "ab",
+            "complete": false,
+            "phases": [
+              {
+                "name": "train",
+                "seq": 2,
+                "uri": "s3://b/ckpt/2",
+                "sha256": "ab",
+                "complete": false
+              }
+            ]
+          },
+          "endpoints": [
+            {
+              "name": "http",
+              "port": 8000,
+              "url": "https://j.example",
+              "scope": "Workspace",
+              "backend": "vm-a",
+              "attempt": 1,
+              "readyAt": "2026-10-29T00:00:00Z"
+            }
+          ],
+          "members": [
+            {
+              "rank": 0,
+              "job": "j",
+              "phase": "Running",
+              "backendID": "vm-a",
+              "message": "x"
+            }
+          ],
+          "children": [
+            {
+              "name": "map",
+              "generation": 1,
+              "count": 1,
+              "running": 1,
+              "succeeded": 0,
+              "failed": 0,
+              "children": [
+                {
+                  "index": 0,
+                  "job": "j-map-0",
+                  "phase": "Running",
+                  "message": "x"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "GET /v1/workspaces/{ws}/jobs/{name}/cost": {
+      "sdk": true,
+      "answer": {
+        "backend": "x",
+        "basis": "x",
+        "cost": 1.5,
+        "currency": "x",
+        "endTime": "2026-10-29T00:00:00Z",
+        "hourlyRate": 1.5,
+        "instanceType": "x",
+        "job": "x",
+        "market": "x",
+        "observedAt": "2026-10-29T00:00:00Z",
+        "region": "x",
+        "running": true,
+        "runs": [
+          {
+            "backend": "x",
+            "cost": 1.5,
+            "endTime": "2026-10-29T00:00:00Z",
+            "hourlyRate": 1.5,
+            "seconds": 1.5,
+            "startTime": "2026-10-29T00:00:00Z"
+          }
+        ],
+        "seconds": 1.5,
+        "startTime": "2026-10-29T00:00:00Z",
+        "zone": "x"
+      },
+      "full": true
+    },
+    "GET /v1/workspaces/{ws}/jobs/{name}/source": {
+      "sdk": true,
+      "answer": {
+        "inline": "x"
+      },
+      "full": true
+    },
+    "GET /v1/workspaces/{ws}/jobs/{name}/logs": {
+      "sdk": true
+    },
+    "GET /v1/workspaces/{ws}/jobs/{name}/reports": {
+      "sdk": true,
+      "answer": [
+        {
+          "artifacts": [
+            {
+              "name": "x",
+              "uri": "x"
+            }
+          ],
+          "final": true,
+          "job_id": "x",
+          "payload": {
+            "any": "x"
+          },
+          "produced_at": 1,
+          "producer_id": "x",
+          "received_at": 1,
+          "report_id": "x",
+          "resolved_image": "x",
+          "sequence": 1,
+          "workspace_id": "x"
+        }
+      ],
+      "full": true
+    },
+    "GET /v1/workspaces/{ws}/machines": {
+      "sdk": true,
+      "answer": {
+        "machines": [
+          {
+            "allocated": 1,
+            "idle": "x",
+            "name": "x",
+            "pool": "x",
+            "provisioning": 1,
+            "ready": 1,
+            "template": "x",
+            "maxLifetime": "x",
+            "runtimeFailure": "x"
+          }
+        ],
+        "templates": [
+          {
+            "account": "x",
+            "cloudIdentity": true,
+            "instanceTypes": [
+              "x"
+            ],
+            "limit": 1,
+            "machineKind": "x",
+            "name": "x",
+            "ports": [
+              1
+            ],
+            "provider": "x",
+            "purchasingMode": "x",
+            "python": "x",
+            "pythonPackages": [
+              "x"
+            ],
+            "region": "x",
+            "toolchains": [
+              "x"
+            ],
+            "untrustedHost": true,
+            "used": 1,
+            "zone": "x",
+            "imageRegistries": [
+              "x"
+            ]
+          }
+        ]
+      },
+      "full": true
+    },
+    "POST /v1/workspaces/{ws}/machines": {
+      "sdk": true,
+      "request": {
+        "template": "gpu",
+        "name": "m1",
+        "idle": "30m",
+        "boot": true,
+        "maxLifetime": "24h",
+        "image": "me/x@sha256:abc",
+        "python": "3.12",
+        "packages": [
+          "polars==1.0"
+        ]
+      },
+      "answer": {
+        "allocated": 1,
+        "idle": "x",
+        "name": "x",
+        "pool": "x",
+        "provisioning": 1,
+        "ready": 1,
+        "template": "x",
+        "maxLifetime": "x",
+        "runtimeFailure": "x"
+      },
+      "full": true
+    },
+    "DELETE /v1/workspaces/{ws}/machines/{name}": {
+      "sdk": true,
+      "answer": {
+        "allocated": 1,
+        "idle": "x",
+        "name": "x",
+        "pool": "x",
+        "provisioning": 1,
+        "ready": 1,
+        "template": "x",
+        "maxLifetime": "x",
+        "runtimeFailure": "x"
+      },
+      "full": true
+    },
+    "POST /v1/workspaces/{ws}/objects/presign": {
+      "sdk": true,
+      "request": {
+        "uri": "s3://calls/zenthros/risk/c/call.pkl",
+        "method": "PUT",
+        "size": 1
+      },
+      "answer": {
+        "expiresAt": "2026-10-29T00:00:00Z",
+        "headers": {
+          "KEY": [
+            "x"
+          ]
+        },
+        "method": "x",
+        "url": "x"
+      },
+      "full": true
+    },
+    "GET /v1/workspaces/{ws}/pools": {
+      "sdk": true,
+      "answer": {
+        "pools": [
+          {
+            "account": "x",
+            "allocated": 1,
+            "conditions": [
+              {
+                "lastTransitionTime": "2026-10-29T00:00:00Z",
+                "message": "x",
+                "observedGeneration": 1,
+                "reason": "x",
+                "status": "x",
+                "type": "x"
+              }
+            ],
+            "instanceTypes": [
+              "x"
+            ],
+            "machineKind": "x",
+            "maxReady": 1,
+            "minReady": 1,
+            "name": "x",
+            "provider": "x",
+            "provisioning": 1,
+            "purchasingMode": "x",
+            "ready": 1,
+            "region": "x",
+            "toolchains": [
+              "x"
+            ],
+            "zone": "x"
+          }
+        ]
+      },
+      "full": true
+    },
+    "POST /v1/workspaces/{ws}/seal": {
+      "sdk": true,
+      "request": {
+        "backend": "vm-a",
+        "env": {
+          "HF_TOKEN": "x"
+        }
+      },
+      "answer": {
+        "secrets": [
+          {
+            "awsSecretsManager": {
+              "jsonKey": "x",
+              "region": "x",
+              "secretId": "x",
+              "versionId": "x",
+              "versionStage": "x"
+            },
+            "encryptedPayload": {
+              "ciphertext": "x",
+              "keyId": "x",
+              "recipients": [
+                "x"
+              ],
+              "workspaceSecret": "x"
+            },
+            "key": "x",
+            "materialization": {
+              "envName": "x",
+              "mode": "x",
+              "path": "x"
+            },
+            "name": "x",
+            "namespace": "x",
+            "type": "x"
+          }
+        ]
+      },
+      "full": true
+    },
+    "GET /v1/workspaces/{ws}/secrets": {
+      "sdk": true,
+      "answer": {
+        "secrets": [
+          {
+            "name": "x",
+            "updatedAt": "x"
+          }
+        ]
+      },
+      "full": true
+    },
+    "DELETE /v1/workspaces/{ws}/secrets/{name}": {
+      "sdk": true,
+      "answer": {
+        "name": "x",
+        "updatedAt": "x"
+      },
+      "full": true
+    },
+    "PUT /v1/workspaces/{ws}/secrets/{name}": {
+      "sdk": true,
+      "request": {
+        "value": "v"
+      },
+      "answer": {
+        "name": "x",
+        "updatedAt": "x"
+      },
+      "full": true
+    },
+    "POST /v1/workspaces/{ws}/store/credentials": {
+      "sdk": true,
+      "request": {
+        "backend": "vm-a"
+      },
+      "answer": {
+        "env": {
+          "AWS_REGION": "us-east-1"
+        },
+        "expiresAt": "2026-10-29T00:00:00Z",
+        "secrets": [
+          {
+            "awsSecretsManager": {
+              "jsonKey": "x",
+              "region": "x",
+              "secretId": "x",
+              "versionId": "x",
+              "versionStage": "x"
+            },
+            "encryptedPayload": {
+              "ciphertext": "x",
+              "keyId": "x",
+              "recipients": [
+                "x"
+              ],
+              "workspaceSecret": "x"
+            },
+            "key": "x",
+            "materialization": {
+              "envName": "x",
+              "mode": "x",
+              "path": "x"
+            },
+            "name": "x",
+            "namespace": "x",
+            "type": "x"
+          }
+        ]
+      },
+      "full": true
+    },
+    "GET /v1/workspaces/{ws}/targets": {
+      "sdk": true,
+      "answer": {
+        "can": {
+          "createMachines": true,
+          "joinBackends": true
+        },
+        "targets": [
+          {
+            "available": 1,
+            "backendType": "x",
+            "capacityFrom": "x",
+            "gpuCount": 1,
+            "gpuModel": "x",
+            "id": "x",
+            "instanceTypes": [
+              "x"
+            ],
+            "lastHeartbeatUnix": 1,
+            "limit": 1,
+            "maxJobs": 1,
+            "maxMemoryBytes": 1,
+            "maxMilliCPU": 1,
+            "memoryBytes": 1,
+            "milliCPU": 1,
+            "name": "x",
+            "nodes": [
+              {
+                "freeMemoryBytes": 1,
+                "freeMilliCPU": 1,
+                "gpuCount": 1,
+                "memoryBytes": 1,
+                "milliCPU": 1,
+                "name": "x"
+              }
+            ],
+            "pool": "x",
+            "ports": [
+              1
+            ],
+            "price": {
+              "currency": "x",
+              "hourlyRate": 1.5,
+              "instanceType": "x",
+              "market": "x",
+              "maxHourlyRate": 1.5,
+              "observedAt": "2026-10-29T00:00:00Z",
+              "region": "x",
+              "zone": "x"
+            },
+            "provider": "x",
+            "purchasingMode": "x",
+            "python": "x",
+            "reason": "x",
+            "region": "x",
+            "runningJobs": 1,
+            "status": "x",
+            "template": "x",
+            "total": 1,
+            "type": "x",
+            "used": 1
+          }
+        ]
+      },
+      "full": true
+    }
+  }
+}

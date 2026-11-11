@@ -1,0 +1,47 @@
+{
+  "_about": "The 404s, 413s, 426s and 429s zenthros-api answers, as it writes them (pkg/api TestThe404sTheAPIAnswers; -update-refusals rewrites it). sdk/python/tests/test_api_refusals.py holds the SDK's HTTP client to taking each for what it means.",
+  "refusals": [
+    {
+      "case": "Kubernetes has no such job",
+      "means": "job-absent",
+      "code": 404,
+      "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"zenthrosjobs.zenthros.ai \\\"train\\\" not found\",\"reason\":\"NotFound\",\"details\":{\"name\":\"train\",\"group\":\"zenthros.ai\",\"kind\":\"zenthrosjobs\"},\"code\":404}\n"
+    },
+    {
+      "case": "the Gateway has no such job",
+      "means": "job-absent",
+      "code": 404,
+      "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"zenthrosjob \\\"train\\\" not found in namespace \\\"tenant-risk\\\"\",\"reason\":\"NotFound\",\"details\":{\"group\":\"zenthros.ai\",\"kind\":\"zenthrosjobs\"},\"code\":404}\n"
+    },
+    {
+      "case": "the Workspace is not one the hub routes",
+      "means": "not-found",
+      "code": 404,
+      "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"Workspace nope not found\",\"reason\":\"NotFound\",\"code\":404}\n"
+    },
+    {
+      "case": "a route the API does not have",
+      "means": "not-found",
+      "code": 404,
+      "body": "404 page not found\n"
+    },
+    {
+      "case": "a job over its most",
+      "means": "too-large",
+      "code": 413,
+      "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"the job is 3145729 bytes; the most is 3145728 bytes\",\"reason\":\"RequestEntityTooLarge\",\"code\":413}\n"
+    },
+    {
+      "case": "the Workspace keeps its most jobs",
+      "means": "workspace-full",
+      "code": 429,
+      "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"the hub keeps 1000 jobs of Workspace risk, the most: delete finished ones (zenthros.get(NAME).delete()) or wait for them to expire\",\"reason\":\"TooManyRequests\",\"code\":429}\n"
+    },
+    {
+      "case": "an SDK of another wire",
+      "means": "other-wire",
+      "code": 426,
+      "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"zenthros 0.1.0 speaks wire 0; this hub speaks 2: pip install -U 'https://dl.example/zenthros-0.2.0-py3-none-any.whl'\",\"reason\":\"UpgradeRequired\",\"code\":426}\n"
+    }
+  ]
+}

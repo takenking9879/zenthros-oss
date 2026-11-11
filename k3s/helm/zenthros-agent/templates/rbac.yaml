@@ -1,0 +1,337 @@
+{{- if not .Values.agent.local.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zenthros-agent
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+{{- include "zenthros-agent.imagePullSecrets" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+rules:
+  # Workspace namespaces: created with the Workspace and Pod Security labels,
+  # and patched to add the PSA labels one marked for a Workspace lacks.
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [create, get, list, watch, patch]
+  # The Workspace ingress isolation policy in each namespace the agent uses.
+  - apiGroups: ["networking.k8s.io"]
+    resources: [networkpolicies]
+    verbs: [create, get]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: ["batch"]
+    resources: [jobs]
+    verbs: [create, get, list, watch, patch, update, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  # A Manifest's pods never run as a Workspace user's account: the agent
+  # reads each account a manifest names before it applies the object.
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list, watch]
+  # The nodes a job can land on and what is left of them, declared for
+  # targets() (with the pods above: what the pods on each node ask for).
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list]
+  {{- if .Values.agent.nodeSupply.enabled }}
+  # Node supply: cordon, taint and delete the Nodes Zenthros supplies, and
+  # drain retiring ones through the eviction API.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch, patch, delete]
+  - apiGroups: [""]
+    resources: [pods/eviction]
+    verbs: [create]
+  # The cluster check (what a new node finds): the DaemonSets that wire a
+  # node into the pod network, and whether the bootstrap group may get a
+  # node certificate approved.
+  - apiGroups: ["apps"]
+    resources: [daemonsets]
+    verbs: [list]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+  {{- end }}
+  # Secrets: none cluster-wide. The agent binds the -job-secrets
+  # ClusterRole to itself in each namespace it runs jobs in, before it
+  # touches a Secret there (audit 2026-10-03 OPS-5). It reads that role
+  # (get) to make it the bindings' owner: helm uninstall deletes the role,
+  # and the cluster's garbage collector its bindings in every namespace.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: [rolebindings]
+    verbs: [create, get]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: [clusterroles]
+    resourceNames: [{{ include "zenthros-agent.fullname" . }}-job-secrets]
+    verbs: [bind, get]
+  - apiGroups: ["ray.io"]
+    resources: [rayjobs]
+    verbs: [create, get, list, watch, patch, update, delete]
+  - apiGroups: ["ray.io"]
+    resources: [rayjobs/status]
+    verbs: [get]
+  - apiGroups: ["ray.io"]
+    resources: [rayclusters]
+    verbs: [create, get, list, watch, patch, update, delete]
+  - apiGroups: ["ray.io"]
+    resources: [rayclusters/status]
+    verbs: [get]
+  # The agent declares a kind only after asking the API server whether it may
+  # create it (SelfSubjectAccessReview).
+  - apiGroups: ["authorization.k8s.io"]
+    resources: [selfsubjectaccessreviews]
+    verbs: [create]
+  - apiGroups: ["spark.apache.org"]
+    resources: [sparkapplications]
+    verbs: [create, get, list, watch, patch, update, delete]
+  - apiGroups: ["spark.apache.org"]
+    resources: [sparkapplications/status]
+    verbs: [get]
+  {{- range .Values.manifest.allowedResources }}
+  # kind: Manifest: the admin allows this resource. Server-side apply needs
+  # patch; the owner-chain log lookup needs get.
+  - apiGroups: {{ toJson .apiGroups }}
+    resources: {{ toJson .resources }}
+    verbs: [create, get, list, watch, patch, delete]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: zenthros-agent
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "zenthros-agent.fullname" . }}
+---
+# The Secret verbs a job namespace needs (inline code, secretSources,
+# encrypted payloads). Bound by the agent, namespace by
+# namespace, never by the chart.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-job-secrets
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create, delete, list, update, patch]
+---
+# The agent's own Secrets in its namespace: its report key and its age
+# identity, created on first start, and its certificate, which it renews.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-own-secrets
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames:
+      - zenthros-agent-report-key
+      - {{ .Values.agent.ageIdentitySecret | default "zenthros-agent-age" }}
+      - {{ .Values.agent.tls.secretName }}
+    verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-own-secrets
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: zenthros-agent
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "zenthros-agent.fullname" . }}-own-secrets
+---
+# Prewarm: the agent warms this cluster from its own namespace, images with a
+# pre-pull DaemonSet, artifacts with a Job writing to a claim there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-prewarm
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: [daemonsets]
+    verbs: [create, get, list, watch, update, delete, deletecollection]
+  - apiGroups: ["batch"]
+    resources: [jobs]
+    verbs: [deletecollection]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-prewarm
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: zenthros-agent
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "zenthros-agent.fullname" . }}-prewarm
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zenthros-agent-enrollment
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+  {{- if .Values.enrollment.roleARN }}
+  annotations:
+    eks.amazonaws.com/role-arn: {{ .Values.enrollment.roleARN | quote }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-enrollment
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames:
+      - {{ .Values.agent.tls.secretName }}
+    verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-enrollment
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: zenthros-agent-enrollment
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "zenthros-agent.fullname" . }}-enrollment
+{{- if .Values.agent.nodeSupply.enabled }}
+---
+# Node supply: the bootstrap token of each new node, created when its machine
+# asks and deleted once the node registered. Create and delete only: the
+# agent never reads a Secret of kube-system.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-node-join
+  namespace: kube-system
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, delete]
+  # A kubelet's clusterDNS and clusterDomain, read by name.
+  - apiGroups: [""]
+    resources: [services]
+    resourceNames: [kube-dns]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [kubelet-config]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-node-join
+  namespace: kube-system
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: zenthros-agent
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "zenthros-agent.fullname" . }}-node-join
+---
+# A kubelet joins with a bootstrap token of system:bootstrappers:zenthros
+# (TLS bootstrapping, as kubeadm's): the group may ask for a node client
+# certificate and gets it approved; nodes renew theirs. The bindings do not
+# depend on the cluster's installer (kubeadm creates its own for its group).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zenthros-node-bootstrapper
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+subjects:
+  - kind: Group
+    name: system:bootstrappers:zenthros
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:node-bootstrapper
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zenthros-node-autoapprove-bootstrap
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+subjects:
+  - kind: Group
+    name: system:bootstrappers:zenthros
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:certificates.k8s.io:certificatesigningrequests:nodeclient
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zenthros-node-autoapprove-certificate-rotation
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+subjects:
+  - kind: Group
+    name: system:nodes
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:certificates.k8s.io:certificatesigningrequests:selfnodeclient
+{{- end }}
+{{- end }}

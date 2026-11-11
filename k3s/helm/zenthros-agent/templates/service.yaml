@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "zenthros-agent.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: reports
+      port: 9445
+      targetPort: reports

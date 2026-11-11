@@ -1,0 +1,163 @@
+{{- if .Values.agent.local.enabled }}
+{{- /*
+The agent of no hub: zenthros run --on local-k8s installs it on a person's own
+cluster and talks to it by kubectl exec, so whoever can exec here runs jobs
+here and nothing else grants it. Its jobs run in this namespace, the only one
+it can touch.
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zenthros-agent
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+{{- include "zenthros-agent.imagePullSecrets" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-local
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: [jobs]
+    verbs: [create, get, list, watch, patch, update, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list, watch]
+  # A job's inline code and secrets, and the agent's own age and report keys.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-local
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: zenthros-agent
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "zenthros-agent.fullname" . }}-local
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-local
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list]
+  # It declares a kind only after asking what it may create.
+  - apiGroups: ["authorization.k8s.io"]
+    resources: [selfsubjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}-local
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: zenthros-agent
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "zenthros-agent.fullname" . }}-local
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "zenthros-agent.fullname" . }}
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "zenthros-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "zenthros-agent.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: zenthros-agent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: {{ .Values.agent.image | quote }}
+          imagePullPolicy: {{ .Values.agent.imagePullPolicy }}
+          env:
+            - name: ZENTHROS_LOCAL
+              value: "1"
+            - name: ZENTHROS_AGENT_MODE
+              value: k8s
+            - name: ZENTHROS_LOCAL_SHARED
+              value: {{ required "agent.local.sharedFolder: the folder this cluster's nodes share" .Values.agent.local.sharedFolder | quote }}
+            - name: ZENTHROS_LOCAL_USER
+              value: {{ required "agent.local.user: uid:gid the job's files belong to" .Values.agent.local.user | quote }}
+            - name: ZENTHROS_STATE_DIR
+              value: /var/lib/zenthros
+            - name: ZENTHROS_REPORT_LISTEN
+              value: {{ .Values.agent.reportListen | quote }}
+            - name: ZENTHROS_REPORT_ENDPOINT
+              value: {{ printf "http://%s.%s.svc.cluster.local:9445" (include "zenthros-agent.fullname" .) .Release.Namespace | quote }}
+            - name: ZENTHROS_REPORT_SPOOL
+              value: {{ .Values.agent.reportSpoolPath | quote }}
+            - name: ZENTHROS_AGENT_VERSION
+              value: {{ .Values.agent.version | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ZENTHROS_AGE_IDENTITY_SECRET
+              value: {{ .Values.agent.ageIdentitySecret | quote }}
+          ports:
+            - name: reports
+              containerPort: 9445
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/zenthros
+            - name: shared
+              mountPath: {{ .Values.agent.local.sharedFolder | quote }}
+              readOnly: true
+      volumes:
+        - name: state
+          emptyDir: {}
+        # Empty on a cluster that does not share it: what the agent then reads
+        # there is not what the SDK wrote, and the SDK says so.
+        - name: shared
+          hostPath:
+            path: {{ .Values.agent.local.sharedFolder | quote }}
+            type: DirectoryOrCreate
+{{- end }}

@@ -1,0 +1,398 @@
+{
+  "_about": "What zctl prints for the commands the SDK runs, and each refusal it tells apart (pkg/zctl TestZctlPrintsWhatTheSDKReads; -update rewrites it). sdk/python/tests/test_zctl_wire.py holds the SDK to taking each refusal for what it means, and to reading only the keys of each output.",
+  "exit_codes": {
+    "forbidden": 77,
+    "invalid": 64,
+    "job-absent": 66,
+    "login": 67,
+    "transient": 75,
+    "unknown": 1
+  },
+  "refusals": [
+    {
+      "case": "the job is gone",
+      "means": "job-absent",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "-o",
+        "json",
+        "train"
+      ],
+      "code": 66,
+      "stderr": "zctl: zenthrosjob \"train\" not found\n"
+    },
+    {
+      "case": "the Workspace is not one the hub routes",
+      "means": "invalid",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "-o",
+        "json",
+        "train"
+      ],
+      "code": 64,
+      "stderr": "zctl: get zenthrosjob: Workspace risk not found\n"
+    },
+    {
+      "case": "the cancel of a job that is gone",
+      "means": "job-absent",
+      "args": [
+        "cancel",
+        "zenthrosjob",
+        "train"
+      ],
+      "code": 66,
+      "stderr": "zctl: zenthrosjob \"train\" not found\n"
+    },
+    {
+      "case": "a 404 page that is not the API's",
+      "means": "invalid",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "-o",
+        "json",
+        "train"
+      ],
+      "code": 64,
+      "stderr": "zctl: get zenthrosjob: the server could not find the requested resource\n"
+    },
+    {
+      "case": "no token",
+      "means": "login",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "-o",
+        "json",
+        "train"
+      ],
+      "code": 67,
+      "stderr": "zctl: get zenthrosjob: a bearer token is required: the zenconfig's auth, or ZENTHROS_TOKEN\n"
+    },
+    {
+      "case": "no token in the zenconfig",
+      "means": "login",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "-o",
+        "json",
+        "train"
+      ],
+      "code": 67,
+      "stderr": "zctl: no token: set ZENTHROS_TOKEN or ZENTHROS_TOKEN_FILE, or the context's auth\n"
+    },
+    {
+      "case": "a token file zctl cannot read",
+      "means": "login",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "-o",
+        "json",
+        "train"
+      ],
+      "code": 67,
+      "stderr": "zctl: get zenthrosjob: token file: open /nonexistent/zenthros-token: no such file or directory\n"
+    },
+    {
+      "case": "a context that logs in with the SDK",
+      "means": "login",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "-o",
+        "json",
+        "train"
+      ],
+      "code": 67,
+      "stderr": "zctl: this context logs in with the SDK (zenthros.login()), which zctl does not do: set ZENTHROS_TOKEN or ZENTHROS_TOKEN_FILE, use a token-command, or switch with `zctl config use-context NAME` or ZENTHROS_CONTEXT=NAME\n"
+    },
+    {
+      "case": "Kubernetes refused the key",
+      "means": "login",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "-o",
+        "json",
+        "train"
+      ],
+      "code": 67,
+      "stderr": "zctl: get zenthrosjob: Unauthorized\n"
+    },
+    {
+      "case": "Kubernetes forbids the key the job",
+      "means": "forbidden",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "-o",
+        "json",
+        "train"
+      ],
+      "code": 77,
+      "stderr": "zctl: get zenthrosjob: zenthrosjobs.zenthros.ai \"train\" is forbidden: User \"system:serviceaccount:tenant-risk:bob\" cannot get resource \"zenthrosjobs\" in API group \"zenthros.ai\" in the namespace \"tenant-risk\"\n"
+    },
+    {
+      "case": "the API forbids the key the job",
+      "means": "forbidden",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "-o",
+        "json",
+        "train"
+      ],
+      "code": 77,
+      "stderr": "zctl: get zenthrosjob: get zenthrosjobs train in tenant-risk is forbidden\n"
+    },
+    {
+      "case": "the Workspace has no namespace yet",
+      "means": "transient",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "-o",
+        "json",
+        "train"
+      ],
+      "code": 75,
+      "stderr": "zctl: get zenthrosjob: Workspace risk has no namespace yet\n"
+    },
+    {
+      "case": "a flag this zctl does not have",
+      "means": "invalid",
+      "args": [
+        "get",
+        "zenthrosjob",
+        "--watch-forever",
+        "train"
+      ],
+      "code": 64,
+      "stderr": "zctl: flag provided but not defined: -watch-forever\n"
+    },
+    {
+      "case": "a create without its manifest",
+      "means": "invalid",
+      "args": [
+        "create",
+        "zenthrosjob",
+        "--workspace",
+        "risk"
+      ],
+      "code": 64,
+      "stderr": "zctl: --file/-f is required\n"
+    },
+    {
+      "case": "the API refuses the job's spec",
+      "means": "invalid",
+      "args": [
+        "create",
+        "zenthrosjob",
+        "-f",
+        "job.json",
+        "--workspace",
+        "risk"
+      ],
+      "code": 64,
+      "stderr": "zctl: create zenthrosjob /j: ZenthrosJob.zenthros.ai \"train\" is invalid: spec.workload.kind: Unsupported value: \"Jobb\"\n"
+    },
+    {
+      "case": "a create with no answer",
+      "means": "unknown",
+      "args": [
+        "create",
+        "zenthrosjob",
+        "-f",
+        "job.json",
+        "--workspace",
+        "risk"
+      ],
+      "code": 1,
+      "stderr": "zctl: create zenthrosjob /j: an error on the server (\"upstream connect error\") has prevented the request from succeeding\n"
+    }
+  ],
+  "outputs": {
+    "get report (many)": [
+      {
+        "workspace_id": "x",
+        "job_id": "x",
+        "producer_id": "x",
+        "report_id": "x",
+        "sequence": 1,
+        "produced_at": 1,
+        "received_at": 1,
+        "final": true,
+        "resolved_image": "x",
+        "artifacts": [
+          {
+            "uri": "x",
+            "name": "x"
+          }
+        ],
+        "payload": {
+          "any": "x"
+        }
+      },
+      {
+        "workspace_id": "x",
+        "job_id": "x",
+        "producer_id": "x",
+        "report_id": "x",
+        "sequence": 1,
+        "produced_at": 1,
+        "received_at": 1,
+        "final": true,
+        "resolved_image": "x",
+        "artifacts": [
+          {
+            "uri": "x",
+            "name": "x"
+          }
+        ],
+        "payload": {
+          "any": "x"
+        }
+      }
+    ],
+    "get report (none)": {},
+    "get report (one)": {
+      "workspace_id": "x",
+      "job_id": "x",
+      "producer_id": "x",
+      "report_id": "x",
+      "sequence": 1,
+      "produced_at": 1,
+      "received_at": 1,
+      "final": true,
+      "resolved_image": "x",
+      "artifacts": [
+        {
+          "uri": "x",
+          "name": "x"
+        }
+      ],
+      "payload": {
+        "any": "x"
+      }
+    },
+    "get zenthrosjob -o json": {
+      "kind": "ZenthrosJob",
+      "apiVersion": "zenthros.ai/v1",
+      "metadata": {
+        "name": "j",
+        "namespace": "tenant-risk",
+        "uid": "0f5c-uid",
+        "generation": 2,
+        "creationTimestamp": "2026-10-29T00:00:00Z",
+        "labels": {
+          "zenthros.ai/name": "j"
+        },
+        "annotations": {
+          "zenthros.ai/submission": "nonce"
+        }
+      },
+      "spec": {
+        "target": {
+          "backends": [
+            "vm-a"
+          ]
+        },
+        "workload": {
+          "kind": "Job",
+          "template": {
+            "entrypoint": "echo hi",
+            "image": "python:3.13",
+            "workers": {
+              "min": 0,
+              "max": 0
+            },
+            "restartPolicy": {},
+            "artifacts": {},
+            "source": {}
+          }
+        }
+      },
+      "status": {
+        "phase": "Running",
+        "message": "running on vm-a",
+        "reasons": [
+          {
+            "code": "WORKER_LOST",
+            "detail": "vm-a went silent"
+          }
+        ],
+        "exitCode": 1,
+        "restarts": 1,
+        "workerLostRetries": 1,
+        "progress": {
+          "uri": "s3://b/ckpt/2",
+          "phase": "train",
+          "seq": 2,
+          "sha256": "ab",
+          "phases": [
+            {
+              "name": "train",
+              "uri": "s3://b/ckpt/2",
+              "seq": 2,
+              "sha256": "ab"
+            }
+          ]
+        },
+        "lifecycle": "Running",
+        "endpoints": [
+          {
+            "name": "http",
+            "port": 8000,
+            "url": "https://j.example",
+            "scope": "Workspace",
+            "backend": "vm-a",
+            "attempt": 1,
+            "readyAt": "2026-10-29T00:00:00Z"
+          }
+        ],
+        "members": [
+          {
+            "rank": 0,
+            "job": "j",
+            "backendID": "vm-a",
+            "phase": "Running",
+            "message": "x"
+          }
+        ],
+        "children": [
+          {
+            "name": "map",
+            "count": 1,
+            "specHash": "",
+            "spawnedAt": null,
+            "generation": 1,
+            "running": 1,
+            "children": [
+              {
+                "index": 0,
+                "job": "j-map-0",
+                "phase": "Running",
+                "message": "x"
+              }
+            ]
+          }
+        ],
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "True",
+            "observedGeneration": 2,
+            "lastTransitionTime": "2026-10-29T00:00:00Z",
+            "reason": "Running",
+            "message": "x"
+          }
+        ]
+      }
+    }
+  }
+}

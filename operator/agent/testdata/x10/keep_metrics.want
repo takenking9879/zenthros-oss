@@ -1,0 +1,3 @@
+(RayTrainWorker pid=33797) Reporting training result 1: TrainingReport(checkpoint=None, metrics={'loss': 1.4000787971118769, 'epoch': 0}, validation=False) from rank 0
+(RayTrainWorker pid=33797) Reporting training result 3: TrainingReport(checkpoint=None, metrics={'loss': 1.3905775139507013, 'epoch': 2}, validation=False) from rank 0
+Current best trial: 8cb85_00001 with loss=1.5191437005996704 and params={'lr': 0.001, 'n_features': 16, 'n_classes': 4}

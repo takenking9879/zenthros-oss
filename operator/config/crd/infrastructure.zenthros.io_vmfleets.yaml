@@ -1,0 +1,326 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: vmfleets.infrastructure.zenthros.io
+spec:
+  group: infrastructure.zenthros.io
+  names:
+    kind: VMFleet
+    listKind: VMFleetList
+    plural: vmfleets
+    shortNames:
+    - vmf
+    singular: vmfleet
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: VMFleet is a heterogeneous group of VMPools jobs run on through
+          fleetRef.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              VMFleetSpec composes homogeneous VMPools into one heterogeneous source of
+              capacity: providers, regions, zones, sizes, purchase modes, accelerators.
+              The fleet never provisions; it shares warm slots among its pools and
+              decides, slot by slot, which pool a job's new machine comes from.
+            properties:
+              access:
+                description: Access is the Workspace allowlist for fleetRef jobs.
+                properties:
+                  mode:
+                    default: Private
+                    description: Mode is Private for one Workspace or Public for multiple
+                      explicit grants.
+                    enum:
+                    - Private
+                    - Public
+                    type: string
+                  workspaces:
+                    description: Workspaces is the explicit allowlist. Public does
+                      not mean anonymous.
+                    items:
+                      maxLength: 63
+                      type: string
+                    maxItems: 64
+                    minItems: 1
+                    type: array
+                type: object
+                x-kubernetes-validations:
+                - message: private access requires exactly one Workspace and public
+                    access requires explicit grants
+                  rule: 'has(self.workspaces) ? self.mode != ''Private'' || size(self.workspaces)
+                    == 1 : self.mode == ''Private'''
+              constraints:
+                items:
+                  description: FleetConstraint limits how many slots share a value
+                    of CountBy.
+                  properties:
+                    countBy:
+                      description: FleetCountBy is what a fleet constraint counts
+                        slots by.
+                      enum:
+                      - purchasingMode
+                      - zone
+                      - region
+                      - provider
+                      - instanceType
+                      - accelerator
+                      type: string
+                    max:
+                      description: Max is the most slots with Value.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    maxFraction:
+                      description: |-
+                        MaxFraction is the most slots with Value as a fraction of the fleet's
+                        total max, rounded down: 0.75 of 4 is 3.
+                      pattern: ^(0(\.[0-9]+)?|1(\.0+)?)$
+                      type: string
+                    maxPerDomain:
+                      description: MaxPerDomain is the most slots with any one value
+                        (per zone, ...).
+                      format: int32
+                      minimum: 1
+                      type: integer
+                    value:
+                      description: Value is the one value max or maxFraction limits
+                        (Spot, A10G, ...).
+                      type: string
+                  required:
+                  - countBy
+                  type: object
+                  x-kubernetes-validations:
+                  - message: set exactly one of max, maxFraction and maxPerDomain
+                    rule: '(has(self.max) ? 1 : 0) + (has(self.maxFraction) ? 1 :
+                      0) + (has(self.maxPerDomain) ? 1 : 0) == 1'
+                  - message: max and maxFraction need a value; maxPerDomain applies
+                      to every value and takes none
+                    rule: has(self.maxPerDomain) != has(self.value)
+                maxItems: 8
+                type: array
+              members:
+                items:
+                  description: FleetMember is one pool of the fleet and its share.
+                  properties:
+                    max:
+                      description: Max is the most slots this pool holds for the fleet,
+                        warm or running.
+                      format: int32
+                      minimum: 1
+                      type: integer
+                    min:
+                      description: Min is the fewest warm slots the fleet keeps in
+                        this pool.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    poolRef:
+                      description: PoolRef names a Managed VMPool. A pool belongs
+                        to at most one fleet.
+                      minLength: 1
+                      type: string
+                    weight:
+                      default: 1
+                      description: |-
+                        Weight orders members: jobs try the heaviest first, and warm slots
+                        are shared in proportion.
+                      format: int32
+                      minimum: 1
+                      type: integer
+                  required:
+                  - max
+                  - poolRef
+                  type: object
+                  x-kubernetes-validations:
+                  - message: min must be less than or equal to max
+                    rule: '!has(self.min) || self.min <= self.max'
+                maxItems: 16
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - poolRef
+                x-kubernetes-list-type: map
+              total:
+                description: FleetTotal bounds the fleet as a whole.
+                properties:
+                  max:
+                    description: Max is the most slots across members. Empty is the
+                      sum of members' max.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minReady:
+                    description: MinReady is the warm slots kept across members, shared
+                      by weight.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+            required:
+            - members
+            type: object
+          status:
+            description: VMFleetStatus is observed state.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              counts:
+                items:
+                  description: FleetCount is how many live slots share a value.
+                  properties:
+                    count:
+                      format: int32
+                      type: integer
+                    countBy:
+                      description: FleetCountBy is what a fleet constraint counts
+                        slots by.
+                      enum:
+                      - purchasingMode
+                      - zone
+                      - region
+                      - provider
+                      - instanceType
+                      - accelerator
+                      type: string
+                    value:
+                      type: string
+                  required:
+                  - count
+                  - countBy
+                  - value
+                  type: object
+                type: array
+              members:
+                items:
+                  description: FleetMemberStatus is one member as the fleet controller
+                    last saw it.
+                  properties:
+                    desiredMaxReady:
+                      format: int32
+                      type: integer
+                    desiredMinReady:
+                      description: DesiredMinReady and DesiredMaxReady are what the
+                        fleet wrote on the pool.
+                      format: int32
+                      type: integer
+                    live:
+                      description: Live are the member's slots that count against
+                        its max.
+                      format: int32
+                      type: integer
+                    message:
+                      description: Message says why the member takes no new slot,
+                        when it does not.
+                      type: string
+                    poolRef:
+                      type: string
+                    ready:
+                      description: Ready are warm slots no job holds; Reserved those
+                        a job holds.
+                      format: int32
+                      type: integer
+                    reserved:
+                      format: int32
+                      type: integer
+                  required:
+                  - desiredMaxReady
+                  - desiredMinReady
+                  - live
+                  - poolRef
+                  - ready
+                  - reserved
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

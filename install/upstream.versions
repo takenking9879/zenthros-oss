@@ -1,0 +1,10 @@
+# Upstream versions the installer pins. Change a version, then run
+# bash install/lock-upstream.sh to rewrite install/upstream.lock.
+tailscale          1.102.4
+tailscale-keyring  1.35.181
+uv                 0.13.7
+node               24.21.0
+go                 1.27.1
+java               25.0.4.1+1
+containerd         2.4.1
+runc               1.5.2

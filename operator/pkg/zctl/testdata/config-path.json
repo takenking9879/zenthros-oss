@@ -1,0 +1,8 @@
+{
+  "_comment": "Where zctl (pkg/zctl ConfigPath) and the SDK (zenthros.config.config_path) find the zenconfig, the same on every OS: ZENTHROS_CONFIG, else $XDG_CONFIG_HOME/zenthros/config.yaml, else ~/.config/zenthros/config.yaml. Both test suites read this file.",
+  "cases": [
+    {"env": {"ZENTHROS_CONFIG": "/etc/zen/c.yaml", "XDG_CONFIG_HOME": "/xdg"}, "home": "/home/u", "want": "/etc/zen/c.yaml"},
+    {"env": {"XDG_CONFIG_HOME": "/xdg"}, "home": "/home/u", "want": "/xdg/zenthros/config.yaml"},
+    {"env": {}, "home": "/home/u", "want": "/home/u/.config/zenthros/config.yaml"}
+  ]
+}
