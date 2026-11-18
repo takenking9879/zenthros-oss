@@ -23,7 +23,7 @@ from zenthros.jobs.handle import CANCELLED, FAILED, QUEUED, SUCCEEDED, TERMINAL_
 from zenthros.pipeline import PIPELINE_LABEL, STEP_LABEL
 from zenthros.remote import call as remote_call
 from zenthros.remote import snapshot as code_snapshot
-from zenthros.remote.options import blob_store, job_client, local_client_of, local_clients, settings
+from zenthros.remote.options import blob_store, job_client, local_client, local_client_of, settings
 
 # An agent's run ends even if the agent forgets it, and its record lasts while
 # it works on what the run said.
@@ -83,7 +83,7 @@ def targets():
     built = [env.name for env in found if env.build]
     published = [env.name for env in found if env.published]
     return [{**row.to_dict(), **_allowance(row),
-             "environments": built if row.name in (machines.LOCAL, machines.LOCAL_K8S) else published}
+             "environments": built if row.name == machines.LOCAL else published}
             for row in targetlist.targets()]
 
 
@@ -232,7 +232,8 @@ def _runner_reason(client, name):
 def jobs(limit=DEFAULT_LIMIT, cursor=0):
     """The jobs here and in your Workspace, newest first."""
     clients = [job_client()]
-    clients += [here for here in local_clients() if here is not clients[0]]
+    if local_client() is not clients[0]:
+        clients.append(local_client())
     found, unreachable = [], []
     for client in clients:
         try:

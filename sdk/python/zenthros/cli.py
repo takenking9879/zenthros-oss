@@ -178,7 +178,6 @@ def parser():
     cl.add_argument("--results", action="store_true", help="also what jobs past their keep_for left, but for their outputs")
     cl.add_argument("--outputs", action="store_true", help="with --results, their outputs too")
     cl.add_argument("--envs", action="store_true", help="also the cached Python of images no container has")
-    cl.add_argument("--k8s", action="store_true", help="also the agent on-local-k8s installed on the cluster, with its namespace")
     cl.add_argument("--images", action="store_true", help="also the images zenthros env build made here, and the builder and its cache")
     cl.add_argument("--cache", action="store_true", help="also the cache entries older than --older")
     cl.add_argument("--older", default="180d", help="how old an entry must be to go (--cache): 180d, the default")
@@ -475,16 +474,13 @@ def _skill(args, out):
 
 
 def _clean(args, out):
-    from zenthros.remote.options import local_client, local_k8s_client
+    from zenthros.remote.options import local_client
 
     client = local_client()
     # The containers first: what they no longer hold can go after them.
     answer = {"containers": client.clean(dry_run=args.dry_run)}
     if args.results:
-        answer["results"] = (client.clean_results(dry_run=args.dry_run, outputs=args.outputs) +
-                             local_k8s_client().clean_results(dry_run=args.dry_run, outputs=args.outputs))
-    if args.k8s:
-        answer["k8s"] = local_k8s_client().uninstall(dry_run=args.dry_run)
+        answer["results"] = client.clean_results(dry_run=args.dry_run, outputs=args.outputs)
     if args.envs:
         answer["envs"] = client.clean_envs(dry_run=args.dry_run)
     if args.images:

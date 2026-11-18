@@ -18,9 +18,10 @@ class FollowedLog:
 
     client.follow_logs(job_id, after=, tail=) opens one stream: .stdout its
     lines, .position where the next one goes on, poll(), wait() and
-    terminate() as a process's."""
+    terminate() as a process's. after: a position a log followed before
+    left, to go on from."""
 
-    def __init__(self, client, job_id, ended, poll=2.0, tail=None):
+    def __init__(self, client, job_id, ended, poll=2.0, tail=None, after=None):
         self._client, self._job_id, self._ended = client, job_id, ended
         self._poll, self._tail = poll, tail
         self._stopping = threading.Event()
@@ -28,6 +29,9 @@ class FollowedLog:
         # Whether any stream opened: a job that ended before one did is read
         # whole instead.
         self.opened = False
+        # Whether it gave the log to the job's end.
+        self.done = False
+        self.position = after
         self._lines = self._follow()
 
     def __iter__(self):
@@ -41,18 +45,28 @@ class FollowedLog:
         return False
 
     def _follow(self):
-        after = None
+        # A job that ended before any stream opened (refused while it had
+        # no machine yet) is opened once more: its log is whole by then.
+        last_look = False
         while True:
             try:
-                proc = self._client.follow_logs(self._job_id, after=after, tail=self._tail)
+                proc = self._client.follow_logs(self._job_id, after=self.position, tail=self._tail)
             except (errors.ZenthrosError, OSError):  # opened again below
                 proc = None
             if proc is not None:
                 self._proc, self.opened = proc, True
-                yield from proc.stdout
+                for line in proc.stdout:
+                    self.position = getattr(proc, "position", None) or self.position
+                    yield line
                 proc.wait()
-                after = getattr(proc, "position", None) or after
-            if self._stopping.is_set() or self._ended():
+                self.position = getattr(proc, "position", None) or self.position
+            if self._stopping.is_set():
+                return
+            if self._ended():
+                if not self.opened and not last_look:
+                    last_look = True
+                    continue
+                self.done = self.opened
                 return
             self._stopping.wait(self._poll)
             if self._stopping.is_set():

@@ -110,7 +110,9 @@ func startLocal(t *testing.T, executor Executor, backendType string) func(verb s
 	})
 	return func(verb string, stdin any, args ...string) (string, string, int) {
 		var in bytes.Buffer
-		if stdin != nil {
+		if raw, ok := stdin.(string); ok {
+			in.WriteString(raw)
+		} else if stdin != nil {
 			if err := json.NewEncoder(&in).Encode(stdin); err != nil {
 				t.Fatal(err)
 			}
@@ -371,20 +373,84 @@ func TestLocalJobIsStoppedAtItsTimeLimit(t *testing.T) {
 	}
 }
 
-// The SDK writes a mark in the folder it means to share and asks the agent
-// what it reads there: the same words is the only proof the cluster has it.
-func TestLocalInfoSaysTheMarkOfTheSharedFolder(t *testing.T) {
-	shared := t.TempDir()
-	if err := os.WriteFile(filepath.Join(shared, LocalSharedMark), []byte("abc123\n"), 0o644); err != nil {
+func (e *localRecorder) setPhase(phase v1.Phase) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.state = backend.JobState{Phase: phase}
+}
+
+// wait answers once the job is other than what the SDK saw, as the hub's
+// long poll does: it ran a docker exec of status every 0.5 s.
+func TestLocalWaitAnswersWhenTheJobChanges(t *testing.T) {
+	executor := &localRecorder{state: backend.JobState{Phase: v1.PhaseRunning}}
+	run := startLocal(t, executor, backend.TypeContainer)
+	job := LocalJob{ID: "j", Tasks: []LocalTask{{Rank: -1, ID: "j", Handle: "j"}}}
+	out, stderr, code := run("wait", job, "--seen", "", "--timeout", "5s")
+	if code != 0 {
+		t.Fatalf("wait: %s", stderr)
+	}
+	var first LocalWaited
+	if err := json.Unmarshal([]byte(out), &first); err != nil || first.Status.Phase != v1.PhaseRunning || first.Seen == "" {
+		t.Fatalf("seen nothing: at once %s %v", out, err)
+	}
+	// Nothing changes: it answers when its time is up, with what it saw.
+	began := time.Now()
+	out, _, code = run("wait", job, "--seen", first.Seen, "--timeout", "300ms")
+	var same LocalWaited
+	if err := json.Unmarshal([]byte(out), &same); code != 0 || err != nil || same.Seen != first.Seen || time.Since(began) < 300*time.Millisecond {
+		t.Fatalf("an unchanged job answered %s after %v", out, time.Since(began))
+	}
+	// It ends: the answer comes within a beat, not at the timeout.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		executor.setPhase(v1.PhaseSucceeded)
+	}()
+	began = time.Now()
+	out, stderr, code = run("wait", job, "--seen", first.Seen, "--timeout", "5s")
+	var ended LocalWaited
+	if err := json.Unmarshal([]byte(out), &ended); code != 0 || err != nil || ended.Status.Phase != v1.PhaseSucceeded {
+		t.Fatalf("wait after the end: %s %s", out, stderr)
+	}
+	if took := time.Since(began); took > 200*time.Millisecond+300*time.Millisecond {
+		t.Fatalf("the end came %v after it was waited for, want within 300 ms of it", took)
+	}
+}
+
+// finish brings back what the agent holds of an ended job and lets it go, in
+// one command: it was a status, reports, logs, cancel and forget, a docker
+// exec each. Letting go is still Cancel's teardown (the job's directory, its
+// secrets) and forget's (its reports): forget alone left the directory. And
+// it lets go only once the SDK says it kept what came: a Ctrl-C in between
+// loses nothing.
+func TestLocalFinishBringsItAllBackAndLetsGo(t *testing.T) {
+	executor := &localRecorder{state: backend.JobState{Phase: v1.PhaseSucceeded}, logs: "line one\nline two\n"}
+	run := startLocal(t, executor, backend.TypeContainer)
+	out, stderr, code := run("submit", localJob(""))
+	if code != 0 {
+		t.Fatalf("submit: %s", stderr)
+	}
+	var job LocalJob
+	if err := json.Unmarshal([]byte(out), &job); err != nil {
 		t.Fatal(err)
 	}
-	if got := readSharedMark(shared); got != "abc123" {
-		t.Errorf("mark = %q, want abc123", got)
+	raw, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := readSharedMark(t.TempDir()); got != "" {
-		t.Errorf("mark of an empty folder = %q, want none", got)
-	}
-	if got := readSharedMark(""); got != "" {
-		t.Errorf("mark with no folder = %q, want none", got)
+	// The SDK went before it said it kept it: all stays, and comes again.
+	for _, answer := range []string{"", `{"kept": false}` + "\n", `{"kept": true}` + "\n"} {
+		out, stderr, code = run("finish", string(raw)+"\n"+answer)
+		var finished LocalFinished
+		if err := json.Unmarshal([]byte(out), &finished); err != nil {
+			t.Fatalf("finish answered %q: %v (%s)", out, err, stderr)
+		}
+		if finished.Log != "line one\nline two\n" || finished.Reports == nil {
+			t.Fatalf("finished = %+v", finished)
+		}
+		if kept := answer == `{"kept": true}`+"\n"; kept != (code == 0) {
+			t.Fatalf("answered %q, exit %d: %s", answer, code, stderr)
+		} else if want := map[bool]int{false: 0, true: 1}[kept]; executor.cancelledCount() != want {
+			t.Fatalf("answered %q, the executor let go of %d jobs, want %d", answer, executor.cancelledCount(), want)
+		}
 	}
 }

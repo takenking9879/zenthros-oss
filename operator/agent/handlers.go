@@ -194,6 +194,14 @@ func (a *Agent) Status(ctx context.Context, req *agentpb.StatusRequest) *agentpb
 		// is running: watch and count it again.
 		a.tracker.Retrack(req.GetId(), req.GetHandleName(), cancels)
 	}
+	if state.Phase.Terminal() && a.tracker.Tracked(req.GetHandleName()) {
+		// The controller learns the end from this answer: the watcher pushes
+		// it and frees the slot first, as at its tick, so a job sent next is
+		// not refused for a slot held by one that ended.
+		if watcher := a.watcher.Load(); watcher != nil {
+			watcher.PollNow(ctx)
+		}
+	}
 	state = a.decorate(ctx, req.GetHandleName(), state)
 	a.tracker.Answered(req.GetHandleName(), statusKey(state))
 	return &agentpb.StatusResponse{RequestId: req.GetRequestId(), Status: toProtoStatus(state)}

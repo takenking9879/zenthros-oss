@@ -311,6 +311,27 @@ class RunnerTest(unittest.TestCase):
                                         ["/envs/py-x/bin/python", "-m", "zenthros.remote", "exec", self.uri]))
         self.assertEqual((env[envs.READY_ENV], env["JAVA_HOME"]), (envs.key(self.needs), "/envs/java"))
 
+    def test_where_it_runs_is_said_once_by_the_python_that_runs_it(self):
+        """The runner runs the call again inside the function's environment: the
+        line that says where it runs came out twice, once from each Python."""
+        from zenthros.remote import runner
+
+        said = io.StringIO()
+
+        def reexec(path, argv, env):
+            os.environ.update(env)
+            # The environment's Python reads the same call (and fails on the
+            # fake pickle, past the line).
+            runner.execute(self.uri, blob_store=self.store, out=said)
+            raise Reexec(path)
+
+        prepare = mock.Mock(return_value=("/envs/py-x/bin/python", {}))
+        with mock.patch.object(envs, "prepare", prepare), mock.patch.object(runner, "store_result"):
+            code, _, out = self.run_it(_reexec=reexec)
+        self.assertEqual(code, "reexec")
+        lines = [line for line in (out + said.getvalue()).splitlines() if " on " in line and "CPUs" in line]
+        self.assertEqual(len(lines), 1, out + said.getvalue())
+
     def test_inside_the_environment_it_is_not_built_again(self):
         os.environ[envs.READY_ENV] = envs.key(self.needs)
         prepare = mock.Mock(side_effect=AssertionError("built again"))

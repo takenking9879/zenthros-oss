@@ -1,4 +1,3 @@
-{{- if not .Values.agent.local.enabled }}
 {{- if not .Values.agent.reportSpoolEmptyDir }}
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -12,5 +11,4 @@ spec:
   resources:
     requests:
       storage: {{ .Values.agent.reportSpoolSize | quote }}
-{{- end }}
 {{- end }}

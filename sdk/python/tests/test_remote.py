@@ -462,6 +462,16 @@ class RunTest(unittest.TestCase):
         self.assertIn("cloudpickle 0.0.1 (here", out.getvalue())
         self.assertIn("not installed here (the call may not use them): no-such-dist-zr 1.0", out.getvalue())
 
+    def test_a_failure_without_a_traceback_has_no_title_for_one(self):
+        """An environment that failed to build, a Python of another version:
+        the record has no traceback, and the message ended in an empty title."""
+        handle, _, _ = call(double, 1, store=MemoryBlobStore(), client=FakeJobClient())
+        said = str(handle._error({"type": "EnvironmentFailed", "message": "uv could not resolve polars", "traceback": ""}))
+        self.assertNotIn("remote traceback", said)
+        self.assertIn("EnvironmentFailed: uv could not resolve polars", said)
+        said = str(handle._error({"type": "ValueError", "message": "bad", "traceback": "Traceback (most recent...)\n"}))
+        self.assertIn("--- remote traceback ---\nTraceback", said)
+
     def test_failed_job_without_result_names_the_logs(self):
         store = MemoryBlobStore()
         client = FakeJobClient()
@@ -719,6 +729,60 @@ class FollowedLogTest(unittest.TestCase):
             self.assertEqual(next(iter(lines)), "x\n")
         self.assertTrue(Forever.terminated, "the block's end left the stream open")
 
+    def test_a_job_that_ended_before_its_stream_opened_gives_its_whole_log(self):
+        # The stream is refused while the job has no machine yet (409), and
+        # a short job has ended by the next look: its log is opened once
+        # more, whole now, never left unread.
+        class Client:
+            opens = 0
+
+            def follow_logs(self, name, after=None, tail=None):
+                Client.opens += 1
+                if Client.opens == 1:
+                    raise errors.TransientError("the job runs on no machine yet")
+                return FakeProc(["shouting 7\n"], position="9")
+
+        log = FollowedLog(Client(), "j", ended=lambda: True, poll=0.01)
+        self.assertEqual(list(log), ["shouting 7\n"])
+        self.assertTrue(log.done)
+        self.assertEqual(log.position, "9")
+
+
+class FollowedThenResultTest(unittest.TestCase):
+    """call.logs(follow=True), then call.result(): each line once (result()
+    printed the whole log again)."""
+
+    def call(self, streams):
+        client = RecordStreams(streams)
+        client.status = lambda name: SUCCEEDED
+        client.wait = lambda *args, **kwargs: SUCCEEDED
+        client.job_cost = lambda name: None
+        client.reports = lambda name: []
+        call = remote.RemoteCall("zr-x", "s3://b/p", handle=remote.call.JobHandle("zr-x", client), client=client,
+                                 blob_store=None)
+        call._collect = lambda failure: (True, 42)
+        return client, call
+
+    def result(self, call):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(call.result(), 42)
+        return "".join(line for line in out.getvalue().splitlines(keepends=True) if not line.startswith("✓"))
+
+    def test_a_log_followed_to_its_end_is_not_printed_again(self):
+        client, call = self.call([[record(b"one\ntwo\n", cursor="8", handle="h1", attempt=0)]])
+        self.assertEqual(list(call.logs(follow=True)), ["one\n", "two\n"])
+        self.assertEqual(self.result(call), "")
+        self.assertEqual(len(client.afters), 1, "followed again")
+
+    def test_result_goes_on_from_where_a_followed_log_got(self):
+        client, call = self.call([[record(b"one\n", cursor="4", handle="h1", attempt=0)],
+                                  [record(b"two\n", cursor="8", handle="h1", attempt=0)]])
+        with call.logs(follow=True) as lines:
+            self.assertEqual(next(iter(lines)), "one\n")
+        self.assertEqual(self.result(call), "two\n")
+        self.assertEqual(client.afters[-1].cursor, "4")
+
 
 class PackTest(unittest.TestCase):
     def tree(self, root):
@@ -847,7 +911,8 @@ class LoadedPackagesTest(unittest.TestCase):
             first = remote.bundle.loaded_packages()
             self.assertEqual(remote.bundle.loaded_packages(), first)
         self.assertEqual(scanned.call_count, 1)
-        self.assertIn("cloudpickle", first)
+        # Loaded, and the SDK's own: the runner's packages carry it (sdk_distributions).
+        self.assertNotIn("cloudpickle", first)
 
 
 class LogTailTest(unittest.TestCase):

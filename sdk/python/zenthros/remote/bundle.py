@@ -25,6 +25,7 @@ import gzip
 import hashlib
 import io
 import os
+import re
 import sys
 import tarfile
 
@@ -87,18 +88,42 @@ def _version(dist):
         return None
 
 
+def _canonical(dist):
+    return re.sub(r"[-_.]+", "-", dist).lower()
+
+
+@functools.cache
+def sdk_distributions():
+    """The SDK's own distributions, by canonical name: zenthros and what it
+    requires (not its extras). They are not the caller's to find on the
+    machine: the core travels with the call, cloudpickle in the runner's
+    packages (RUNNER_PACKAGES_ENV), and the rest only this side uses."""
+    from importlib import metadata
+
+    try:
+        requires = metadata.requires("zenthros") or []
+    except metadata.PackageNotFoundError:
+        requires = []
+    names = {"zenthros"}
+    for requirement in requires:
+        if "extra ==" not in requirement:
+            names.add(_canonical(re.match(r"[A-Za-z0-9._-]+", requirement).group()))
+    return frozenset(names)
+
+
 def loaded_packages():
     """name -> version of the distributions behind the non-stdlib modules
-    loaded now: what the call may need on the other side."""
+    loaded now, but the SDK's own: what the call may need on the other side."""
     owners = _owners()
     stdlib = getattr(sys, "stdlib_module_names", frozenset())
+    ours = sdk_distributions()
     found = {}
     for module in list(sys.modules):
         top = module.partition(".")[0]
         if not top or top.startswith("_") or top in stdlib:
             continue
         for dist in owners.get(top, []):
-            if dist not in found and _version(dist) is not None:
+            if dist not in found and _canonical(dist) not in ours and _version(dist) is not None:
                 found[dist] = _version(dist)
     return found
 

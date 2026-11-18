@@ -10,7 +10,8 @@ The machine type decides the installer and how its jobs run:
     VM, containers     install-agent.sh with containerd       containerd
     VM, directly       install-agent.sh                       systemd
     Container          install-container.sh (RunPod, Vast)    process
-    This computer      a container here (zenthros.create)     process
+    This computer      a container here (zenthros.create),    process
+      through the hub  which jobs reach from anywhere; on="local" needs no attach
 
 The order is the rule, and a test pins it: checks, then the token, then
 the two lines, then the wait, then a test run. A check that fails makes
@@ -25,7 +26,7 @@ import time
 
 from zenthros import console, errors
 
-TYPES = (("vm", "VM"), ("container", "Container"), ("kubernetes", "Kubernetes"), ("local", "This computer"))
+TYPES = (("vm", "VM"), ("container", "Container"), ("kubernetes", "Kubernetes"), ("local", "This computer (through the hub)"))
 RUNTIMES = (("containerd", "containers (containerd)"), ("systemd", "directly (systemd)"))
 _ALIASES = {"vm": "vm", "container": "container", "kubernetes": "kubernetes", "k8s": "kubernetes",
             "local": "local", "this-computer": "local"}
@@ -225,6 +226,8 @@ def attach(name=None, *, type=None, runtime=None, host=None, key=None, ssh="ssh"
     if kind == "local":
         if host:
             raise errors.ValidationError("host= is for a VM or a container; type='local' is this computer")
+        _say(out, f"This computer joins your Workspace{' as ' + name if name else ''}: jobs reach it from anywhere. "
+                  "To run from this computer only, with no hub, you need no attach: on='local'.")
         # create checks Docker before it asks the hub for anything.
         made = machines.create(machines.LOCAL, name=name)
         _say(out, "✓ connected")

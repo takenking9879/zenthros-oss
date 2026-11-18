@@ -1,4 +1,3 @@
-{{- if not .Values.agent.local.enabled }}
 {{- if and .Values.enrollment.enabled .Values.enrollment.token }}
 apiVersion: batch/v1
 kind: Job
@@ -130,5 +129,4 @@ spec:
             capabilities:
               drop: [ALL]
           {{- end }}
-{{- end }}
 {{- end }}

@@ -5,6 +5,8 @@ package agent
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,6 +14,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,7 +32,8 @@ import (
 // LocalWorkspace is the Workspace of a job with no hub: the agent's own.
 const LocalWorkspace = "local"
 
-// LocalNamespace is where a local Kubernetes agent runs its jobs.
+// LocalNamespace is the namespace a local job's spec is named in: the SDK
+// sends it with none.
 const LocalNamespace = "zenthros-local"
 
 // LocalJob is what `local submit` says of what it started, and what every
@@ -119,7 +123,7 @@ func LocalSpecs(job *v1.ZenthrosJob, backendType string) ([]jobspec.JobSpec, err
 // It prints JSON, exits 0, or says why on stderr and exits 1 (2 for usage).
 func RunLocalCLI(ctx context.Context, args []string, socket string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: zenthros-agent local info|submit|status|cancel|logs|reports|progress|forget")
+		fmt.Fprintln(stderr, "usage: zenthros-agent local info|submit|status|wait|finish|cancel|logs|reports|progress|forget")
 		return 2
 	}
 	client := localClient{socket: socket}
@@ -157,6 +161,16 @@ func (c localClient) run(ctx context.Context, verb string, args []string, stdin 
 		return c.submit(ctx, stdin, stdout)
 	case "status":
 		return c.status(ctx, stdin, stdout)
+	case "wait":
+		flags := flag.NewFlagSet("wait", flag.ContinueOnError)
+		seen := flags.String("seen", "", "what the job was last seen as (wait's own answer); empty answers at once")
+		timeout := flags.Duration("timeout", 30*time.Second, "the most it waits for a change")
+		if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+			return fmt.Errorf("%w: zenthros-agent local wait [--seen SEEN] [--timeout 30s] < JOB", errLocalUsage)
+		}
+		return c.waitChange(ctx, *seen, *timeout, stdin, stdout)
+	case "finish":
+		return c.finish(ctx, stdin, stdout)
 	case "cancel":
 		return c.cancel(ctx, stdin, stdout)
 	case "logs":
@@ -252,13 +266,20 @@ func (c localClient) cancelTasks(ctx context.Context, job LocalJob) {
 }
 
 func readLocalJob(stdin io.Reader) (LocalJob, error) {
+	_, job, err := decodeLocalJob(stdin)
+	return job, err
+}
+
+// decodeLocalJob reads the job from stdin, and gives the decoder to read
+// what comes after it.
+func decodeLocalJob(stdin io.Reader) (*json.Decoder, LocalJob, error) {
 	var job LocalJob
 	decoder := json.NewDecoder(stdin)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&job); err != nil {
-		return job, fmt.Errorf("the job does not read: %w", err)
+		return nil, job, fmt.Errorf("the job does not read: %w", err)
 	}
-	return job, nil
+	return decoder, job, nil
 }
 
 // status asks Agent.Status for each task and adds them up as the controller
@@ -268,11 +289,122 @@ func (c localClient) status(ctx context.Context, stdin io.Reader, stdout io.Writ
 	if err != nil {
 		return err
 	}
+	out, err := c.statusOf(ctx, job)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(stdout).Encode(out)
+}
+
+// LocalWaited is wait's answer: the job's status and what to send back as
+// seen.
+type LocalWaited struct {
+	Status LocalStatus `json:"status"`
+	Seen   string      `json:"seen"`
+}
+
+// waitBeat is how often wait asks the agent, inside the container.
+const waitBeat = 100 * time.Millisecond
+
+// waitChange answers the job's status once it is other than seen names (at once
+// for seen ""), or after timeout: the hub's long poll (GET /jobs/x/wait). It
+// asks the agent every waitBeat over the socket, so the SDK runs one docker
+// exec where it ran a status every half second.
+func (c localClient) waitChange(ctx context.Context, seen string, timeout time.Duration, stdin io.Reader, stdout io.Writer) error {
+	job, err := readLocalJob(stdin)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		status, err := c.statusOf(ctx, job)
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(status)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(raw)
+		now := hex.EncodeToString(sum[:8])
+		if now != seen || !time.Now().Before(deadline) {
+			return json.NewEncoder(stdout).Encode(LocalWaited{Status: status, Seen: now})
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(min(waitBeat, time.Until(deadline))):
+		}
+	}
+}
+
+// LocalFinished is what finish brings back of a job that ended: each task's
+// reports and its log, in task order.
+type LocalFinished struct {
+	Reports []json.RawMessage `json:"reports"`
+	Log     string            `json:"log"`
+}
+
+// localKept is what the SDK answers finish once it kept what finish sent.
+type localKept struct {
+	Kept bool `json:"kept"`
+}
+
+// finish brings back what the agent holds of a job that ended and lets it
+// go, in one command: Cancel's teardown (the task's directory, its secrets,
+// its slot) and forget's (its reports, its cursor). It lets go only once
+// stdin says what it sent was kept ({"kept": true}): a reader that went
+// first (a Ctrl-C) leaves it all here, to be asked again whole.
+func (c localClient) finish(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
+	decoder, job, err := decodeLocalJob(stdin)
+	if err != nil {
+		return err
+	}
+	out := LocalFinished{Reports: []json.RawMessage{}}
+	for _, task := range job.Tasks {
+		var reports []json.RawMessage
+		if err := c.ask(ctx, localRequest{Reports: task.ID}, &reports); err != nil {
+			return err
+		}
+		out.Reports = append(out.Reports, reports...)
+	}
+	var log strings.Builder
+	for _, task := range job.Tasks {
+		if err := c.readLog(ctx, localLogs{Handle: task.Handle, Tail: -1}, &log); err != nil {
+			return err
+		}
+	}
+	out.Log = log.String()
+	if err := json.NewEncoder(stdout).Encode(out); err != nil {
+		return err
+	}
+	var kept localKept
+	if err := decoder.Decode(&kept); err != nil || !kept.Kept {
+		return errors.New("what was sent was not kept: the job stays, to be asked again")
+	}
+	for _, task := range job.Tasks {
+		var answer agentpb.RegisterRequest
+		if err := c.command(ctx, &agentpb.RegisterResponse{Cancel: cancelOf(task)}, &answer); err != nil {
+			return err
+		}
+		if resp := answer.GetCancelResponse(); resp.GetError() != "" {
+			return errors.New(resp.GetError())
+		}
+		var forgotten map[string]bool
+		if err := c.ask(ctx, localRequest{Forget: task.ID}, &forgotten); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// statusOf is the job's status: each task's, added up.
+func (c localClient) statusOf(ctx context.Context, job LocalJob) (LocalStatus, error) {
 	states := make([]*agentpb.JobStatus, len(job.Tasks))
 	for i, task := range job.Tasks {
 		var answer agentpb.RegisterRequest
 		if err := c.command(ctx, &agentpb.RegisterResponse{Status: &agentpb.StatusRequest{BackendId: LocalWorkspace, Id: task.ID, HandleName: task.Handle}}, &answer); err != nil {
-			return err
+			return LocalStatus{}, err
 		}
 		resp := answer.GetStatusResponse()
 		if resp.GetError() != "" {
@@ -286,13 +418,13 @@ func (c localClient) status(ctx context.Context, stdin io.Reader, stdout io.Writ
 	var progress v1.JobProgress
 	if len(job.Tasks) == 1 {
 		if err := c.ask(ctx, localRequest{Progress: job.Tasks[0].ID}, &progress); err != nil {
-			return err
+			return LocalStatus{}, err
 		}
 		if progress.URI != "" {
 			out.Progress = &progress
 		}
 	}
-	return json.NewEncoder(stdout).Encode(out)
+	return out, nil
 }
 
 func localStatusOf(job LocalJob, states []*agentpb.JobStatus) LocalStatus {
@@ -387,12 +519,17 @@ func (c localClient) logs(ctx context.Context, args []string, stdout io.Writer) 
 	if err := flags.Parse(args); err != nil || flags.NArg() != 1 {
 		return fmt.Errorf("%w: zenthros-agent local logs [--tail N] [--follow] HANDLE", errLocalUsage)
 	}
+	return c.readLog(ctx, localLogs{Handle: flags.Arg(0), Tail: *tail, Follow: *follow}, stdout)
+}
+
+// readLog writes a task's log to stdout as the agent sends it.
+func (c localClient) readLog(ctx context.Context, req localLogs, stdout io.Writer) error {
 	conn, err := c.dial(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	if err := writeRequest(conn, localRequest{Logs: &localLogs{Handle: flags.Arg(0), Tail: *tail, Follow: *follow}}); err != nil {
+	if err := writeRequest(conn, localRequest{Logs: &req}); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(bufio.NewReader(conn))

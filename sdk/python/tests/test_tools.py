@@ -98,13 +98,20 @@ class DictTest(Base):
 
 class NoAccountTest(unittest.TestCase):
     def test_with_no_account_this_computer_is_the_one_target(self):
-        with tempfile.TemporaryDirectory() as folder, \
-                mock.patch.dict(os.environ, {config.CONFIG_ENV: os.path.join(folder, "none")}, clear=False), \
-                mock.patch("zenthros.jobs.localk8s.current_context", return_value=""), \
-                mock.patch("zenthros.targetlist.local_target", lambda *a, **k: (Target(name="local", kind="Local", state="Ready"), set())):
-            os.environ.pop("ZENTHROS_SERVER", None)
-            os.environ.pop("ZENTHROS_API_KEY", None)
-            rows = tools.targets()
+        """Even with a cluster in kubectl's context: Kubernetes is reached
+        through the hub (zenthros attach NAME --type kubernetes), and nothing
+        is installed on whatever cluster kubectl names."""
+        with tempfile.TemporaryDirectory() as folder:
+            kubectl = os.path.join(folder, "kubectl")
+            with open(kubectl, "w") as script:
+                script.write("#!/bin/sh\necho work-cluster\n")
+            os.chmod(kubectl, 0o755)
+            with mock.patch.dict(os.environ, {config.CONFIG_ENV: os.path.join(folder, "none"),
+                                              "PATH": folder + os.pathsep + os.environ.get("PATH", "")}, clear=False), \
+                    mock.patch("zenthros.targetlist.local_target", lambda *a, **k: (Target(name="local", kind="Local", state="Ready"), set())):
+                os.environ.pop("ZENTHROS_SERVER", None)
+                os.environ.pop("ZENTHROS_API_KEY", None)
+                rows = tools.targets()
         self.assertEqual([row["name"] for row in rows], ["local"])
         self.assertTrue(rows[0]["allowed"])
         self.assertFalse(rows[0]["costs"])

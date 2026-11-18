@@ -395,6 +395,8 @@ type Agent struct {
 	// beat is the control stream's heartbeat, nil between streams
 	// (slotsChanged).
 	beat atomic.Pointer[HeartbeatSender]
+	// watcher is the current stream's status watcher, nil between streams.
+	watcher atomic.Pointer[StatusWatcher]
 	// interrupted is a notice pushed to the agent (Interrupt), and
 	// interruptCh closes when it arrives.
 	interrupted   atomic.Pointer[preemptionNotice]
@@ -720,6 +722,8 @@ func (a *Agent) ServeStream(ctx context.Context, stream controlStream) error {
 	heartbeat.advertised = &a.advertisedHash
 	a.beat.Store(heartbeat)
 	defer a.beat.Store(nil)
+	a.watcher.Store(watcher)
+	defer a.watcher.Store(nil)
 	// The job's end is on the stream before the heartbeat that frees its
 	// slot: the hub never sees a free slot under a job it still has running.
 	watcher.finished = func(handle string) {

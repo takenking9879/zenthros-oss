@@ -43,9 +43,8 @@ jobs:
           echo "agent_image=${image}" >> "${RUNNER_TEMP}/digests.txt"
       - name: The SDK's wheel, pinned to this release's agent
         run: |
-          image="$(sed -n 's/^agent_image=//p' "${RUNNER_TEMP}/digests.txt")"
           ZENTHROS_SHA256SUMS="${RUNNER_TEMP}/release/SHA256SUMS" bash install/build-sdk.sh "${RUNNER_TEMP}/sdk" \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" "${image}"
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
           mkdir -p "${RUNNER_TEMP}/wheel" && mv "${RUNNER_TEMP}"/sdk/*.whl "${RUNNER_TEMP}/wheel/"
           (cd "${RUNNER_TEMP}/wheel" && sha256sum ./*.whl | sed 's/^/wheel_sha256=/') >> "${RUNNER_TEMP}/digests.txt"
       - name: The release

@@ -24,7 +24,6 @@ from unittest import mock
 from zenthros import console, identity, reach
 from zenthros.core.env import JobEnv
 from zenthros.core.report import new_snapshot
-from zenthros.jobs import localk8s
 from zenthros.remote import bundle, snapshot
 from zenthros.remote.call import CALL_KIND, RemoteCall
 
@@ -157,13 +156,6 @@ class ExecutableBitTest(Repo):
         with tarfile.open(fileobj=io.BytesIO(taken.pack())) as tar:
             modes = {member.name: member.mode for member in tar.getmembers()}
         self.assertEqual((modes["scripts/run.sh"], modes["src/b.py"], modes["src/a.py"]), (0o755, 0o644, 0o644))
-
-
-class LocalClusterTest(unittest.TestCase):
-    def test_windows_says_wsl2_for_a_local_cluster_too(self):
-        with mock.patch("platform.system", return_value="Windows"), self.assertRaises(localk8s.errors.EngineMissing) as caught:
-            localk8s.LocalK8sJobClient(root=tempfile.mkdtemp()).engine  # noqa: B018 - the property refuses
-        self.assertIn("WSL2", str(caught.exception))
 
 
 if __name__ == "__main__":

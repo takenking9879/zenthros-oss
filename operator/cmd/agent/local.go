@@ -3,7 +3,6 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
 	"time"
 
@@ -30,7 +29,7 @@ func localSocket() string {
 
 // localStateDir is what a local agent keeps for the controller it does not
 // have: the acked checkpoints.
-func localStateDir(string) string {
+func localStateDir() string {
 	return filepath.Join(containerStateDir(), "local")
 }
 
@@ -38,9 +37,7 @@ func localStateDir(string) string {
 // probes, no metrics, no notices from a cloud. Its reports go to its spool
 // and nowhere else.
 func applyLocalDefaults(cfg *agent.Config) {
-	if os.Getenv("ZENTHROS_AGENT_MODE") == agentModeContainer {
-		applyContainerDefaults(cfg)
-	}
+	applyContainerDefaults(cfg)
 	cfg.BackendID = agent.LocalWorkspace
 	cfg.HealthAddr, cfg.MetricsAddr = "", ""
 	cfg.SkipMetadataNotices = true

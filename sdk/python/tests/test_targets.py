@@ -73,10 +73,6 @@ class Targets(Env):
         self.api.routes[("GET", "/v1/workspaces/risk/targets")] = answer()
         # Docker here: 8 CPUs and 15.6 GiB; mi-pc's container holds 4 of
         # them and 8 GiB.
-        # This computer's kubectl names no cluster here.
-        cluster = mock.patch("zenthros.jobs.localk8s.current_context", return_value="")
-        cluster.start()
-        self.addCleanup(cluster.stop)
         self.docker.answers = {
             "info": (0, "8 16777216000\n"),
             "ps": (0, "4f1c0ffee ct-1\n"),
@@ -121,6 +117,18 @@ class TableTest(Targets):
                                                           "viejo": "vm"})
         self.assertNotIn("?", str(table))
         self.assertNotIn("up to", str(table))
+
+    def test_this_computer_twice_says_which_is_which(self):
+        # mi-pc is a container of this computer's Docker, attached: the same
+        # computer as local, but through the hub.
+        table = targets.targets()
+        note = "On this computer: local, with no hub; mi-pc, through the hub (jobs reach it from anywhere)."
+        self.assertEqual(str(table).split("\n\nTemplates:")[0].splitlines()[-1], note)
+        self.assertIn(note, table._repr_html_())
+        self.assertIn("  where:      this computer, through the hub", repr(table["mi-pc"]))
+        self.assertIn("  where:      this computer, no hub", repr(table["local"]))
+        self.docker.answers["ps"] = (0, "")
+        self.assertNotIn("On this computer", str(targets.targets()))
 
     def test_a_cluster_whose_nodes_are_not_known_says_no_count(self):
         # Found by the notebook E2E: a Kubernetes backend's agent does not

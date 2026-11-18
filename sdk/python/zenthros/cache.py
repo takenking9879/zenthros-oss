@@ -735,13 +735,9 @@ def referenced(home):
 
 def homes_here():
     """Every store of this project and this person that holds entries."""
-    from zenthros.remote.options import local_client, local_k8s_client, settings
+    from zenthros.remote.options import local_client, settings
 
     found = [_home_of(local_client().store)]
-    try:
-        found.append(_home_of(local_k8s_client().store))
-    except errors.ZenthrosError:
-        pass
     current = settings()
     if current.store:
         found.append(_home_of(current.store, shared=True))
@@ -827,10 +823,10 @@ def notice_finished(jobs, homes):
 
 def sync():
     """`zenthros cache sync`: the jobs of this project and your Workspace."""
-    from zenthros.remote.options import job_client, local_clients
+    from zenthros.remote.options import job_client, local_client
 
     clients = [job_client()]
-    clients += [here for here in local_clients() if here is not clients[0]]
+    clients += [here for here in [local_client()] if here is not clients[0]]
     entered = []
     for client in clients:
         entered += notice_finished(client.list_jobs(), homes_here())

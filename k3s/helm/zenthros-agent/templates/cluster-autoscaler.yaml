@@ -1,4 +1,3 @@
-{{- if not .Values.agent.local.enabled }}
 {{- if .Values.clusterAutoscaler.enabled }}
 {{- if not .Values.agent.nodeSupply.enabled }}
 {{- fail "clusterAutoscaler.enabled needs agent.nodeSupply.enabled: Cluster Autoscaler scales the node groups Zenthros supplies" }}
@@ -250,5 +249,4 @@ spec:
               - {key: ca.crt, path: ca.crt}
               - {key: client.crt, path: client.crt}
               - {key: client.key, path: client.key}
-{{- end }}
 {{- end }}

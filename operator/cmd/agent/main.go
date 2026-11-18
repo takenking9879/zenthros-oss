@@ -80,7 +80,7 @@ func main() {
 		os.Exit(runAttach(append([]string{self}, os.Args[1:]...)))
 	}
 	// `zenthros-agent local ...` is the client of a local agent's socket
-	// (agent/local.go): the SDK runs it through docker exec or kubectl exec.
+	// (agent/local.go): the SDK runs it through docker exec.
 	if len(os.Args) > 1 && os.Args[1] == "local" {
 		os.Exit(agent.RunLocalCLI(context.Background(), os.Args[2:], localSocket(), os.Stdin, os.Stdout, os.Stderr))
 	}
@@ -168,6 +168,10 @@ func main() {
 	cfg.BackendType = backendType
 	if os.Getenv(agent.EnvLocal) != "" {
 		// No hub: nothing to enrol with, to reach or to serve a port to.
+		// Only in a container of this computer (the SDK's on="local").
+		if mode := envconf.Or("ZENTHROS_AGENT_MODE", agentModeVM); mode != agentModeContainer {
+			fatal(fmt.Errorf("%s is for an agent in a container (ZENTHROS_AGENT_MODE=%s), not %s", agent.EnvLocal, agentModeContainer, mode), "invalid agent configuration")
+		}
 		applyLocalDefaults(&cfg)
 		if err := runAgent(cfg, logger); err != nil && !errors.Is(err, context.Canceled) {
 			fatal(err, "agent exited with error")
@@ -300,9 +304,6 @@ func runAgent(cfg agent.Config, logger logr.Logger) error {
 				}()
 			}
 		}
-		if os.Getenv(agent.EnvLocal) != "" {
-			return a.RunLocal(ctx, agent.LocalOptions{Socket: localSocket(), StateDir: localStateDir(mode), Shared: os.Getenv(agent.EnvLocalShared)})
-		}
 		return a.Run(ctx)
 	}
 	sigs := make(chan os.Signal, 2)
@@ -332,7 +333,7 @@ func runAgent(cfg agent.Config, logger logr.Logger) error {
 	}
 	if os.Getenv(agent.EnvLocal) != "" {
 		err = a.RunLocal(ctx, agent.LocalOptions{
-			Socket: localSocket(), StateDir: localStateDir(mode),
+			Socket: localSocket(), StateDir: localStateDir(),
 			IdleExit: envconf.Duration(envLocalIdleExit, defaultLocalIdleExit),
 			Busy:     func() bool { return proc.Running() > 0 },
 		})
@@ -434,22 +435,14 @@ func newExecutor(mode string, logger logr.Logger) (agent.Executor, agepayload.Bu
 		executor.PodSecurity = envconf.Or("ZENTHROS_WORKSPACE_POD_SECURITY", podsecurity.Default)
 		// The chart names the role the agent binds in each Workspace
 		// namespace so its jobs read their Secrets.
-		if os.Getenv(agent.EnvLocal) != "" {
-			uid, gid, err := k8sagent.ParseLocalUser(os.Getenv(agent.EnvLocalUser))
-			if err != nil {
-				return nil, agepayload.Bundle{}, err
-			}
-			executor.UseLocal(&k8sagent.LocalCluster{Folder: os.Getenv(agent.EnvLocalShared), UID: uid, GID: gid}, namespace)
-		} else {
-			role := os.Getenv("ZENTHROS_JOB_SECRETS_CLUSTER_ROLE")
-			if role == "" {
-				return nil, agepayload.Bundle{}, errors.New("ZENTHROS_JOB_SECRETS_CLUSTER_ROLE is not set: install the agent with its chart")
-			}
-			executor.SecretAccess = k8sagent.SecretAccess{
-				ClusterRole:    role,
-				ServiceAccount: envconf.Or("ZENTHROS_SERVICE_ACCOUNT", "zenthros-agent"),
-				Namespace:      namespace,
-			}
+		role := os.Getenv("ZENTHROS_JOB_SECRETS_CLUSTER_ROLE")
+		if role == "" {
+			return nil, agepayload.Bundle{}, errors.New("ZENTHROS_JOB_SECRETS_CLUSTER_ROLE is not set: install the agent with its chart")
+		}
+		executor.SecretAccess = k8sagent.SecretAccess{
+			ClusterRole:    role,
+			ServiceAccount: envconf.Or("ZENTHROS_SERVICE_ACCOUNT", "zenthros-agent"),
+			Namespace:      namespace,
 		}
 		// The chart's node log readers, when it installs them
 		// (logs.nodeReader): else every pod's log is read through the API.
@@ -527,12 +520,7 @@ func newK8sExecutor(logger logr.Logger) (*k8sagent.Executor, error) {
 	// Status polls read the agent's own Jobs and pods from a watch, not the
 	// apiserver. Without it they read the
 	// apiserver, as before.
-	namespace := ""
-	if os.Getenv(agent.EnvLocal) != "" {
-		// All it may watch on a person's cluster.
-		namespace = os.Getenv("POD_NAMESPACE")
-	}
-	if statusCache, err := k8sagent.StartStatusCache(context.Background(), restCfg, scheme, namespace); err != nil {
+	if statusCache, err := k8sagent.StartStatusCache(context.Background(), restCfg, scheme, ""); err != nil {
 		logger.Error(err, "status cache unavailable; status reads go to the apiserver")
 	} else {
 		executor.StatusCache = statusCache
@@ -544,7 +532,7 @@ func newK8sExecutor(logger logr.Logger) (*k8sagent.Executor, error) {
 // Kubernetes agent (ephemeral RayJobs create private clusters).
 //
 // A local agent has no count either: the container's own limits are its
-// budget, and Kubernetes' scheduler shares a cluster.
+// budget.
 func defaultMaxJobs(mode string) int {
 	if mode == agentModeK8s || os.Getenv(agent.EnvLocal) != "" {
 		return 0

@@ -388,7 +388,19 @@ const (
 	// path, as <dir>/<secret-name>/<key>: where the agent keeps them, which
 	// says nothing about what runs.
 	EnvSecretsDir = "ZENTHROS_SECRETS_DIR"
+	// EnvPythonCache is where a job's Pythons keep the code they compiled.
+	// An image's Python (python:3.x) ships its standard library
+	// uncompiled, and a job's user cannot write beside it: without a
+	// cache of their own, each Python start compiled it again (~0.4 s, on
+	// every hop of the SDK's runner).
+	EnvPythonCache = "PYTHONPYCACHEPREFIX"
 )
+
+// PythonCacheIn is the compiled-code cache in a directory a machine's jobs
+// keep and share (the same trust as the environments they build there).
+func PythonCacheIn(dir string) string {
+	return strings.TrimSuffix(dir, "/") + "/pycache"
+}
 
 var controllerDerived = map[string]bool{
 	checkpoint.EnvGeneration: true,

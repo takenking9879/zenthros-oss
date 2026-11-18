@@ -5,6 +5,7 @@
 """LocalJobClient against an engine that only answers: what it asks the engine
 to do, in what order, and that what crosses to an agent is the job the other
 transports send. The real engine is in tests/e2e/test_quickstart.py."""
+import hashlib
 import json
 import os
 import shutil
@@ -33,6 +34,7 @@ class AnsweringEngine:
     """An engine with an agent in each container it made."""
 
     name, binary, user_flags = "docker", "/fake/docker", ("--user", "1000:1000")
+    capacity_format = L.Engine.capacity_format
 
     def __init__(self):
         self.calls = []
@@ -42,6 +44,8 @@ class AnsweringEngine:
         self.reports = "[]"
         self.logs = "line\n"
         self.cursors = {}
+        # The jobs the agent let go, by ID.
+        self.let_go = []
 
     def execs(self):
         return [c[5] for c in self.calls if c[0] == "exec"]
@@ -78,6 +82,18 @@ class AnsweringEngine:
             return self.agent(args[2], args[5:], stdin)
         return 0, "", ""
 
+    def run_kept(self, args, stdin, keep, timeout=600):
+        """local finish: it sends what it holds, and lets go once kept."""
+        self.calls.append(list(args))
+        container = self.containers.get(args[2])
+        if not container or container["state"] != "running":
+            return 1, "", "no such container"
+        line = json.dumps({"reports": json.loads(self.reports), "log": self.logs}) + "\n"
+        keep(line)
+        self.let_go.append(json.loads(stdin)["id"])
+        self.cursors.clear()
+        return 0, line, ""
+
     def agent(self, container, args, stdin):
         verb = args[0]
         if container not in self.containers or self.containers[container]["state"] != "running":
@@ -90,6 +106,9 @@ class AnsweringEngine:
             return 0, json.dumps({"id": f"id-{self.jobs}", "count": 1, "tasks": [{"rank": 0, "id": f"id-{self.jobs}", "handle": f"h-{self.jobs}"}]}), ""
         if verb == "status":
             return 0, json.dumps(self.statuses.get(json.loads(stdin)["id"], {"phase": "Running"})), ""
+        if verb == "wait":
+            status = self.statuses.get(json.loads(stdin)["id"], {"phase": "Running"})
+            return 0, json.dumps({"status": status, "seen": hashlib.sha256(json.dumps(status).encode()).hexdigest()[:16]}), ""
         if verb == "progress":
             return 0, json.dumps(self.cursors[args[1]]) if args[1] in self.cursors else "", ""
         if verb == "reports":
@@ -151,7 +170,7 @@ class ResumeFromTest(Env):
 
     def test_the_cursor_outlives_what_the_agent_was_told_to_forget_and_its_container(self):
         self.ended(**self.CURSOR)
-        self.assertIn("forget", self.engine.execs())
+        self.assertIn("finish", self.engine.execs())
         self.assertEqual(self.client.cursor_of("before"), self.CURSOR)
         for container in self.engine.containers.values():
             container["state"] = "exited"
@@ -224,6 +243,36 @@ class ContainerTest(Env):
         self.client.submit(job("b"))
         self.assertEqual(sum(1 for c in self.engine.calls if c[0] == "run"), 1)
 
+    def test_a_container_this_process_checked_is_not_checked_again(self):
+        """The next job goes straight to it: no ps, inspect or info (0.1-0.2 s
+        each), nor the engine's size (0.3 s)."""
+        del os.environ[machines.LOCAL_CPUS_ENV], os.environ[machines.LOCAL_MEMORY_ENV]
+        with mock.patch("zenthros.machines.docker_capacity", return_value=(8, 16 << 30)) as asked:
+            self.client.submit(job("a"))
+            before = len(self.engine.calls)
+            self.client.submit(job("b"))
+        self.assertEqual([c[5] if c[0] == "exec" else c[0] for c in self.engine.calls[before:]], ["submit"])
+        self.assertEqual(asked.call_count, 1)
+        self.assertIn("--cpus 8", " ".join(self.created()))
+
+    def test_python_keeps_what_it_compiled_with_home(self):
+        """python:3.x ships its standard library uncompiled, and the job's user
+        cannot write beside it: each Python start compiled it again."""
+        self.client.submit(job())
+        self.assertIn(f"PYTHONPYCACHEPREFIX={L.PYCACHE_DIR}", self.created())
+        self.assertTrue(L.PYCACHE_DIR.startswith(L.HOME_DIR + "/"), "kept with HOME, mounted from this computer")
+
+    def test_another_agent_is_another_container(self):
+        """A container of the release before runs its agent, which knows
+        none of this SDK's verbs (local wait, local finish)."""
+        self.client.submit(job("a"))
+        self.finish("a")
+        self.client.job_object("a")
+        with open(os.environ[L.AGENT_ENV], "w") as built:
+            built.write("built again")
+        self.client.submit(job("b"))
+        self.assertEqual(sum(1 for c in self.engine.calls if c[0] == "run"), 2)
+
     def test_a_stopped_one_starts_again(self):
         self.client.submit(job("a"))
         self.finish("a")
@@ -250,7 +299,8 @@ class ContainerTest(Env):
         self.client.submit(job("a"))
         with self.assertRaises(errors.ValidationError) as caught:
             self.client.submit(job("b", image="other:1"))
-        self.assertIn("local-k8s", str(caught.exception))
+        self.assertIn("zenthros attach", str(caught.exception), "a machine of yours runs both at once")
+        self.assertNotIn("local-k8s", str(caught.exception))
         self.finish("a")
         self.client.job_object("a")
         first = next(iter(self.engine.containers))
@@ -309,19 +359,48 @@ class JobTest(Env):
         self.assertFalse(self.client.knows("j"))
 
     def test_what_the_agent_holds_is_kept_before_it_is_told_to_forget(self):
+        """One command brings it back and lets it go (it was status, reports,
+        logs, cancel and forget, a docker exec each), and only once the record
+        holds it: a Ctrl-C in between leaves it with the agent, asked again."""
         self.engine.reports = json.dumps([{"payload": {"a": 1}}])
         self.client.submit(job())
         self.finish()
+        before = len(self.engine.execs())
+        with mock.patch.object(self.client, "_write", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.client.job_object("j")
+        self.assertEqual(self.engine.let_go, [], "let go before it was kept")
+        self.assertFalse(self.client._read("j")["final"])
         self.assertEqual(self.client.job_object("j")["status"]["phase"], SUCCEEDED)
-        verbs = self.engine.execs()
-        self.assertLess(verbs.index("reports"), verbs.index("forget"))
-        self.assertLess(verbs.index("logs"), verbs.index("forget"))
-        self.assertLess(verbs.index("cancel"), verbs.index("forget"))
+        self.assertEqual(self.engine.execs()[before:], ["status", "finish", "status", "finish"])
+        self.assertEqual(self.engine.let_go, [self.client._read("j")["local"]["id"]])
+        self.assertEqual([r["payload"] for r in self.client._read("j")["reports"]], [{"a": 1}])
         calls = len(self.engine.calls)
         # Read again, nothing asks the agent: it has let it go.
         self.assertEqual(self.client.logs("j"), "line\n")
         self.assertEqual(self.client.job_status("j").phase, SUCCEEDED)
         self.assertEqual(len(self.engine.calls), calls)
+
+    def test_wait_asks_the_agent_to_answer_on_a_change(self):
+        """One local wait, answered when the job changes, where a status every
+        half second ran: wait() never sleeps."""
+        self.client.submit(job())
+        seen = []
+        real = self.engine.agent
+
+        def agent(container, args, stdin):
+            if args[0] == "wait":
+                seen.append(args[args.index("--seen") + 1])
+                if len(seen) == 2:
+                    self.finish()
+            return real(container, args, stdin)
+
+        with mock.patch.object(self.engine, "agent", side_effect=agent), mock.patch("time.sleep") as slept:
+            self.assertEqual(self.client.wait("j"), SUCCEEDED)
+        slept.assert_not_called()
+        self.assertEqual(seen[0], "", "the first asks at once")
+        self.assertNotEqual(seen[1], "", "then for a change from what it saw")
+        self.assertNotIn("status", self.engine.execs())
+        self.assertEqual(self.engine.execs()[-1], "finish")
 
     def test_the_container_gone_is_a_lost_worker(self):
         self.client.submit(job())
@@ -391,6 +470,13 @@ class WhereTest(Env):
     def test_no_on_is_this_computer(self):
         self.assertEqual(machines.default_on(), machines.LOCAL)
 
+    def test_local_k8s_is_no_place_and_says_what_is(self):
+        with self.assertRaises(errors.ValidationError) as caught:
+            machines.place("local-k8s", {})
+        said = str(caught.exception)
+        self.assertIn("zenthros attach NAME --type kubernetes", said)
+        self.assertIn("on='local'", said)
+
     def test_get_finds_a_local_job_whatever_else_is_configured(self):
         """On a computer with zctl and a kubeconfig too, zenthros.get asked the
         hub for a job that lives here."""
@@ -404,11 +490,21 @@ class WhereTest(Env):
 
 class DriftTest(unittest.TestCase):
     def test_the_sdk_is_not_a_package_the_caller_had_loaded(self):
-        """The core travels with the call: a machine without zenthros
-        installed was told it lacked it, on every call."""
-        differ, missing = runner._package_drift({"zenthros": "0.1.0", "not-installed-anywhere": "1.0"})
-        self.assertEqual(differ, [])
-        self.assertEqual(missing, ["not-installed-anywhere 1.0"])
+        """The core travels with the call and cloudpickle in the runner's
+        packages: a machine without zenthros, or backports.zstd (what only
+        this side unpacks logs with), was told it lacked them, on every call."""
+        import cloudpickle  # noqa: F401 - loaded, as in any caller
+
+        from zenthros.jobs import logrecords
+        from zenthros.remote import bundle
+
+        logrecords.zstd_module()  # backports.zstd before 3.14: loaded by the first log
+
+        loaded = {bundle._canonical(dist) for dist in bundle.loaded_packages()}
+        self.assertFalse(loaded & {"zenthros", "cloudpickle", "backports-zstd"}, loaded)
+        self.assertLessEqual({"zenthros", "cloudpickle"}, bundle.sdk_distributions())
+        differ, missing = runner._package_drift({"not-installed-anywhere": "1.0"})
+        self.assertEqual((differ, missing), ([], ["not-installed-anywhere 1.0"]))
 
 
 class GitTest(unittest.TestCase):

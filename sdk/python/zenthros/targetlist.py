@@ -203,6 +203,8 @@ class Target:
     def __repr__(self):
         d = self.detail
         lines = [f"{self.name}: {self.provider + ' template' if self.template else self.type}, {self.status}"]
+        if self.kind == "Local":
+            lines.append(f"  where:      this computer, {'no hub' if self.name == 'local' else 'through the hub'}")
         if self.reason:
             lines.append(f"  why:        {self.reason}")
         available = f"{self.available} of {self.total} machines free" if self._counted() else f"{self.available}"
@@ -298,9 +300,19 @@ class Targets:
             out.append(("Templates: zenthros.create(name) makes a machine", TEMPLATE_COLUMNS, templates))
         return out
 
+    def _here(self):
+        """The line under the machines when this computer is in them twice:
+        local (no hub) and a container of it attached (through the hub)."""
+        attached = [t.name for t in self.rows if t.kind == "Local" and t.name != "local"]
+        if not attached:
+            return ""
+        return f"On this computer: local, with no hub; {', '.join(attached)}, through the hub (jobs reach it from anywhere)."
+
     def __str__(self):
-        return "\n\n".join((title + "\n" if title else "") + _table(header, rows)
-                           for title, header, rows in self._sections())
+        parts = [(title + "\n" if title else "") + _table(header, rows) for title, header, rows in self._sections()]
+        if self._here():
+            parts[0] += "\n\n" + self._here()
+        return "\n\n".join(parts)
 
     __repr__ = __str__
 
@@ -312,6 +324,8 @@ class Targets:
                            + "</tr>" for row in rows)
             caption = f"<p>{html.escape(title)}</p>" if title else ""
             parts.append(f"{caption}<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>")
+        if self._here():
+            parts.insert(1, f"<p>{html.escape(self._here())}</p>")
         return "".join(parts)
 
     def to_pandas(self):
@@ -399,23 +413,9 @@ def local_target(can_join=True, docker="docker", cpus=None, memory=None):
     return target, held
 
 
-def local_k8s_target():
-    """The "local-k8s" row, if kubectl names a cluster: nothing is asked of it,
-    nor installed, until a job goes there."""
-    from zenthros.jobs.localk8s import TARGET, current_context
-
-    context = current_context()
-    if not context:
-        return None
-    return Target(name=TARGET, kind="Kubernetes", state="Available", detail={"name": TARGET, "type": "Kubernetes", "context": context},
-                  reason=f"the cluster of kubectl's context {context}; each job a pod with its own image")
-
-
 def _sort_key(target):
     if target.name == "local":
         return (0, 0, "")
-    if target.name == "local-k8s":
-        return (0, 1, "")
     return (1 if target.state in _GONE else 0, _ORDER.get(target.kind, 1), target.name)
 
 
@@ -425,10 +425,8 @@ def targets(docker="docker"):
     from zenthros.local import _api
     from zenthros.remote.options import _through_api
 
-    cluster = local_k8s_target()
-    here = [cluster] if cluster else []
     if not _through_api():
-        return Targets([local_target(docker=docker)[0], *here], {}, docker)
+        return Targets([local_target(docker=docker)[0]], {}, docker)
     client = _api()
     answer = client.targets()
     can = answer.get("can") or {}
@@ -438,7 +436,7 @@ def targets(docker="docker"):
     for target in rows:
         if target.detail.get("id") in held:
             target.kind = "Local"
-    return Targets(sorted([local, *here, *rows], key=_sort_key), can, docker)
+    return Targets(sorted([local, *rows], key=_sort_key), can, docker)
 
 
 @dataclass

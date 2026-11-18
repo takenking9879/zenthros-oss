@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -437,6 +438,22 @@ func TestJobSeesTheImageEnvNotTheAgentToken(t *testing.T) {
 	}
 	if strings.Contains(env, "secret-token") {
 		t.Error("the agent's join token reached the job")
+	}
+}
+
+// A job's Pythons keep what they compile in the container's state, unless
+// the container keeps it elsewhere: python:3.x ships its standard library
+// uncompiled, the job's user cannot write beside it, and each Python start
+// compiled it again (~0.4 s, per hop of the SDK's runner).
+func TestJobsPythonsKeepWhatTheyCompiled(t *testing.T) {
+	e := newTestExecutor(t, "")
+	env := strings.Join(e.environment(nil, nil), "\n")
+	if want := jobspec.EnvPythonCache + "=" + jobspec.PythonCacheIn(e.cfg.StateDir); !strings.Contains(env, want) {
+		t.Fatalf("job env lacks %s:\n%s", want, env)
+	}
+	e.cfg.BaseEnv = append(e.cfg.BaseEnv, jobspec.EnvPythonCache+"=/home/zenthros/.cache/pycache")
+	if env := e.environment(nil, nil); !slices.Contains(env, jobspec.EnvPythonCache+"=/home/zenthros/.cache/pycache") {
+		t.Fatalf("the container's own cache was replaced: %v", env)
 	}
 }
 

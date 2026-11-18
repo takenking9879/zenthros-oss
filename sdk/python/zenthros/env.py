@@ -400,33 +400,14 @@ def _fits_python(env, python):
             "Run this with Python " + env.python + ", or run it as a command")
 
 
-def on_cluster(env, hosting):
-    """The image pods can pull: what was built, in the cluster's own registry.
-    hosting is its (address from here, address from its nodes). It costs no
-    build: the builder's cache has it, and a registry that has it takes nothing."""
-    tag = _usable(env)
-    if not hosting:
-        # Nodes that share the engine's images: Docker Desktop's.
-        return tag
-    outside, inside = hosting
-    repo = f"zenthros-env/{_project_id()}/{env.name}"
-    context = _write_context(_context_files(env), _state(env.name) / "context")
-    built = imagebuild.builder_of(_engine()).publish(context, f"{outside}/{repo}:{env.build['input'][:12]}", "gzip")
-    return f"{inside}/{repo}@{built.manifest}"
-
-
 def image_for(name, on, python=None):
     """The image of name where on= sends a call."""
-    from zenthros.machines import LOCAL, LOCAL_K8S
+    from zenthros.machines import LOCAL
 
     env = _load(name)
     _fits_python(env, python)
     if on == LOCAL:
         return here(name)
-    if on == LOCAL_K8S:
-        from zenthros.remote.options import local_k8s_client
-
-        return local_k8s_client().image_of_env(env)
     if env.published:
         return env.published[-1]["ref"]
     if env.advanced:
@@ -443,10 +424,10 @@ def image_for(name, on, python=None):
 def packages_for(name, on):
     """What its image lacks where on= sends a call, at the versions the lock has:
     nothing once it is published, its packages on a public base."""
-    from zenthros.machines import LOCAL, LOCAL_K8S
+    from zenthros.machines import LOCAL
 
     env = _load(name)
-    if on in (LOCAL, LOCAL_K8S) or env.published:
+    if on == LOCAL or env.published:
         return []
     pins = {_name_of(pin): pin for pin in env.pins}
     return [pins.get(_name_of(package), package) for package in env.packages]

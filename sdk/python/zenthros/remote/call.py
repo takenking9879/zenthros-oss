@@ -56,7 +56,6 @@ from zenthros.remote.options import (
     job_client,
     local_client,
     local_client_of,
-    local_k8s_client,
     seconds,
     secret_sources,
     settings,
@@ -355,12 +354,12 @@ def plan_details(plan, fn, args, kwargs, on, options, mode, deps, contracts):
     where = machines.default_on() if on is None else on
     name = str(getattr(where, "name", "") or where)
     env_name = options.get("env") if isinstance(options.get("env"), str) else ""
-    if not env_name and name in (machines.LOCAL, machines.LOCAL_K8S):
+    if not env_name and name == machines.LOCAL:
         env_name = environments.using()
     details = {"env": env_name, "image": str(options.get("image") or ""), "warnings": [],
                "resources": {what: str(options[what]) for what in ("cpu", "memory", "gpu") if options.get(what) not in (None, "")},
                "compatible": {"python": bundle.python_version(), "gpu": True}}
-    if env_name and name in (machines.LOCAL, machines.LOCAL_K8S):
+    if env_name and name == machines.LOCAL:
         details["image"] = details["image"] or environments.tag_of(env_name)
     elif env_name and not details["image"]:
         try:
@@ -370,7 +369,7 @@ def plan_details(plan, fn, args, kwargs, on, options, mode, deps, contracts):
                                            "not the same image")
         except errors.ValidationError as err:
             plan.problems.append(str(err))
-    if details["image"] and name not in (machines.LOCAL, machines.LOCAL_K8S):
+    if details["image"] and name != machines.LOCAL:
         answer = machines.who_reads(name, details["image"])
         details["image_access"] = answer.to_dict()
         if answer.answer == reach.IMPOSSIBLE:
@@ -393,9 +392,7 @@ def plan_details(plan, fn, args, kwargs, on, options, mode, deps, contracts):
             plan.problems.append(str(err))
             missing = ["a container engine"]
         details["offline_ready"], details["offline_missing"] = not missing, missing
-    if name == machines.LOCAL_K8S:
-        details["store"] = {"shared": local_k8s_client().shared_now(), "where": str(local_k8s_client().store_dir)}
-    elif name == machines.LOCAL:
+    if name == machines.LOCAL:
         details["store"] = {"shared": False, "where": local_client().store}
     plan.call = details
     return plan
@@ -433,7 +430,7 @@ def _cache_image(options, on):
         return str(options["image"])
     where = machines.default_on() if on is None else on
     name = options.get("env") if isinstance(options.get("env"), str) else ""
-    if not name and where in (machines.LOCAL, machines.LOCAL_K8S):
+    if not name and where == machines.LOCAL:
         name = environments.using()
     return environments.content_of(name) if name else ""
 
@@ -443,8 +440,7 @@ def _client_for(on):
     from zenthros import machines
 
     where = machines.default_on() if on is None else on
-    return (local_client() if where == machines.LOCAL else
-            local_k8s_client() if where == machines.LOCAL_K8S else job_client(settings()))
+    return local_client() if where == machines.LOCAL else job_client(settings())
 
 
 def _cache_homes(on):
@@ -918,7 +914,7 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
     code_notes = {}
     if snapshot:
         if same.get("snapshot"):
-            stored_code = _rehomed(same["snapshot"], same["client"], store, root)
+            stored_code = _rehomed(same["snapshot"], same, store, root)
             code_notes = same["notes"]
         else:
             taken = code_snapshot.take(code_dir or ".")
@@ -946,7 +942,7 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
         # The project goes to the store first, by digest, and the call pins
         # it; only the SDK's core rides inline, for the runner to start (SDK-8).
         if same:
-            project = same.get("project") and _rehomed(same["project"], same["client"], store, root)
+            project = same.get("project") and _rehomed(same["project"], same, store, root)
         else:
             project = bundle.store_project(code_dir, store, root)
         if project:
@@ -1086,11 +1082,14 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
     return call
 
 
-def _rehomed(stored, client, store, root):
-    """Stored code ({uri, sha256}), in the store a new job reads."""
+def _rehomed(stored, same, store, root):
+    """Stored code ({uri, sha256}) of the job same["job"], in the store a new
+    job reads. The same URI is not the same place: what a job carries (no
+    bucket) is that job's alone."""
     uri = f"{root}/code/{stored['sha256']}.tar.gz"
-    if uri != stored["uri"]:
-        store.put(uri, blob_store(stored["uri"], settings(), client).get(stored["uri"]))
+    old = blob_store(stored["uri"], settings(), same["client"])
+    if store.where(uri) != old.where(stored["uri"]):
+        store.put(uri, old.in_job(same["job"], stored["uri"]) if carried.carries(stored["uri"]) else old.get(stored["uri"]))
     return {"uri": uri, "sha256": stored["sha256"]}
 
 
@@ -1147,7 +1146,7 @@ def _rerun(call, on, resume, upload, name, changes):
             ref, why = _cursor_ref(client, call.name, obj)
     base = re.sub(r"-r[0-9a-f]{4}$", "", call.name)[:50]
     new_name = name or f"{base}-r{uuid.uuid4().hex[:4]}"
-    same = {"client": client, "note": theirs if same_image else None}
+    same = {"client": client, "job": call.name, "note": theirs if same_image else None}
     command = [str(part) for part in template.get("command") or []]
     if fresh.kind == COMMAND_KIND:
         snapshot = command[1:4] == ["-m", "zenthros.remote", "snapshot"]
@@ -1623,8 +1622,12 @@ class RemoteCall:
                             "use .url(), .logs() and .cancel()")
         if self._outcome is None:
             follower = progress = None
-            if stream_logs and callable(getattr(self._client, "follow_logs", None)):
-                follower = _LogFollower(self._client, self.name, tee=self.runlog.line if self.runlog else None)
+            # A log followed with logs(follow=True) was seen: this goes on
+            # from where that one got, or not at all once it reached the end.
+            followed = self.handle.followed
+            if stream_logs and callable(getattr(self._client, "follow_logs", None)) and not (followed and followed.done):
+                follower = _LogFollower(self._client, self.name, tee=self.runlog.line if self.runlog else None,
+                                        after=followed.position if followed else None)
                 follower.start()
             if stream_logs:
                 progress = _ReportFollower(self)
@@ -1946,9 +1949,10 @@ class RemoteCall:
 
     def _error(self, record, index=None):
         where = self.name if index is None else f"{self.name} item {index}"
+        trace = record.get("traceback", "")
         err = RemoteError(
-            f"{where}: {record.get('type', 'Exception')}: {record.get('message', '')}\n"
-            f"--- remote traceback ---\n{record.get('traceback', '')}",
+            f"{where}: {record.get('type', 'Exception')}: {record.get('message', '')}" +
+            (f"\n--- remote traceback ---\n{trace}" if trace else ""),
             remote_type=record.get("type", ""), remote_traceback=record.get("traceback", ""), job=self.name,
             reason=record.get("reason", ""))
         from zenthros.remote.runner import rebuild_exception
@@ -2095,13 +2099,15 @@ class _LogFollower(threading.Thread):
     opens the stream again right after what it gave (the stream fails until
     the job has a backend, and ends with each attempt)."""
 
-    def __init__(self, client, name, poll_seconds=2.0, out=None, tee=None):
+    def __init__(self, client, name, poll_seconds=2.0, out=None, tee=None, after=None):
         super().__init__(daemon=True)
         self._client, self._name = client, name
         self._out = out or sys.stdout
         # Each new line also goes here (the call's local record).
         self._tee = tee
-        self._log = FollowedLog(client, name, ended=lambda: False, poll=poll_seconds)
+        # Where a log followed before got: what came before it was seen.
+        self._after = after
+        self._log = FollowedLog(client, name, ended=lambda: False, poll=poll_seconds, after=after)
 
     def run(self):
         for line in self._log:
@@ -2126,7 +2132,7 @@ class _LogFollower(threading.Thread):
         # still open is waited for, up to grace.
         self._log.finish(grace)
         self.join(timeout=grace)
-        if not self._log.opened:
+        if not self._log.opened and self._after is None:
             self._print_the_log()
 
 
@@ -2326,7 +2332,7 @@ def _named_env(options, on, python):
     if options.get("image"):
         return options
     where = machines.default_on() if on is None else on
-    in_use = "" if name or where not in (machines.LOCAL, machines.LOCAL_K8S) else environments.using()
+    in_use = "" if name or where != machines.LOCAL else environments.using()
     if name or in_use:
         options["image"] = environments.image_for(name or in_use, where, python)
         if name:

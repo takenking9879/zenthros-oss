@@ -1,4 +1,4 @@
-{{- if and (not .Values.agent.local.enabled) .Values.logs.nodeReader }}
+{{- if .Values.logs.nodeReader }}
 {{- /*
 The node log readers (benchmarks/loglab/PLAN.md, section 4): the agent's own
 binary in node-log-reader mode, one on every node, reading the pods' log

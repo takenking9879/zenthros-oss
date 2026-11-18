@@ -41,11 +41,15 @@ class QuotaTest(unittest.TestCase):
         self.assertIsNone(runner.cpu_quota(root, me))
         self.assertIsNone(runner.cpu_quota("/nonexistent", "/nonexistent"))
 
-    def test_the_cpus_it_says_are_the_quota_when_smaller(self):
-        self.assertEqual(runner.cpus_text(24, 1.0), "1 of 24 CPUs")
-        self.assertEqual(runner.cpus_text(24, 1.5), "1.5 of 24 CPUs")
-        self.assertEqual(runner.cpus_text(4, 8.0), "4 CPUs")
-        self.assertEqual(runner.cpus_text(4, None), "4 CPUs")
+    def test_the_cpus_it_says_are_the_ones_the_job_may_use(self):
+        """The host's total is in the result's machine, not in the line: "2 of
+        24 CPUs" read as a job on a laptop of 24 CPUs that got 2 of them."""
+        self.assertEqual(runner.cpus_text({"cpus": 24, "cpu_quota": 2.0}), "2 CPUs")
+        self.assertEqual(runner.cpus_text({"cpus": 24, "cpu_quota": 1.5}), "1.5 CPUs")
+        self.assertEqual(runner.cpus_text({"cpus": 4, "cpu_quota": 8.0}), "4 CPUs")
+        self.assertEqual(runner.cpus_text({"cpus": 24, "affinity": 3}), "3 CPUs")
+        self.assertEqual(runner.cpus_text({"cpus": 24, "affinity": 8, "cpu_quota": 2.0}), "2 CPUs")
+        self.assertEqual(runner.cpus_text({"cpus": 1}), "1 CPU")
 
 
 if __name__ == "__main__":

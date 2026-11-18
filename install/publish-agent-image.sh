@@ -2,12 +2,12 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-# Publish the agent as a public image, for on="local-k8s" with no account:
+# Publish the agent as a public image, the one a hub's join config names
+# (agentImage: a Kubernetes cluster attached, a container host):
 #
 #   bash install/publish-agent-image.sh <registry>/<repository>/agent:<tag>
 #
-# It prints the image by digest, what install/publish-sdk-gcs.sh takes as
-# ZENTHROS_AGENT_IMAGE. Compiled across, as install/stage.sh does, and only
+# It prints the image by digest. Compiled across, as install/stage.sh does, and only
 # copied into the image: the target of production-images/Dockerfile.golang
 # compiles the whole module under emulation for arm64 (over an hour). gzip, as
 # anyone's runtime reads it. ZENTHROS_RELEASE: the release the agent says it

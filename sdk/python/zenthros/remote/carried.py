@@ -46,6 +46,9 @@ class CarriedStore(BlobStore):
     def __init__(self, client):
         self.client = client
         self.files = {}
+        # The reports last read of each job: a map's N results are in the
+        # reports of its tasks, read once, not once per result.
+        self._reports = {}
 
     def put(self, uri, payload):
         self.files[uri] = payload
@@ -54,17 +57,17 @@ class CarriedStore(BlobStore):
     def get(self, uri):
         if uri in self.files:
             return self.files[uri]
-        from zenthros.remote.call import RESULT_REPORT
-
         name = uri[len(ROOT) + 1:].partition("/")[0]
-        for view in reversed(self.client.reports(name)):
-            entry = view.payload.get(RESULT_REPORT)
-            if isinstance(entry, dict) and entry.get("uri") == uri and entry.get(BYTES_KEY):
-                return base64.b64decode(entry[BYTES_KEY])
-        return self._from_its_job(name, uri)
+        found = _reported(self._reports.get(name, ()), uri)
+        if found is None:
+            # Not in what was read: the reports of now may hold it.
+            self._reports[name] = self.client.reports(name)
+            found = _reported(self._reports[name], uri)
+        return found if found is not None else self.in_job(name, uri)
 
-    def _from_its_job(self, name, uri):
-        """What went in the job: its call and its project, in the job's own files."""
+    def in_job(self, name, uri):
+        """What went in job name: its call and its project, in the job's own
+        files. A project's URI names no job (its digest does): ask its job."""
         inline = self.client.source_of(name)
         if not inline:
             raise FileNotFoundError(uri)
@@ -79,6 +82,22 @@ class CarriedStore(BlobStore):
 
     def delete(self, uri):
         self.files.pop(uri, None)
+
+    def where(self, uri):
+        """What one job carries is that job's alone: the same URI in another
+        call's store is another place."""
+        return (self, uri)
+
+
+def _reported(views, uri):
+    """The bytes of uri a result report among views brought, or None."""
+    from zenthros.remote.call import RESULT_REPORT
+
+    for view in reversed(views):
+        entry = view.payload.get(RESULT_REPORT)
+        if isinstance(entry, dict) and entry.get("uri") == uri and entry.get(BYTES_KEY):
+            return base64.b64decode(entry[BYTES_KEY])
+    return None
 
 
 def pack(code, files, limit):

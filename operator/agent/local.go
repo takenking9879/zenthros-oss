@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -29,25 +28,14 @@ import (
 // nobody and opens no port. It takes the same commands through the same
 // Dispatch as a gateway's, one per connection on a Unix socket under its state
 // directory, whoever reaches the socket being whoever already controls the
-// container (`docker exec`) or the namespace (`kubectl exec`): the channel
+// container (`docker exec`): the channel
 // adds no authority. What the controller does for a job (admission, acks of
 // checkpoints, retries) is either not there or is decided here by the same
 // rule (checkpoint.Advance).
 
-// EnvLocal, set, makes the agent local. It never enrols, whatever else is set.
+// EnvLocal, set, makes the agent local: in a container of this computer
+// (container mode). It never enrols, whatever else is set.
 const EnvLocal = "ZENTHROS_LOCAL"
-
-// On a person's own cluster: the folder its nodes share, and the uid:gid a
-// job's processes run as (the chart's agent.local).
-const (
-	EnvLocalShared = "ZENTHROS_LOCAL_SHARED"
-	EnvLocalUser   = "ZENTHROS_LOCAL_USER"
-)
-
-// LocalSharedMark is the file the SDK writes in the shared folder. The agent
-// says what it reads there: the same words is the only proof the cluster's
-// nodes have that folder, and not an empty one of the same name.
-const LocalSharedMark = ".zenthros-shared"
 
 // LocalOptions is how a local agent serves.
 type LocalOptions struct {
@@ -60,8 +48,6 @@ type LocalOptions struct {
 	IdleExit time.Duration
 	// Busy says whether a job still runs; nil is never.
 	Busy func() bool
-	// Shared is the folder the nodes of a person's own cluster share.
-	Shared string
 }
 
 // localRequest is one command on the socket: exactly one field.
@@ -102,20 +88,6 @@ type localInfo struct {
 	Version       string   `json:"version"`
 	BackendType   string   `json:"backendType"`
 	AgeRecipients []string `json:"ageRecipients,omitempty"`
-	SharedMark    string   `json:"sharedMark,omitempty"`
-}
-
-// readSharedMark is what the shared folder's mark says here: none with no
-// folder, or on a node that does not have it.
-func readSharedMark(folder string) string {
-	if folder == "" {
-		return ""
-	}
-	mark, err := os.ReadFile(filepath.Join(folder, LocalSharedMark))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(mark))
 }
 
 // maxLocalLine bounds a command: a job's own limit, its inline code, plus the
@@ -243,7 +215,7 @@ func (a *Agent) serveLocal(ctx context.Context, conn net.Conn, opts LocalOptions
 		a.stopAfter(ctx, *req.StopAfter)
 		a.answerLocal(conn, map[string]bool{"set": true}, nil)
 	case req.Info:
-		a.answerLocal(conn, localInfo{Version: a.cfg.Version, BackendType: a.cfg.BackendType, AgeRecipients: a.cfg.ageRecipients(), SharedMark: readSharedMark(opts.Shared)}, nil)
+		a.answerLocal(conn, localInfo{Version: a.cfg.Version, BackendType: a.cfg.BackendType, AgeRecipients: a.cfg.ageRecipients()}, nil)
 	default:
 		a.answerLocal(conn, nil, errors.New("an empty command"))
 	}

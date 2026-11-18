@@ -87,15 +87,7 @@ print(suma.remote(2, 3))          # 5; .submit() da el handle: call.result(), .s
 - **`zenthros clean`** borra los contenedores del proyecto, salvo los que tienen jobs corriendo; `--results` lo que queda en el store sin registro, `--envs` los Python sin contenedor. `--dry-run` y `--json` dicen qué haría.
 - **Se detiene** si apagas el computador. Para un job que siga sin él, una máquina remota.
 
-**Sin cuenta: el Kubernetes que ya tienes.** `on="local-k8s"` usa el contexto actual de `kubectl` (`configure(kube_context=)` lo cambia), y `targets()` lo muestra. Cada job es un pod con su propia imagen, y las llamadas se encadenan igual que en un hub.
-
-- **Instala** el mismo chart de `attach --type kubernetes`, con `agent.local`, en el namespace `zenthros-local`, la primera vez y tras preguntar (`ZENTHROS_LOCAL_K8S_INSTALL=1` donde no hay terminal). El chart se verifica contra el pin de la wheel, que también nombra la imagen del agente. El agente no tiene permisos fuera de su namespace, salvo leer los nodos.
-- **Habla** con él por `kubectl exec`: quien puede hacer eso ya manda en ese namespace.
-- **Archivos:** `~/.zenthros/k8s` tiene que estar en cada nodo en la misma ruta (el `-v` de `k3d cluster create` del README). El SDK lo comprueba con una marca; sin esa carpeta, el error da el comando. Una ruta fuera de ella se rechaza antes de crear nada. Lo que el job escribe queda con tu usuario. `configure(local_output=)` no aplica aquí.
-- **Recursos:** `memory=` es request y límite; `cpu=`, request. Sin lugar para un pod: `Unschedulable` y "Insufficient memory". Una GPU que ningún nodo ofrece o una imagen de otra arquitectura se rechazan antes (la arquitectura solo si el registry responde).
-- **Reintentos:** los lleva Kubernetes (`backoffLimit`).
-- **Todavía no:** `serve` (usa `local`).
-- **`zenthros clean --k8s`** quita el agente y el namespace, salvo con jobs corriendo.
+**Kubernetes, solo por el hub.** Un cluster se conecta con `zenthros attach NOMBRE --type kubernetes` y corre con `on="NOMBRE"`, cada job un pod con su propia imagen. Ningún job instala nada en el cluster que diga `kubectl`: `on="local-k8s"` no existe y lo dice.
 
 **Entornos: tus paquetes en una imagen, repetible y publicable.** `zenthros.env` y `zenthros env`: `new`, `add`, `build`, `use`, `push`, `list`. No hay entidad en el hub: todo vive en `envs/<nombre>/env.lock.json`, en Git.
 
@@ -104,7 +96,7 @@ print(suma.remote(2, 3))          # 5; .submit() da el handle: call.result(), .s
 - **Sin cambios no se llama al builder,** así que funciona sin red. Sin red, un paquete nuevo lo dice y la imagen anterior sigue corriendo, con un aviso.
 - **Dos digests:** el de contenido (la config OCI, lo que corre) es la identidad del entorno y no cambia al recomprimir; el de manifiesto (lo que se baja) sí. `env push` lee lo publicado y compara: `identical`, `same content`, `same files, only metadata differs`, o `same versions, not the same bytes` con `--platform`. Si es otra cosa, lo rechaza. También rechaza un entorno cambiado sin construir, y una caché perdida (antes de publicar nada: `env build --force`, probar, publicar).
 - **Sin la imagen en esta computadora,** `env push` copia lo que el lock dice publicado, sin build.
-- **`env="train"`** en `run`, `@cloud` o `--env`. En `local`, la imagen construida. En `local-k8s`, esa imagen publicada en el registry del cluster, el que el cluster declara en `local-registry-hosting` (`k3d --registry-create` lo escribe). En otro destino, lo último publicado, por digest. `image=` gana. Una función necesita el mismo Python menor que quien llama; un comando no.
+- **`env="train"`** en `run`, `@cloud` o `--env`. En `local`, la imagen construida. En otro destino, lo último publicado, por digest. `image=` gana. Una función necesita el mismo Python menor que quien llama; un comando no.
 - **`env use`** deja la imagen, el agente y el Python del runner listos para trabajar sin red, y las llamadas locales sin `image=` corren ahí. `env use --off` lo deshace. Es de esta computadora: no va al lock.
 - **`zenthros clean --images`** borra las imágenes de este proyecto y el builder con su caché, que comparten todos los proyectos de esta computadora. La que un contenedor usa se queda.
 

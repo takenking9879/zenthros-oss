@@ -69,8 +69,6 @@ class Settings:
     local_output: str = ""
     # Where zenthros env push sends an environment that names no registry.
     registry: str = ""
-    # The cluster of on="local-k8s"; empty is kubectl's current context.
-    kube_context: str = ""
     # Where each call's local record goes (zenthros.remote.runlog): "" is
     # ZENTHROS_LOG_DIR, else ./.zenthros/runs; "off" writes none.
     log_dir: str = ""
@@ -180,29 +178,13 @@ def local_client():
     return _local
 
 
-def local_k8s_client():
-    """The one client of on="local-k8s" of this process, for its project."""
-    global _local_k8s
-    from zenthros.jobs.local import project_root
-    from zenthros.jobs.localk8s import LocalK8sJobClient
-
-    if _local_k8s is None or _local_k8s.project != project_root():
-        _local_k8s = LocalK8sJobClient()
-    return _local_k8s
-
-
-def local_clients():
-    """Where a job with no hub may be: its record says which."""
-    return [local_client(), local_k8s_client()]
-
-
 def local_client_of(name):
-    """The client that ran this job of the project, or None."""
-    return next((client for client in local_clients() if client.knows(name)), None)
+    """The local client, if it ran this job of the project; else None."""
+    client = local_client()
+    return client if client.knows(name) else None
 
 
 _local = None
-_local_k8s = None
 
 
 def blob_store(uri, current=None, client=None):
@@ -306,7 +288,7 @@ class Secret:
             raise errors.ValidationError("Secret.encrypted: one of value, from_env or from_file")
         if (on is None) == (not recipients):
             raise errors.ValidationError("Secret.encrypted: one of on= or recipients=")
-        if on in ("local", "local-k8s"):
+        if on == "local":
             from zenthros import seal
 
             if not seal.available():

@@ -57,7 +57,7 @@ type secretAccessCache struct {
 // until the API server honours it: the RoleBinding is there before the
 // first Secret is.
 func (e *Executor) ensureSecretAccess(ctx context.Context, namespace string) error {
-	if namespace == "" || e.Local != nil {
+	if namespace == "" {
 		return nil
 	}
 	var ns corev1.Namespace

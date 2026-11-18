@@ -8,7 +8,7 @@ your other computer) from a notebook, and get its value back.
 All you need is Docker Desktop, OrbStack or Podman (on Windows, inside WSL2):
 
 ```bash
-pip install "zenthros[seal] @ https://github.com/takenking9879/zenthros-oss/releases/download/v0.2.0/zenthros-0.1.0-py3-none-any.whl"
+pip install "zenthros[seal] @ https://github.com/takenking9879/zenthros-oss/releases/download/v0.2.1/zenthros-0.2.1-py3-none-any.whl"
 ```
 
 ```python
@@ -151,38 +151,12 @@ job already running keeps what it started with. A function's own `packages=`
 win over the machine's. A cluster's pods start fresh, so there give the function
 its packages or an `image=`.
 
-With no `on=`, a call runs in a container on this computer (`on="local"`), and
-with `on="local-k8s"` as a pod of the cluster `kubectl` reaches, each with its
-own `image=`. Still no account: see below. Name the machine to run it there: `train.remote(6, on="my-vm")`, or set a default
-once with `zenthros.configure(on="my-vm")`.
-
-## Several environments on your own Kubernetes
-
-With no account either. Zenthros uses the cluster of `kubectl`'s current context
-and installs nothing but its agent, in the namespace `zenthros-local`, once you
-say yes (`ZENTHROS_LOCAL_K8S_INSTALL=1` where no terminal can ask). It needs
-`kubectl` and `helm`. For a cluster of your own, on Docker:
-
-```console
-$ k3d cluster create zenthros --registry-create zenthros-registry:0.0.0.0:5111 \
-    -v "$HOME/.zenthros/k8s:$HOME/.zenthros/k8s@all"
-```
-
-```python
-@zenthros.cloud(image="python:3.13-slim-bookworm", memory="2g")
-def prep(n): ...
-
-@zenthros.cloud(image="python:3.13-slim-trixie")
-def train(up): ...
-
-train.remote(prep.submit(10, on="local-k8s"), on="local-k8s")   # two pods, two images
-```
-
-A pod asks for the memory and CPU you gave, and Kubernetes places it; one that
-fits nowhere stays `Unschedulable` and says why. What pods read and write is
-`~/.zenthros/k8s`, at the same path on every node: put your data there. A path
-anywhere else is refused before anything starts, and so is a cluster without that
-folder. `zenthros clean --k8s` takes the agent and its namespace off the cluster.
+With no `on=`, a call runs in a container on this computer (`on="local"`), with
+no account and one image at a time. Name the machine to run it there:
+`train.remote(6, on="my-vm")`, or set a default once with
+`zenthros.configure(on="my-vm")`. A Kubernetes cluster runs calls once attached
+(`zenthros attach my-cluster --type kubernetes`, then `on="my-cluster"`), each
+call a pod with its own `image=`.
 
 ## Your own environment, step by step
 
@@ -218,9 +192,7 @@ the same versions, other bytes. Another registry is only another destination:
 `zenthros env push train docker.io/me/train`. Your login is your engine's
 (`docker login`, `gcloud auth configure-docker ...`), and Zenthros never sees it.
 
-On `on="local-k8s"`, an environment goes by itself to the cluster's own registry,
-the one the command above made. `zenthros clean --images` takes the images and
-the builder with its cache.
+`zenthros clean --images` takes the images and the builder with its cache.
 
 ## Not doing the same work twice
 
@@ -380,7 +352,7 @@ through the API, and the key's file readable only by its owner (on Windows,
 by its ACL). A test of the machine's side, which runs on Linux, skips on the
 others and says why.
 
-- **Windows:** this computer's jobs (`on="local"`, `"local-k8s"`) run in WSL2,
+- **Windows:** this computer's jobs (`on="local"`) run in WSL2,
   with the SDK installed there; everything else runs on Windows itself.
 - **Not tested yet:** the login with Google in a browser of macOS or Windows
   (a key's login is), and this computer's jobs on a real Mac.

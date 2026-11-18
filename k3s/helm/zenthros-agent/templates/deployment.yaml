@@ -1,4 +1,3 @@
-{{- if not .Values.agent.local.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -256,4 +255,3 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "zenthros-agent.fullname" . }}-reports
           {{- end }}
-{{- end }}

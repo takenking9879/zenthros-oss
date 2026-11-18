@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/zenthros/operator/pkg/jobspec"
 	"github.com/zenthros/operator/pkg/systemd"
 )
 
@@ -53,6 +54,19 @@ func submitEnv(t *testing.T, env map[string]string) string {
 		t.Fatalf("Submit: %v", err)
 	}
 	return writtenTeeBody(t, runner.commands, "ctr-env")
+}
+
+// A job's container is new from its image each time: its Pythons keep what
+// they compile in the Workspace's environments, as its venvs are, or each
+// start compiles the image's standard library again.
+func TestContainerJobsKeepWhatTheirPythonsCompiled(t *testing.T) {
+	got := submitEnv(t, nil)
+	if want := jobspec.EnvPythonCache + "=" + jobspec.PythonCacheIn(ContainerEnvsDir); !strings.Contains(got, want) {
+		t.Fatalf("ctr env lacks %s:\n%s", want, got)
+	}
+	if strings.Contains(got, "PYTHONDONTWRITEBYTECODE") {
+		t.Fatalf("Python is still told to write nothing:\n%s", got)
+	}
 }
 
 // TestFormatEnvFileKeepsNewlines pins the env file Submit writes. A TOKEN

@@ -162,6 +162,45 @@ class Carried(unittest.TestCase):
             self.assertTrue(any(f"{carried.FOLDER}/job/code/" in name for name in names), names)
             self.assertEqual(call.result(stream_logs=False), 42)
 
+    def project(self, text):
+        project = tempfile.TemporaryDirectory()
+        self.addCleanup(project.cleanup)
+        with open(f"{project.name}/helper.py", "w") as f:
+            f.write(text)
+        return project.name
+
+    def carries_its_project(self, call):
+        names, _ = self.inline_tar(call)
+        return any(f"{carried.FOLDER}/job/code/" in name for name in names)
+
+    def test_every_call_of_a_process_carries_its_project(self):
+        """What a job carries is that job's alone: the second call of the same project
+        has to carry it too (it failed CodeMissing, the first call having "stored" it)."""
+        project = self.project("VALUE = 'every call'\n")
+        first = self.run_call(double, 21, code_dir=project)
+        second = self.run_call(double, 4, code_dir=project)
+        self.assertTrue(self.carries_its_project(first))
+        self.assertTrue(self.carries_its_project(second))
+        self.assertEqual(second.result(stream_logs=False), 8)
+
+    def test_a_rerun_carries_the_project_of_the_call_it_reruns(self):
+        project = self.project("VALUE = 'a rerun'\n")
+        first = self.run_call(double, 21, code_dir=project)
+        first.result(stream_logs=False)
+        again = first.rerun()
+        self.assertTrue(self.carries_its_project(again))
+        self.assertEqual(again.result(stream_logs=False), 42)
+
+    def test_a_map_reads_the_reports_of_its_job_once(self):
+        """Its N results are in its reports (its tasks', through the Gateway): read once
+        for the bytes, and once for the SHA-256s that vouch for them, however many."""
+        asked = []
+        reports = self.client.reports
+        with mock.patch.object(self.client, "reports", lambda name: asked.append(name) or reports(name)):
+            mapped = remote.map(double, [1, 2, 3, 4], code_dir=None)
+            self.assertEqual(mapped.result(stream_logs=False), [2, 4, 6, 8])
+        self.assertEqual(asked.count(mapped.name), 2, asked)
+
     def test_a_command_needs_none_of_it(self):
         call = remote.run(["echo", "hello"], code_dir=None)
         template = self.client.submitted(call.name).spec.workload.template

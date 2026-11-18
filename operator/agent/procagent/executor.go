@@ -746,6 +746,11 @@ func (e *Executor) environment(env, secretEnv map[string]string) []string {
 		}
 		merged[name] = value
 	}
+	// Kept with the container's state, unless it keeps it elsewhere (local
+	// keeps it with its HOME, which outlives the container).
+	if merged[jobspec.EnvPythonCache] == "" {
+		merged[jobspec.EnvPythonCache] = jobspec.PythonCacheIn(e.cfg.StateDir)
+	}
 	if e.cfg.ExtraEnv != nil {
 		for name, value := range e.cfg.ExtraEnv() {
 			merged[name] = value

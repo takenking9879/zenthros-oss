@@ -19,7 +19,7 @@ from unittest import mock
 # What runs on the machine (the runner, its environments, the snapshot, the
 # scripts it is given) runs on Linux, as every machine does.
 machine_side = unittest.skipUnless(sys.platform == "linux", "the machine's side, which runs on Linux")
-# On Windows the SDK runs this computer's jobs (on="local", "local-k8s") in
+# On Windows the SDK runs this computer's jobs (on="local") in
 # WSL2, installed there: jobs.local.WINDOWS_RUNS_IN_WSL says so.
 local_in_wsl = unittest.skipIf(os.name == "nt", "on Windows this computer's jobs run in WSL2, the SDK installed there")
 

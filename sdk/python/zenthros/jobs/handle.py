@@ -139,6 +139,8 @@ class JobHandle:
     def __init__(self, job_id, client):
         self.job_id = job_id
         self._client = client
+        # The last log followed with logs(follow=True).
+        self.followed = None
 
     def status(self):
         return self._client.status(self.job_id)
@@ -183,7 +185,9 @@ class JobHandle:
         if follow:
             from zenthros.jobs.follow import FollowedLog, job_ended
 
-            return FollowedLog(self._client, self.job_id, lambda: job_ended(self._client, self.job_id), tail=tail)
+            # result() goes on from where it got, not from the log's end again.
+            self.followed = FollowedLog(self._client, self.job_id, lambda: job_ended(self._client, self.job_id), tail=tail)
+            return self.followed
         try:
             return self._client.logs(self.job_id) if tail is None else self._client.logs(self.job_id, tail=tail)
         except errors.ZenthrosError as gone:

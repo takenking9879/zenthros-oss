@@ -57,6 +57,18 @@ class SealedHereTest(Env):
         self.assertNotIn(b"s3cr3t-value", self.everything_written())
         self.assertNotIn("s3cr3t-value", json.dumps(self.engine.calls))
 
+    def test_a_secret_is_sealed_for_the_container_it_reaches_and_kept_sealed_for_a_retry(self):
+        self.client.submit(job("before"))
+        name = next(iter(self.engine.containers))
+        self.engine.containers[name]["state"] = "exited"
+        self.client.seal_at_start("j", {"API_KEY": zenthros.Secret.encrypted("s3cr3t-value", on="local")})
+        self.client.submit(job())
+        self.assertIn(["start", name], self.engine.calls)
+        sources = self.engine.submitted["spec"]["workload"]["template"]["secretSources"]
+        self.assertEqual(len(sources), 1, "sealed once, for the container that took it")
+        self.assertEqual(self.client._read("j")["manifest"]["spec"]["workload"]["template"]["secretSources"], sources)
+        self.assertNotIn(b"s3cr3t-value", self.everything_written())
+
     def test_a_local_secret_is_refused_anywhere_else(self):
         secret = zenthros.Secret.encrypted("s3cr3t-value", on="local")
         with self.assertRaisesRegex(errors.ValidationError, "only on this computer"):

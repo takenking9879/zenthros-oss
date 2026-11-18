@@ -68,25 +68,23 @@ def answers(value, target, code_dir="."):
     """[(reference, Reach)] for each path or URI in value, where target (None:
     the default place) would run it. code_dir: the project that goes with it."""
     from zenthros.jobs.local import NETWORK_ENV
-    from zenthros.jobs.localk8s import shared_folder
     from zenthros.machines import default_on
     from zenthros.remote.call import _store
-    from zenthros.remote.options import job_client, local_client, local_k8s_client, settings
+    from zenthros.remote.options import job_client, local_client, settings
 
     found = list(references(value))
     if not found:
         return []
     name = str(getattr(target, "name", "") or target or default_on())
     current = settings()
-    client = local_client() if name == "local" else local_k8s_client() if name == "local-k8s" else job_client(current)
+    client = local_client() if name == "local" else job_client(current)
     offline, store = os.environ.get(NETWORK_ENV) == "none", _store(current, client)
-    shared = "" if name == "local-k8s" and client.shared_now() is False else str(shared_folder())
     return [(ref, Reach(POSSIBLE, f"{ref} goes with your project") if name != "local" and _travels(ref, code_dir)
-             else of(ref, name, store, offline, shared)) for ref in found]
+             else of(ref, name, store, offline)) for ref in found]
 
 
-def of(value, target, store="", offline=False, shared_folder=""):
-    """How target ("local", "local-k8s", or any other, remote) reaches value.
+def of(value, target, store="", offline=False):
+    """How target ("local", or any other, remote) reaches value.
     store: the store its calls use, which it has credentials for."""
     if value.startswith(("http://", "https://")):
         if offline:
@@ -97,27 +95,17 @@ def of(value, target, store="", offline=False, shared_folder=""):
             return Reach(IMPOSSIBLE, f"{value}: this runs with no network; use a local path")
         if store and value.startswith(store.rstrip("/") + "/"):
             return Reach(POSSIBLE, f"{value} is in the store its calls use")
-        if target in ("local", "local-k8s"):
+        if target == "local":
             return Reach(POSSIBLE, f"{value}: it needs your credentials there (secrets=)")
         return Reach(UNCHECKED, f"{value} is not in the store its calls use: only {target} can tell; plan(probe=True) asks it")
-    return _path(value, target, shared_folder)
+    return _path(value, target)
 
 
-def _path(value, target, shared_folder):
+def _path(value, target):
     path = os.path.abspath(value[len("file://"):] if value.startswith("file://") else value)
     if target == "local":
         return Reach(POSSIBLE, f"{path} goes in read-only, at its own path") if os.path.exists(path) else \
             Reach(IMPOSSIBLE, f"{path} is not on this computer")
-    if target == "local-k8s":
-        if shared_folder and (path + os.sep).startswith(shared_folder.rstrip(os.sep) + os.sep):
-            return Reach(POSSIBLE, f"{path} is under the folder this cluster shares")
-        if not shared_folder:
-            from zenthros.jobs.localk8s import not_shared
-            from zenthros.jobs.localk8s import shared_folder as folder
-
-            return Reach(IMPOSSIBLE, not_shared(folder()))
-        return Reach(IMPOSSIBLE, f"{path} is not under {shared_folder}, the folder this cluster shares: copy it there, "
-                                 "or pass a bucket's URI")
     return Reach(IMPOSSIBLE, f"{path} is only on this computer: put it in the bucket (ws.upload) and pass the URI, or upload=True")
 
 

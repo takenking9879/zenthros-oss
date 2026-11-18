@@ -19,6 +19,7 @@ image at a time, since this computer's resources are one budget.
 """
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -61,6 +62,10 @@ MOUNTS_LABEL = "zenthros.ai/local-mounts"
 AGENT_PATH = "/usr/local/bin/zenthros-agent"
 STATE_DIR = "/tmp/zenthros"
 HOME_DIR = "/home/zenthros"
+# Where Python keeps the code it compiled, kept with HOME: an image's own
+# Python (python:3.x) ships none, and the job's user cannot write beside it,
+# so each Python compiled the standard library again (~0.4 s a start).
+PYCACHE_DIR = f"{HOME_DIR}/.cache/pycache"
 ENDPOINT_TEMPLATE = "ZENTHROS_ENDPOINT_TEMPLATE={scheme}://127.0.0.1:{port};scope=Private"
 AGENT_READY_SECONDS = 60
 _OUT_OF_MEMORY = "it ran out of the container's memory, or something killed it: raise memory= (zenthros.configure(local_memory=...))"
@@ -105,6 +110,42 @@ class Engine:
         except subprocess.TimeoutExpired:
             raise errors.TransientError(f"{self.name} {args[0]} did not answer in {timeout} s") from None
         return done.returncode, done.stdout or "", done.stderr or ""
+
+    def run_kept(self, args, stdin, keep, timeout=600):
+        """(code, stdout, stderr) of a command that sends what it holds in one
+        line, then lets it go once told it was kept: keep(line) keeps it, and
+        only after keep returned does the command hear so. A keep that
+        raises, or this process going first, lets nothing go."""
+        try:
+            proc = subprocess.Popen([self.binary, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True)
+        except FileNotFoundError:
+            raise errors.EngineMissing(_no_engine()) from None
+        expired = threading.Event()
+        timer = threading.Timer(timeout, lambda: (expired.set(), proc.kill()))
+        timer.start()
+        line = err = ""
+        try:
+            with proc:
+                try:
+                    proc.stdin.write(stdin)
+                    proc.stdin.flush()
+                    line = proc.stdout.readline()
+                    if line:
+                        keep(line)
+                        proc.stdin.write(json.dumps({"kept": True}) + "\n")
+                    proc.stdin.close()
+                except BrokenPipeError:
+                    # It ended before it heard: nothing was let go.
+                    with contextlib.suppress(OSError):
+                        proc.stdin.close()
+                err = proc.stderr.read()
+                proc.wait()
+        finally:
+            timer.cancel()
+        if expired.is_set() and not line:
+            raise errors.TransientError(f"{self.name} {args[0]} did not answer in {timeout} s")
+        return proc.returncode, line, err
 
 
 # On Windows, this computer's jobs (a container, a local cluster) run in
@@ -151,7 +192,7 @@ def project_root(start=None):
         return Path(os.environ[ROOT_ENV]).resolve().parent.parent
     here = Path(start or os.getcwd()).resolve()
     for folder in (here, *here.parents):
-        if any((folder / ".zenthros" / kept).is_dir() for kept in ("local", "local-k8s", "envs")) or (folder / ".git").exists():
+        if any((folder / ".zenthros" / kept).is_dir() for kept in ("local", "envs")) or (folder / ".git").exists():
             return folder
     return here
 
@@ -171,18 +212,21 @@ class Box:
     ports: tuple = ()
     network: str = ""
     output: str = ""
+    # The agent it runs: another one (another release) is another container.
+    agent: str = ""
 
     def config(self):
         """What, if it changed, needs another container. Mounts go apart: a
         container with more of them serves too."""
-        raw = json.dumps([self.image, self.cpus, self.memory, self.gpu, list(self.ports), self.network, self.output])
+        raw = json.dumps([self.image, self.cpus, self.memory, self.gpu, list(self.ports), self.network, self.output,
+                          self.agent])
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def container_size(capacity=None):
     """The container's cpus and memory: what is configured, else all of the
-    engine's CPUs and three quarters of its memory (capacity, if known: its
-    cpus and bytes)."""
+    engine's CPUs and three quarters of its memory (capacity: its cpus and
+    bytes, or what asks for them, called only when needed)."""
     from zenthros.machines import LOCAL_CPUS_ENV, LOCAL_MEMORY_ENV, bytes_of, docker_memory
 
     current = _settings()
@@ -191,6 +235,8 @@ def container_size(capacity=None):
     if not cpus or not memory:
         from zenthros.machines import docker_capacity
 
+        if callable(capacity):
+            capacity = capacity()
         engine = None if capacity else find_engine()
         total_cpus, total_memory = capacity or docker_capacity(engine.binary, engine.capacity_format)
         cpus = cpus or str(total_cpus)
@@ -206,6 +252,18 @@ def _settings():
 
 def _fetch_script():
     return (Path(__file__).parent.parent / "_data" / "container-fetch.sh").read_text()
+
+
+def _agent_identity():
+    """Which agent a container runs: the release this wheel pins, or a built
+    one, as built."""
+    built = os.environ.get(AGENT_ENV)
+    if built:
+        try:
+            return f"{built}@{os.stat(built).st_mtime_ns}"
+        except OSError:
+            return built
+    return (agent_pin() or {}).get("sha256sums_sha256", "")
 
 
 def agent_pin():
@@ -239,6 +297,11 @@ class LocalJobClient(JobClient):
         # while this one's job has not reached it.
         self._starting = threading.Lock()
         self._collected = False
+        # The containers this process checked, by name: (config, mounts, its
+        # agent's info). The next job for one goes straight to it; a submit
+        # that fails there checks again.
+        self._ensured = {}
+        self._capacity = None
 
     # --- where things are -------------------------------------------------
 
@@ -340,10 +403,15 @@ class LocalJobClient(JobClient):
 
     def ensure(self, box):
         """The container for box, its agent answering. Made, started or made
-        again as needed; a container with jobs in it is never touched."""
+        again as needed; a container with jobs in it is never touched. One
+        this process checked, with these limits and mounts, is taken as it
+        was then."""
         name = self._container_name(box)
         with self._lock:
             wanted = dict(self._mounts_wanted)
+        checked = self._ensured.get(name)
+        if checked and checked[0] == box.config() and {**checked[1], **wanted} == checked[1]:
+            return name
         self._only_one_image(name)
         found = self._inspect(name)
         if found is not None:
@@ -351,7 +419,7 @@ class LocalJobClient(JobClient):
             if found["config"] == box.config() and union == found["mounts"]:
                 if found["state"] != "running":
                     self._start(name)
-                self._wait_agent(name)
+                self._ensured[name] = (box.config(), found["mounts"], self._wait_agent(name))
                 return name
             wanted = union if found["config"] == box.config() else wanted
             busy = [job for job in self._running_jobs(name) if self._live(job)]
@@ -361,7 +429,7 @@ class LocalJobClient(JobClient):
                     "wait for it, or cancel it")
             self.engine.run(["rm", "-f", name], timeout=120)
         self._create(name, box, wanted)
-        self._wait_agent(name)
+        self._ensured[name] = (box.config(), wanted, self._wait_agent(name))
         return name
 
     def _only_one_image(self, name):
@@ -377,7 +445,8 @@ class LocalJobClient(JobClient):
             if busy:
                 raise errors.ValidationError(
                     f"{', '.join(sorted(busy))} still runs in another environment, and local runs one at a time: "
-                    "wait for it, or use on='local-k8s' for several at once")
+                    "wait for it, or attach a machine (zenthros attach) to run both at once")
+            self._ensured.pop(other, None)
             self.engine.run(["stop", "-t", "2", other], timeout=60)
 
     def _live(self, job):
@@ -403,7 +472,7 @@ class LocalJobClient(JobClient):
                 "--label", f"{MOUNTS_LABEL}={_encode_mounts(mounts)}",
                 "-e", "ZENTHROS_LOCAL=1", "-e", "ZENTHROS_AGENT_MODE=container",
                 "-e", f"ZENTHROS_STATE_DIR={STATE_DIR}", "-e", f"ZENTHROS_CONTAINER_IMAGE={box.image}",
-                "-e", f"HOME={HOME_DIR}", "-e", "PYTHONUNBUFFERED=1",
+                "-e", f"HOME={HOME_DIR}", "-e", "PYTHONUNBUFFERED=1", "-e", f"PYTHONPYCACHEPREFIX={PYCACHE_DIR}",
                 "-e", f"ZENTHROS_LOCAL_IDLE_EXIT={os.environ.get(IDLE_ENV, '30m')}",
                 "-v", f"{agent}:{AGENT_PATH}:ro", "-v", f"{home}:{HOME_DIR}", "-v", f"{self.root}:{self.root}"]
         if box.output:
@@ -515,10 +584,7 @@ class LocalJobClient(JobClient):
     def _sealed_sources(self, container, secrets):
         from zenthros import seal
 
-        code, out, err = self._exec(container, "info")
-        if code != 0:
-            raise errors.TransientError(f"the agent in {container}: {err.strip()}")
-        recipients = json.loads(out).get("ageRecipients") or []
+        recipients = self._ensured[container][2].get("ageRecipients") or []
         if not recipients:
             raise errors.ValidationError(f"the agent in {container} has no key to seal secrets to")
         sources = []
@@ -532,7 +598,7 @@ class LocalJobClient(JobClient):
         template = manifest["spec"]["workload"]["template"]
         compute = manifest["spec"].get("compute") or {}
         image = self.engine.image_name(template.get("image") or _default_image())
-        cpus, memory, memory_bytes = container_size()
+        cpus, memory, memory_bytes = container_size(self._engine_capacity)
         asked = compute.get("memory")
         if asked:
             from zenthros.machines import bytes_of
@@ -545,7 +611,16 @@ class LocalJobClient(JobClient):
         outputs = _settings().local_output
         return Box(image=image, cpus=cpus, memory=memory, gpu=bool(compute.get("gpuCount") or compute.get("gpuModel")),
                    ports=ports, network=os.environ.get(NETWORK_ENV, ""),
-                   output=str(Path(outputs).resolve()) if outputs else "")
+                   output=str(Path(outputs).resolve()) if outputs else "", agent=_agent_identity())
+
+    def _engine_capacity(self):
+        """The engine's CPUs and memory, asked once: they change only as the
+        engine restarts."""
+        if self._capacity is None:
+            from zenthros.machines import docker_capacity
+
+            self._capacity = docker_capacity(self.engine.binary, self.engine.capacity_format)
+        return self._capacity
 
     def submit(self, job):
         job = require_job(job)
@@ -576,15 +651,20 @@ class LocalJobClient(JobClient):
         manifest = record["manifest"]
         template = manifest["spec"]["workload"]["template"]
         with self._starting:
+            checked = self._container_name(box) in self._ensured
             container = self.ensure(box)
-            held = self._to_seal.pop(name, None)
-            if held:
-                sealed = [S.to_plain(source) for source in self._sealed_sources(container, held)]
-                template["secretSources"] = [*(template.get("secretSources") or []), *sealed]
-            code, out, err = self._exec(container, "submit", stdin=json.dumps(self._with_its_cursor(name, manifest)),
-                                        timeout=600)
+            sent, (code, out, err) = self._submit_to(container, name, manifest)
+            if code != 0 and checked:
+                # What this process saw of the container may be past (it
+                # stopped idle, or another process made it again): seen again.
+                self._ensured.pop(container, None)
+                container = self.ensure(box)
+                sent, (code, out, err) = self._submit_to(container, name, manifest)
             if code != 0:
                 raise errors.Refused(f"job {name}: {err.strip()}")
+            # Sealed, they go again with a retry of the job.
+            if self._to_seal.pop(name, None):
+                template["secretSources"] = sent["spec"]["workload"]["template"]["secretSources"]
             record["local"] = json.loads(out)
             record["container"] = container
             record["status"] = {"phase": "Running"}
@@ -593,6 +673,17 @@ class LocalJobClient(JobClient):
             if record.get("restarts", 0) >= _backoff(manifest) and not any(map(is_carried, template.get("command") or [])):
                 (template.get("source") or {}).pop("inline", None)
             self._write(name, record)
+
+    def _submit_to(self, container, name, manifest):
+        """(the job as sent, the agent's answer): its secrets sealed to that
+        agent's key."""
+        held = self._to_seal.get(name)
+        if held:
+            template = manifest["spec"]["workload"]["template"]
+            sealed = [S.to_plain(source) for source in self._sealed_sources(container, held)]
+            manifest = {**manifest, "spec": {**manifest["spec"], "workload": {**manifest["spec"]["workload"], "template": {
+                **template, "secretSources": [*(template.get("secretSources") or []), *sealed]}}}}
+        return manifest, self._exec(container, "submit", stdin=json.dumps(self._with_its_cursor(name, manifest)), timeout=600)
 
     def _start_after(self, name, box, depends):
         """A job with upstreams starts once they end: this computer is on
@@ -681,20 +772,57 @@ class LocalJobClient(JobClient):
             record = self._read(job_id)
         return {**record["manifest"], "status": record["status"]}
 
-    def _refresh(self, name, record):
-        code, out, err = self._exec(record["container"], "status", stdin=json.dumps(record["local"]), timeout=60)
+    waits_for_change = True
+
+    def _status_since(self, job_id, seen, wait):
+        """The agent's own wait (local wait): it answers when the job is other
+        than seen names (at once for seen ""), or after wait seconds, so one
+        command runs where a status every half second did. A job that ended
+        is collected as job_object collects it."""
+        record = self._read(job_id)
+        if record.get("final") or not record.get("local"):
+            status = status_from_object(self.job_object(job_id))
+            if status.phase not in TERMINAL_PHASES:
+                time.sleep(min(wait, self.poll_seconds))
+            return status, None
+        seconds = max(1, int(min(wait, self._before_its_deadline(record))))
+        code, out, err = self._exec(record["container"], "wait", "--seen", seen or "", "--timeout", f"{seconds}s",
+                                    stdin=json.dumps(record["local"]), timeout=seconds + 60)
         if code != 0:
             if self._gone(record["container"]):
-                # The kernel may take the agent itself for a job's memory:
-                # the job is still what ran the container out of it.
-                found = self._inspect(record["container"])
-                if found and found["oom"]:
-                    self._end(name, FAILED, "OOM_KILLED", self.out_of_memory)
-                else:
-                    self._end(name, FAILED, "WORKER_LOST", "the local container went away: run it again")
-                return self._read(name)
-            raise errors.TransientError(f"job {name}: {err.strip()}")
-        status = json.loads(out)
+                # Ended as the container left it.
+                return self.job_status(job_id), None
+            raise errors.TransientError(f"job {job_id}: {err.strip()}")
+        answer = json.loads(out)
+        record = self._refresh(job_id, record, answer["status"])
+        return status_from_object({**record["manifest"], "status": record["status"]}), answer["seen"]
+
+    def _before_its_deadline(self, record):
+        """Seconds until the job's timeout, which this client keeps: a wait
+        answers by then."""
+        deadline = record["manifest"]["spec"].get("activeDeadlineSeconds")
+        started = (record.get("status") or {}).get("startTime")
+        if not deadline or not started:
+            return float("inf")
+        return int(deadline) - (time.time() - seconds_at(started))
+
+    def _refresh(self, name, record, status=None):
+        """The record of a job the agent holds, with status (asked if not
+        given): written, and collected once the job ended."""
+        if status is None:
+            code, out, err = self._exec(record["container"], "status", stdin=json.dumps(record["local"]), timeout=60)
+            if code != 0:
+                if self._gone(record["container"]):
+                    # The kernel may take the agent itself for a job's memory:
+                    # the job is still what ran the container out of it.
+                    found = self._inspect(record["container"])
+                    if found and found["oom"]:
+                        self._end(name, FAILED, "OOM_KILLED", self.out_of_memory)
+                    else:
+                        self._end(name, FAILED, "WORKER_LOST", "the local container went away: run it again")
+                    return self._read(name)
+                raise errors.TransientError(f"job {name}: {err.strip()}")
+            status = json.loads(out)
         spec = record["manifest"]["spec"]
         deadline = spec.get("activeDeadlineSeconds")
         if deadline and status.get("phase") not in TERMINAL_PHASES and status.get("startTime"):
@@ -719,36 +847,43 @@ class LocalJobClient(JobClient):
 
     def _gone(self, container):
         found = self._inspect(container)
-        return found is None or found["state"] != "running"
+        gone = found is None or found["state"] != "running"
+        if gone:
+            self._ensured.pop(container, None)
+        return gone
 
-    def _collect(self, name, record):
-        """What the agent holds of this attempt comes here: reports and log
-        add up over a job's attempts."""
-        for task in record["local"]["tasks"]:
-            code, out, _ = self._exec(record["container"], "reports", task["id"], timeout=120)
-            if code == 0 and out.strip():
-                record.setdefault("reports", []).extend(json.loads(out) or [])
-        self._log_file(name).parent.mkdir(parents=True, exist_ok=True)
-        with self._log_file(name).open("a") as log:
-            for task in record["local"]["tasks"]:
-                code, out, _ = self._exec(record["container"], "logs", task["handle"], timeout=600)
-                if code == 0:
-                    log.write(out)
+    def _finished(self, name, record, kept):
+        """What the agent holds of this attempt comes here, in one command
+        (local finish): reports and log add up over a job's attempts. The
+        agent lets it go only once kept(record) returned (record written), so
+        nothing is lost in between."""
+        def keep(line):
+            held = json.loads(line)
+            record.setdefault("reports", []).extend(held["reports"])
+            # The log file past what the record says is kept is an attempt
+            # at this that never got kept.
+            path = self._log_file(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("ab") as log:
+                log.truncate(record.get("logged", 0))
+                log.write(held["log"].encode("utf-8"))
+            record["logged"] = path.stat().st_size
+            kept()
 
-    def _let_go(self, record):
-        """Only after what it holds was kept, so nothing is lost in between."""
-        local = record["local"]
-        self._exec(record["container"], "cancel", stdin=json.dumps(local), timeout=120)
-        for task in local["tasks"]:
-            self._exec(record["container"], "forget", task["id"], timeout=60)
+        _, out, err = self.engine.run_kept(self._exec_args(record["container"], "finish"), json.dumps(record["local"]),
+                                           keep, timeout=600)
+        if out:
+            # Kept: a let go that failed after is the agent's to clean.
+            return
+        if not self._gone(record["container"]):
+            raise errors.TransientError(f"job {name}: {err.strip()}")
+        kept()
 
     def _run_again(self, name, record):
         """A process that failed, with retries left: its next attempt, as the
         controller does on a machine (retryProcess). It runs under its own
         identity (ZENTHROS_ATTEMPT), with the reports keyed by the job."""
-        self._collect(name, record)
-        self._write(name, record)
-        self._let_go(record)
+        self._finished(name, record, lambda: self._write(name, record))
         record["restarts"] = record.get("restarts", 0) + 1
         record["manifest"]["status"] = {**(record["manifest"].get("status") or {}), "runtime": "process",
                                         "restarts": record["restarts"]}
@@ -759,13 +894,15 @@ class LocalJobClient(JobClient):
     def _finish(self, name, record, status):
         """The job ended: what the agent holds of it comes here, for the
         agent to let it go. Its record outlives the container."""
-        self._collect(name, record)
         if status.get("phase") == FAILED:
             status = _explained(status, record["container"], self)
         status.setdefault("completionTime", _now())
-        record["status"], record["final"] = status, True
-        self._write(name, record)
-        self._let_go(record)
+
+        def kept():
+            record["status"], record["final"] = status, True
+            self._write(name, record)
+
+        self._finished(name, record, kept)
         return record
 
     def job_status(self, job_id):

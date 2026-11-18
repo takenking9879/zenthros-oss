@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	v1 "github.com/zenthros/operator/api/v1"
 )
 
@@ -38,6 +40,30 @@ func FansOut(spec v1.ZenthrosJobSpec, isCluster func(backendID string) bool) boo
 // MemberName is the task job of rank: <job>-<rank>.
 func MemberName(job string, rank int32) string {
 	return fmt.Sprintf("%s-%d", job, rank)
+}
+
+// MemberLabels select a list of job's tasks; Members keeps the ones job
+// controls.
+func MemberLabels(job *v1.ZenthrosJob) map[string]string {
+	return map[string]string{v1.LabelMemberOf: job.Name}
+}
+
+// Members are job's tasks among listed (read with MemberLabels), by rank:
+// the ones job controls, by its UID, not by the name a label says.
+func Members(job *v1.ZenthrosJob, listed []v1.ZenthrosJob) map[int32]*v1.ZenthrosJob {
+	out := map[int32]*v1.ZenthrosJob{}
+	for i := range listed {
+		m := &listed[i]
+		if !metav1.IsControlledBy(m, job) {
+			continue
+		}
+		rank, err := strconv.Atoi(m.Labels[v1.LabelMemberRank])
+		if err != nil {
+			continue
+		}
+		out[int32(rank)] = m
+	}
+	return out
 }
 
 // RankEnv is the env a task sees.

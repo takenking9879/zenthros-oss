@@ -16,6 +16,8 @@ from zenthros.remote.spread import MapCalls
 
 
 class Handle:
+    followed = None
+
     def __init__(self, interrupt=True):
         self.interrupt = interrupt
         self.cancelled = 0

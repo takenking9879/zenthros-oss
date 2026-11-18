@@ -138,7 +138,7 @@ class Command(unittest.TestCase):
         job = {"metadata": {"name": "churn-train-1", "labels": {PIPELINE_LABEL: "churn", STEP_LABEL: "train"}}, "status": {"phase": "Running"}}
         client = mock.Mock()
         client.list_jobs.return_value = [job]
-        with mock.patch.object(tools, "job_client", return_value=client), mock.patch.object(tools, "local_clients", return_value=[]):
+        with mock.patch.object(tools, "job_client", return_value=client), mock.patch.object(tools, "local_client", return_value=client):
             row = tools.jobs()["jobs"][0]
         self.assertEqual((row["pipeline"], row["step"]), ("churn", "train"))
 

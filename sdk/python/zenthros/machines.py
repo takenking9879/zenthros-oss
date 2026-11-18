@@ -45,7 +45,6 @@ from zenthros.local import BACKEND_LABEL, PORTS_LABEL, LocalBackend, _api, _dock
 from zenthros.view import Backend, Pool
 
 LOCAL = "local"
-LOCAL_K8S = "local-k8s"
 # create("k8s:<cluster>"): a pod of that Kubernetes backend.
 POD = "k8s:"
 # The label of a pod machine's job: the backend its pod joined as.
@@ -823,15 +822,16 @@ def _place(on, options, docker="docker", keep=False, python=None, ports=None):
     Python differs is refused before any machine is made. ports: a
     Service's; a container here must publish them, and one made for it
     does. image= is refused on a machine that does not run images."""
-    from zenthros.remote.options import _through_api, local_client, local_k8s_client
+    from zenthros.remote.options import _through_api, local_client
 
     if on == LOCAL:
         # No hub in it, logged in or not: this computer, the local transport.
         # The job's image is the container's.
         return Placement({"client": local_client()}, name=LOCAL)
-    if on == LOCAL_K8S:
-        # The same, on the cluster kubectl reaches: each job its pod and image.
-        return Placement({"client": local_k8s_client()}, name=LOCAL_K8S)
+    if on == "local-k8s":
+        raise errors.ValidationError(
+            "on='local-k8s' does not exist: a Kubernetes cluster is reached through the hub (zenthros attach NAME "
+            "--type kubernetes, then on=NAME), and on='local' runs on this computer with no hub")
     if isinstance(on, str) and not _through_api():
         return Placement({"pool": on})
     image = (options or {}).get("image") or ""

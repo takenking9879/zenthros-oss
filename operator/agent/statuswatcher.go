@@ -38,6 +38,9 @@ type StatusWatcher struct {
 	// heldCommits reports a job with checkpoint commits the controller has
 	// not decided yet; its end is pushed after them. Optional.
 	heldCommits func(ctx context.Context, jobID string) bool
+	// now asks for a poll before the next tick; its channel closes once
+	// the poll ran (PollNow).
+	now chan chan struct{}
 }
 
 func newStatusWatcher(executor Executor, tracker *jobTracker, sender *streamSender, backendID string, logger Logger) *StatusWatcher {
@@ -51,6 +54,7 @@ func newStatusWatcher(executor Executor, tracker *jobTracker, sender *streamSend
 		lastPhase: make(map[string]v1.Phase),
 
 		lastEndpoints: make(map[string]string),
+		now:           make(chan chan struct{}),
 	}
 }
 
@@ -65,7 +69,26 @@ func (w *StatusWatcher) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			w.pollAll(ctx)
+		case done := <-w.now:
+			w.pollAll(ctx)
+			close(done)
 		}
+	}
+}
+
+// PollNow polls every job at once and returns once it did, or ctx ended. An
+// end the agent answered (Status) is then pushed, and its slot freed, before
+// the answer goes: the next job no longer waits for the next tick.
+func (w *StatusWatcher) PollNow(ctx context.Context) {
+	done := make(chan struct{})
+	select {
+	case w.now <- done:
+	case <-ctx.Done():
+		return
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
 	}
 }
 

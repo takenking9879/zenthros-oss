@@ -482,13 +482,6 @@ class Reach(unittest.TestCase):
         with tempfile.NamedTemporaryFile() as handle:
             self.assertEqual(reach.of(handle.name, "local").answer, reach.POSSIBLE)
             self.assertEqual(reach.of(handle.name, "gcp-gpu").answer, reach.IMPOSSIBLE)
-            self.assertEqual(reach.of(handle.name, "local-k8s", shared_folder="/nowhere").answer, reach.IMPOSSIBLE)
-            self.assertEqual(reach.of(handle.name, "local-k8s", shared_folder=os.path.dirname(handle.name)).answer,
-                             reach.POSSIBLE)
-
-    def test_a_folder_that_only_starts_like_the_shared_one_is_not_under_it(self):
-        self.assertEqual(reach.of("/home/a/k8s-other/x", "local-k8s", shared_folder="/home/a/k8s").answer, reach.IMPOSSIBLE)
-        self.assertIn("do not have", reach.of("/home/a/x", "local-k8s", shared_folder="").why, "no folder to put it in")
 
     def test_the_store_of_the_place_is_possible_and_others_unchecked(self):
         self.assertEqual(reach.of("gs://b/z/x", "vm", store="gs://b/z").answer, reach.POSSIBLE)
@@ -551,7 +544,7 @@ class Plans(PipelineBase):
 
     def test_what_the_place_says_is_a_problem_of_the_step(self):
         self.plan_call.return_value = mock.Mock(problems=["no node of it has 64Gi"])
-        plan = self.pipe.plan("x", on="local-k8s")
+        plan = self.pipe.plan("x", on="gcp-gpu")
         self.assertIn("prep: no node of it has 64Gi", plan.problems)
 
     def test_a_connection_that_cannot_fit_is_a_problem(self):

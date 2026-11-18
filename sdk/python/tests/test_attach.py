@@ -232,7 +232,20 @@ class QuestionsTest(Attach):
         self.docker.answers["info"] = (127, "docker is not installed")
         out = io.StringIO()
         self.assertEqual(cli.main(["attach", "mi-pc", "--type", "local"], out=out), 1)
-        self.assertRegex(out.getvalue(), r"^✗ Docker is not running here")
+        self.assertRegex(out.getvalue(), r"(?m)^✗ Docker is not running here")
+        self.assertEqual(self.joins(), [])
+
+    def test_this_computer_says_it_goes_through_the_hub_before_it_makes_anything(self):
+        # on="local" needs no attach: the menu and a line say which is which,
+        # before anything is made (here Docker is not even running).
+        self.assertEqual(dict(attaching.TYPES)["local"], "This computer (through the hub)")
+        self.docker.answers["info"] = (127, "docker is not installed")
+        out = io.StringIO()
+        with self.assertRaises(errors.ValidationError):
+            machines.attach("mi-pc", ask=self.ask(["This computer (through the hub)"]), out=out)
+        said = out.getvalue().splitlines()
+        self.assertEqual(said[0], "This computer joins your Workspace as mi-pc: jobs reach it from anywhere. "
+                                  "To run from this computer only, with no hub, you need no attach: on='local'.")
         self.assertEqual(self.joins(), [])
 
 

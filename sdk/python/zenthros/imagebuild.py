@@ -25,8 +25,8 @@ from zenthros import errors
 
 BUILDER_ENV = "ZENTHROS_ENV_BUILDER"
 BUILDER = "zenthros"
-# The registry of the documented cluster (k3d cluster create), which speaks
-# plain HTTP, and the same cap the development builder has.
+# A registry on this computer (localhost:5111, as k3d makes one), which
+# speaks plain HTTP, and the same cap the development builder has.
 BUILDKITD_CONFIG = """\
 [registry."localhost:5111"]
   http = true

@@ -58,8 +58,6 @@ type Executor struct {
 	PodSecurity string
 	// SecretAccess binds the agent's Secret role in each job namespace.
 	SecretAccess SecretAccess
-	// Local is set on the agent of no hub, on a person's own cluster.
-	Local *LocalCluster
 	// NodeLogs, when set, are the node log readers pods' logs are read
 	// through; nil reads every pod through the API (logs.nodeReader false).
 	NodeLogs *NodeLogReaders
@@ -120,10 +118,8 @@ func (e *Executor) submit(ctx context.Context, spec jobspec.JobSpec, env map[str
 		return "", fmt.Errorf("%w: %q", backend.ErrUnsupportedKind, spec.Kind)
 	}
 	spec.Env = env
-	if e.Local == nil {
-		if err := e.ensureNamespace(ctx, spec); err != nil {
-			return "", err
-		}
+	if err := e.ensureNamespace(ctx, spec); err != nil {
+		return "", err
 	}
 	// The agent's Secret role is bound in the namespace before any Secret
 	// there is read or written.

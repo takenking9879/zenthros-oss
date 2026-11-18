@@ -17,7 +17,6 @@ import zenthros
 from zenthros import cli, errors, imagebuild, tools
 from zenthros import env as environments
 from zenthros.jobs import local as local_module
-from zenthros.jobs import localk8s
 from zenthros.remote import call as remote_call
 
 BASE = "python:3.12-slim-bookworm"
@@ -775,72 +774,6 @@ class WhereItRuns(EnvCase):
         self.assertEqual(environments.using(), "")
 
 
-class OnACluster(EnvCase):
-    HOSTING = "help: https://k3d.io\nhost: localhost:5111\nhostFromClusterNetwork: reg:5000\nhostFromContainerRuntime: reg:5000\n"
-
-    def client(self, hosting=HOSTING, arch="amd64"):
-        kube = mock.Mock()
-        kube.name = "kubectl"
-        def run(args, stdin=None, timeout=600):
-            if "configmap" in args:
-                return 0, hosting, ""
-            if args[:2] == ["get", "nodes"]:
-                return 0, json.dumps({"items": [{"status": {"nodeInfo": {"architecture": arch}, "allocatable": {}}}]}), ""
-            raise AssertionError(args)
-        kube.run = run
-        return localk8s.LocalK8sJobClient(root=str(self.root), kube=kube, helm="/fake/helm")
-
-    def test_it_goes_to_the_clusters_registry_from_here_and_is_pulled_from_inside(self):
-        env = self.built("polars")
-        image = self.client().image_of_env(env)
-        self.assertEqual(image, "reg:5000/zenthros-env/proj/train@sha256:manifest-gzip")
-        pushed = [o for o in self.engine.outputs() if "push=true" in o][-1]
-        self.assertIn(f"name=localhost:5111/zenthros-env/proj/train:{env.build['input'][:12]},", pushed)
-        self.assertIn("registry.insecure=true", pushed)
-
-    def test_it_goes_once_for_each_build(self):
-        env = self.built("polars")
-        client = self.client()
-        client.image_of_env(env)
-        count = len(self.engine.builds())
-        client.image_of_env(env)
-        self.assertEqual(len(self.engine.builds()), count)
-
-    def test_it_is_not_built_there_again(self):
-        env = self.built("polars")
-        count = len([o for o in self.engine.outputs() if o.startswith("type=local") or o.startswith("type=docker")])
-        self.client().image_of_env(env)
-        self.assertEqual(len([o for o in self.engine.outputs() if o.startswith("type=local") or o.startswith("type=docker")]), count)
-
-    def test_a_cluster_with_no_registry_gets_the_engines_tag(self):
-        env = self.built("polars")
-        image = self.client(hosting="").image_of_env(env)
-        self.assertEqual(image, environments.here("train"))
-        self.assertFalse([o for o in self.engine.outputs() if "push=true" in o])
-
-    def test_a_cluster_of_another_architecture_is_refused_before_a_pod(self):
-        env = self.built("polars")
-        client = self.client(arch="arm64")
-        image = client.image_of_env(env)
-        with self.assertRaisesRegex(errors.ValidationError, "only amd64.*arm64"):
-            client._fits(image, False)
-
-
-    def test_an_image_it_cannot_pull_is_not_called_a_lack_of_network(self):
-        said = ('pod zr-f: ErrImagePull failed to pull and unpack image "localhost/zenthros-env/1c/two:63": failed to do '
-                'request: Head "https://localhost/v2/zenthros-env/1c/two/manifests/63": dial tcp 127.0.0.1:443: connect: '
-                "connection refused")
-        client = self.client(hosting="")
-        status = local_module._explained({"message": said}, "c", client)
-        self.assertIn("--registry-create", status["message"])
-        self.assertNotIn("no network", status["message"])
-
-    def test_another_image_it_cannot_pull_may_still_be_the_network(self):
-        said = 'pod zr-f: ErrImagePull failed to pull "python:3.13": dial tcp: lookup registry: no such host'
-        status = local_module._explained({"message": said}, "c", self.client(hosting=""))
-        self.assertIn("no network", status["message"])
-
-
 class ForAnAgent(EnvCase):
     def rows(self):
         def row(name):
@@ -849,15 +782,15 @@ class ForAnAgent(EnvCase):
             found.to_dict.return_value = {"name": name}
             return found
 
-        with mock.patch("zenthros.targetlist.targets", lambda *a, **k: [row("local"), row("local-k8s"), row("gcp-gpu")]):
+        with mock.patch("zenthros.targetlist.targets", lambda *a, **k: [row("local"), row("gcp-gpu")]):
             return {found["name"]: found["environments"] for found in tools.targets()}
 
     def test_targets_say_which_environments_run_where(self):
         environments.new("empty", BASE)
         self.built("polars", registry="r.example/team")
-        self.assertEqual(self.rows(), {"local": ["train"], "local-k8s": ["train"], "gcp-gpu": []})
+        self.assertEqual(self.rows(), {"local": ["train"], "gcp-gpu": []})
         environments.push("train", out=io.StringIO())
-        self.assertEqual(self.rows(), {"local": ["train"], "local-k8s": ["train"], "gcp-gpu": ["train"]})
+        self.assertEqual(self.rows(), {"local": ["train"], "gcp-gpu": ["train"]})
 
     def test_an_agents_run_names_an_environment(self):
         self.built("polars")

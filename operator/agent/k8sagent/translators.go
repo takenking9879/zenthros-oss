@@ -177,9 +177,6 @@ func (t translator) handle(namespace, name string) string {
 
 func (e *Executor) submitBatchJob(ctx context.Context, spec jobspec.JobSpec) (string, error) {
 	desired := k8s.BuildJob(spec)
-	if e.Local != nil {
-		e.Local.apply(&desired.Spec.Template.Spec)
-	}
 	var existing batchv1.Job
 	created, err := k8s.EnsureObject(ctx, e.client, "Job", desired, &existing, func() error {
 		if mismatch := k8s.BatchJobSpecMismatch(&existing, desired); mismatch != nil {

@@ -1,13 +1,4 @@
 agent:
-  # No hub: the SDK installs this on a person's own cluster (on="local-k8s")
-  # and talks to the agent by kubectl exec. templates/local.yaml is then all
-  # the chart makes, and most of what follows does not apply.
-  local:
-    enabled: false
-    # The folder every node has at this same path, which job pods mount there.
-    sharedFolder: ""
-    # uid:gid of a job's processes, so that its files are that person's.
-    user: ""
   image: zenthros/agent:dev
   imagePullPolicy: IfNotPresent
   replicas: 1

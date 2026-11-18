@@ -512,8 +512,10 @@ func (e SystemdExecutor) installCtrWrapper(ctx context.Context, spec jobspec.Job
 	if _, ok := merged["HOME"]; !ok {
 		merged["HOME"] = "/tmp"
 	}
-	if _, ok := merged["PYTHONDONTWRITEBYTECODE"]; !ok {
-		merged["PYTHONDONTWRITEBYTECODE"] = "1"
+	// Each job's container is new from its image: what its Pythons compile
+	// is kept in the Workspace's environments, where the next job finds it.
+	if _, ok := merged[jobspec.EnvPythonCache]; !ok {
+		merged[jobspec.EnvPythonCache] = jobspec.PythonCacheIn(ContainerEnvsDir)
 	}
 	if _, ok := merged[jobspec.EnvEnvsDir]; !ok {
 		merged[jobspec.EnvEnvsDir] = ContainerEnvsDir

@@ -107,14 +107,12 @@ def _caller_main(fn):
 def _package_drift(wanted):
     """(differ, missing): the caller's packages this machine has at another
     version, and those it lacks. The caller lists every package it had
-    loaded, so a missing one is often not the function's."""
+    loaded but the SDK's own (bundle.sdk_distributions), so a missing one is
+    often not the function's."""
     from importlib import metadata
 
     differ, missing = [], []
     for dist, version in sorted(wanted.items()):
-        # The SDK's core travels with the call, whatever this machine has.
-        if dist == "zenthros":
-            continue
         try:
             have = metadata.version(dist)
         except metadata.PackageNotFoundError:
@@ -264,8 +262,13 @@ def execute(call_uri, blob_store=None, out=None, index=None):
     if quota is not None:
         machine["cpu_quota"] = quota
     what = envelope.get("function") + (f"[{index}]" if is_map else "")
-    print(f"zenthros: {what} on {machine['host']} ({cpus_text(machine['cpus'], quota)}, Python {machine['python']})",
-          file=out, flush=True)
+    where = f"zenthros: {what} on {machine['host']} ({cpus_text(machine)}, Python {machine['python']})"
+    # The function's own packages and tools: the call runs again inside
+    # them, and where it runs is said once, by the Python that runs it.
+    needs = envelope.get("environment")
+    preparing = needs and os.environ.get(envs.READY_ENV) != envs.key(needs)
+    if not preparing:
+        print(where, file=out, flush=True)
     if envelope.get("python") != bundle.python_version():
         message = (f"the call was pickled by Python {envelope.get('python')} and this machine runs "
                    f"{bundle.python_version()}; cloudpickle needs the same minor version on both ends")
@@ -276,8 +279,7 @@ def execute(call_uri, blob_store=None, out=None, index=None):
         return EXIT_MISMATCH
     # The function's own packages and tools, before anything of the caller's
     # is unpacked or unpickled: the call then runs again inside them.
-    needs = envelope.get("environment")
-    if needs and os.environ.get(envs.READY_ENV) != envs.key(needs):
+    if preparing:
         try:
             python, extra = envs.prepare(needs, out=out)
         except envs.EnvironmentFailed as exc:
@@ -292,6 +294,7 @@ def execute(call_uri, blob_store=None, out=None, index=None):
                 stream.flush()
             _reexec(python, [python, "-m", "zenthros.remote", MAP_KIND if is_map else "exec", call_uri],
                     dict(os.environ))
+        print(where, file=out, flush=True)
     # The machine's base (zenthros install), after the call was read: the
     # runner's own packages are loaded, so the base cannot break them, and
     # it comes before the machine's for what the function imports.
@@ -710,8 +713,12 @@ def cpu_quota(root="/sys/fs/cgroup", self_cgroup="/proc/self/cgroup"):
     return min(found) if found else None
 
 
-def cpus_text(cpus, quota):
-    """What the runner says of its CPUs: the quota when it is less."""
-    if quota is not None and cpus and quota < cpus:
-        return f"{quota:g} of {cpus} CPUs"
-    return f"{cpus} CPUs"
+def cpus_text(machine):
+    """The CPUs the job may use, as the runner says them: its quota, else the
+    CPUs it may run on, else the host's (the result's machine keeps all
+    three)."""
+    usable = machine.get("affinity") or machine.get("cpus") or 1
+    quota = machine.get("cpu_quota")
+    if quota is not None and quota < usable:
+        usable = quota
+    return f"{usable:g} CPU" + ("" if usable == 1 else "s")
