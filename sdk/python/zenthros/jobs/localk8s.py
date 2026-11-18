@@ -82,7 +82,10 @@ def current_context():
     binary = shutil.which("kubectl")
     if not binary:
         return ""
-    done = subprocess.run([binary, "config", "current-context"], capture_output=True, text=True, timeout=30, check=False)
+    try:
+        done = subprocess.run([binary, "config", "current-context"], capture_output=True, text=True, timeout=30, check=False)
+    except subprocess.TimeoutExpired:
+        return ""  # a kubectl that does not answer names no cluster
     return done.stdout.strip() if done.returncode == 0 else ""
 
 

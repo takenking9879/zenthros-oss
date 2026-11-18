@@ -161,6 +161,18 @@ class InstallTest(Base):
             self.assertTrue(all(call[:2] == ["--context", "k3d-other"] for call in self.kube.calls), self.kube.calls)
 
 
+class ContextTest(unittest.TestCase):
+    def test_a_kubectl_that_does_not_answer_means_no_local_cluster(self):
+        # Chocolatey's kubectl on a Windows runner hung 30 s, and zenthros
+        # detach failed with its TimeoutExpired (sdk-os, 2026-11-17): the
+        # targets list only the cluster kubectl names.
+        settings = mock.Mock(kube_context="")
+        hung = mock.Mock(side_effect=localk8s.subprocess.TimeoutExpired(["kubectl"], 30))
+        with mock.patch.object(localk8s, "_settings", return_value=settings), \
+                mock.patch.object(localk8s.shutil, "which", return_value="/bin/kubectl"), \
+                mock.patch.object(localk8s.subprocess, "run", hung):
+            self.assertEqual(localk8s.current_context(), "")
+
 class ChartTest(Base):
     def setUp(self):
         super().setUp()
