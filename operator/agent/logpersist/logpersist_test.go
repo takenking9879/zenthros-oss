@@ -275,6 +275,8 @@ func (f *fakeStore) text(t *testing.T, job Job) string {
 func TestEachObjectSaysWhereTheLogGoesOn(t *testing.T) {
 	src, store := newFakeLog(), newFakeStore()
 	s := newTestSaver(t, t.TempDir(), src, store)
+	// Several objects by size, however fast the test writes (the test below).
+	s.objectBytes, s.objectAge, s.hurriedAge = 4<<10, time.Hour, time.Hour
 	job := testJob("h1")
 	if err := s.Start(job); err != nil {
 		t.Fatal(err)
@@ -285,6 +287,9 @@ func TestEachObjectSaysWhereTheLogGoesOn(t *testing.T) {
 	}
 	src.end()
 	end := waitEnd(t, store, job)
+	if end.Objects < 3 {
+		t.Fatalf("END.json %+v: want the log in several objects", end)
+	}
 	dec, err := zstd.NewReader(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -373,6 +378,11 @@ func waitEnd(t *testing.T, store *fakeStore, job Job) End {
 func TestALogIsSavedWholeAndThenItsEnd(t *testing.T) {
 	src, store := newFakeLog(), newFakeStore()
 	s := newTestSaver(t, t.TempDir(), src, store)
+	// The objects are sealed by their size alone, not by how fast the test
+	// writes: on a fast machine all of it came within objectAge, one object
+	// (12.8 KB packed, under 16 KiB), and the test failed (zenthros-oss CI,
+	// 2026-11-18). Objects of 4 KiB packed cut it in three or more.
+	s.objectBytes, s.objectAge, s.hurriedAge = 4<<10, time.Hour, time.Hour
 	job := testJob("h1")
 	src.write(lines(0, 100))
 	if err := s.Start(job); err != nil {
