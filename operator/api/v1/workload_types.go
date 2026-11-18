@@ -34,6 +34,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="!has(self.template.distribution) || self.kind == 'Job'",message="distribution splits a Job; RayJob, RayCluster, SparkApplication and Manifest distribute through their own operator"
 // +kubebuilder:validation:XValidation:rule="!has(self.template.service) || self.kind == 'Job'",message="service makes a Job a Service; a Manifest declares lifecycle: Service and endpointFrom instead"
 // +kubebuilder:validation:XValidation:rule="!has(self.template.service) || !has(self.template.distribution) || self.template.distribution.count <= 1",message="a Service is one replica; distribution does not apply"
+// +kubebuilder:validation:XValidation:rule="!has(self.template.logs) || self.kind != 'RayCluster'",message="a RayCluster runs no command and has no log of its own to save; set logs on the RayJobs submitted to it"
 type Workload struct {
 	// Kind selects the native resource the adapter creates.
 	// +kubebuilder:validation:Enum=Job;RayJob;RayCluster;SparkApplication;Manifest
@@ -124,6 +125,73 @@ type WorkloadTemplate struct {
 	// Valid only when workload.kind is Job.
 	// +optional
 	Service *ServiceSpec `json:"service,omitempty"`
+
+	// Logs saves the job's whole log to a bucket of the user's as the job
+	// writes it. Without it a log is read from its machine while the
+	// machine lasts, and only its last 50 MiB are kept there.
+	// +optional
+	Logs *LogsSpec `json:"logs,omitempty"`
+}
+
+// DefaultLogsMaxBytes is the most of a log saved when logs.maxBytes is unset.
+const DefaultLogsMaxBytes int64 = 1 << 30
+
+// LogsSpec is where a job's whole log is saved, as its agent writes it:
+// zstd objects of ~1 MiB or 30 s under
+// <destination>/<job>/<uid>/g<generation>-a<attempt>/<handle>/, and END.json
+// last, which says whether the log is complete. The agent writes them with
+// credentials it alone sees: the job's environment never holds them. Saving
+// never fails the job; what kept it from saving is the job's LOGS_NOT_SAVED
+// reason.
+type LogsSpec struct {
+	// Destination is s3://bucket/prefix or gs://bucket/prefix.
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:Pattern=`^(s3|gs)://[a-z0-9][a-z0-9._-]{1,221}(/[^\x00-\x1f\x7f?#]*)?$`
+	Destination string `json:"destination"`
+
+	// Endpoint is an S3-compatible server, https://host[:port]. Empty is
+	// Amazon S3 in Region for s3://, Cloud Storage for gs://.
+	// +optional
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^https://[^/?#@\s]+/?$`
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// Region is the region an s3:// destination is signed for; us-east-1
+	// when empty.
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+$`
+	Region string `json:"region,omitempty"`
+
+	// CAData is PEM certificates the agent trusts for Endpoint besides its
+	// system's: a server of the user's own, with a private CA.
+	// +optional
+	// +kubebuilder:validation:MaxLength=16384
+	CAData string `json:"caData,omitempty"`
+
+	// Credentials are what the agent writes with, each a secret source
+	// materialized as env: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (and
+	// AWS_SESSION_TOKEN for temporary keys), or GOOGLE_STORE_KEY, a service
+	// account's key, for gs://. They reach the agent, never the job. Empty:
+	// the machine's own identity (its role, its service account).
+	// +optional
+	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:XValidation:rule="self.all(c, c.materialization.mode == 'env' && has(c.materialization.envName) && c.materialization.envName in ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'GOOGLE_STORE_KEY'])",message="each credential is env AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN or GOOGLE_STORE_KEY"
+	Credentials []SecretSourceRef `json:"credentials,omitempty"`
+
+	// MaxBytes is the most of the log saved; past it the rest is not, and
+	// END.json says truncated. DefaultLogsMaxBytes (1 GiB) when unset.
+	// +optional
+	// +kubebuilder:validation:Minimum=1048576
+	MaxBytes *int64 `json:"maxBytes,omitempty"`
+}
+
+// Max is the most of the log saved.
+func (l *LogsSpec) Max() int64 {
+	if l.MaxBytes == nil {
+		return DefaultLogsMaxBytes
+	}
+	return *l.MaxBytes
 }
 
 // ServiceSpec is what a Service listens on.

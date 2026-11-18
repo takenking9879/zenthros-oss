@@ -606,8 +606,10 @@ class CachedCall:
     def status(self):
         return "reused"
 
-    def logs(self, tail=None):  # noqa: ARG002 - RemoteCall's
-        return ""
+    def logs(self, tail=None, follow=False):  # noqa: ARG002 - RemoteCall's
+        from zenthros.jobs.follow import EndedLog
+
+        return EndedLog() if follow else ""
 
     def reports(self):
         return []

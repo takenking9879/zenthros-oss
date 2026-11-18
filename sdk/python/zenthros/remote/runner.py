@@ -43,7 +43,7 @@ from zenthros.core import preemption
 from zenthros.core.env import JobEnv
 from zenthros.core.report import Reporter
 from zenthros.core.storage import store_for
-from zenthros.remote import bundle, carried, envs
+from zenthros.remote import bundle, carried, envs, savedlogs
 from zenthros.remote.call import (
     CALL_SHA256_ENV,
     MAP_KIND,
@@ -635,7 +635,8 @@ def _job_log_sink(chunk):
 def run_snapshot(uri, command, blob_store=None, out=None, log_sink=_job_log_sink, log_every=None):
     """Run command in the snapshot at uri, once its bytes are the ones the job
     pins. Its exit code is the job's; a stop reaches it, and what it started.
-    What it prints also stays among the job's outputs (OUTPUT_LOG)."""
+    What it prints also stays among the job's outputs (OUTPUT_LOG), unless
+    the machine's agent saves the whole log to a bucket (logs=)."""
     out = out or sys.stderr
     store = blob_store or store_for(uri)
     root = fetch_code({"uri": uri, "sha256": os.environ.get(CALL_SHA256_ENV, "")}, store)
@@ -643,7 +644,8 @@ def run_snapshot(uri, command, blob_store=None, out=None, log_sink=_job_log_sink
         print(f"zenthros: {uri} is not the snapshot this job pins (its SHA-256 differs from {CALL_SHA256_ENV}); "
               "it is not run", file=out, flush=True)
         return EXIT_TAMPERED
-    output = JobEnv.current().data_output
+    # The machine's agent saves the whole log (logs=): no copy of it here.
+    output = "" if os.environ.get(savedlogs.LOGS_SAVED_ENV) else JobEnv.current().data_output
     try:
         child = subprocess.Popen(command, cwd=root, stdout=subprocess.PIPE if output else None,
                                  stderr=subprocess.STDOUT if output else None)

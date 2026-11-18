@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-// defaultHourlyLogBytes is the Agent-wide StreamLogs hourly budget. Distinct
-// from the per-request cap (defaultMaxLogBytes / X3).
+// defaultHourlyLogBytes is the Agent-wide StreamLogs hourly budget.
 const defaultHourlyLogBytes = 50 << 20
 
 type hourlyBudget struct {
@@ -26,27 +25,22 @@ func newHourlyBudget(limit int) *hourlyBudget {
 	return &hourlyBudget{limit: limit, now: time.Now}
 }
 
-func (b *hourlyBudget) take(n int) int {
-	if b == nil || n <= 0 {
-		return 0
-	}
-	if b.limit <= 0 {
-		return n
-	}
+// takeAll takes n bytes if they are all left this hour.
+func (b *hourlyBudget) takeAll(n int) bool {
 	now := b.now()
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.refill(now)
+	if b.used+n > b.limit {
+		return false
+	}
+	b.used += n
+	return true
+}
+
+func (b *hourlyBudget) refill(now time.Time) {
 	if b.start.IsZero() || now.Sub(b.start) >= time.Hour {
 		b.start = now
 		b.used = 0
 	}
-	remain := b.limit - b.used
-	if remain <= 0 {
-		return 0
-	}
-	if n > remain {
-		n = remain
-	}
-	b.used += n
-	return n
 }

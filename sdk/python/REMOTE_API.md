@@ -59,6 +59,8 @@ Los tests sin cluster están en `tests/` (`test_remote*.py`, `test_on.py`, `test
 | Coste | `call.cost()`: lo que cuenta zenthros-api | `status.lease`, la CapacityRequest y el catálogo |
 | Progreso | una línea por report nuevo mientras `result()` espera; columna `report` en la tabla de un `MapCalls`; `calls.reports()`, una fila por config | `zenthros.report` (ExecutionReport) |
 | Lo que pasó, en disco | `.zenthros/runs/<job>/`: `call.json`, `logs.txt`, `reports.jsonl`, `error.txt`; `zenthros.last_failure()` | nada: lo escribe el SDK aquí |
+| El log completo | `logs=True` (tu store), `logs="s3://..."` o `"gs://..."`, o `zenthros.Logs(destino, endpoint=, ca=, credentials=, max_bytes=)`; también `configure(logs=)` y `zctl run --logs`. `call.logs(to="x.log")` lo trae entero, también con la máquina ya apagada | `template.logs` |
+| Todo lo que se vio, en un archivo | `with zenthros.transcript("sesion.log"):`: lo que el proceso muestra y los logs de sus llamadas, en el orden en que llegan | nada |
 
 ---
 
@@ -166,13 +168,14 @@ call = zenthros.run(
     image="ghcr.io/acme/train:1.4",          # opcional; solo en una máquina que corre imágenes (containerd, un clúster)
     env={"LOG_LEVEL": "info"},
     secrets={"DB_URL": zenthros.Secret.aws("prod/db", key="url")},
+    logs=True,                  # el log completo, a tu store: call.logs(to="x.log") lo lee
     retries=2, retry_on=(ConnectionError,),
     timeout="2h",
     after=[prep],
     name="train-v3", labels={"team": "risk"},
 )
 
-call.result(timeout=None)   call.status()   call.logs(tail=None)   call.reports()   # Ctrl-C en result() cancela el job
+call.result(timeout=None)   call.status()   call.logs(tail=None, follow=False, to=None)   call.reports()   # Ctrl-C en result() cancela el job
 call.info()                 call.cancel()   call.delete() call.output
 zenthros.get("train-v3")                                  # la misma llamada, desde otra sesión (mientras el job exista)
 zenthros.map(fn, items, **opciones_de_run) -> RemoteCall  # result() es la lista, en orden
@@ -245,7 +248,7 @@ $ zenthros agent allow gcp-lab --max-machines 3     # sin esto, run rechaza lo q
 | `targets` | Dónde se puede correr, precio, `allowed` y, si no, el comando para permitirlo (`to_allow`) |
 | `run` | Vuelve de inmediato con el nombre del job y `code`, el SHA-256 del código que tomó. Corre sobre una foto del worktree, cambios sin commit incluidos: lo que edites después no le llega |
 | `status` | `state`, `exit_code` (el del proceso; sin él, falló la máquina y lo dice `reason`), `took_s`, `code`, `cost_usd`, `artifacts` |
-| `logs` | Solo las líneas pedidas, con `grep`, `tail` y `limit`. Con la máquina ya apagada, lee lo que el job guardó en el store |
+| `logs` | Solo las líneas pedidas, con `grep`, `tail` y `limit`. Con la máquina ya apagada, lee lo que el job guardó en el store, o en su bucket con `logs=` |
 | `cancel` | Solo lo que lanzó esa sesión (`ZENTHROS_AGENT_SESSION`) |
 
 Una sesión de un solo turno, como `claude -p`, no puede esperar: termina con el nombre del job, y `claude -p --resume <sesión>` lo lee después. La foto deja fuera lo que `ignore.py` tiene por credencial y lo lista al mandarla. Un job de agente dura 7 días (`keep_for`).
@@ -398,7 +401,7 @@ En un **comando** no hay excepciones que mirar. Ahí `retries` se traduce en `re
     - no viaja lo que excluyen `.gitignore` o `.zenthrosignore` (sintaxis de gitignore, con `!` para reincluir), los archivos y directorios ocultos, los entornos (`venv`, `node_modules`, …), ni un `data/` que no sea un paquete de Python;
     - tampoco viajan las credenciales (`*.env`, `*.pem`, `*.key`, `id_rsa*`, `kubeconfig`, …), salvo que un archivo de exclusión las reincluya con `!`: el bundle lo lee quien lea el store;
     - las entradas de `sys.path` que caen dentro de `code_dir` (`python src/train.py` pone `src/` en `sys.path`) viajan como rutas relativas, y el runner las inserta antes de deserializar (SDK-1).
-14. **`call.logs(tail=N)`** pide las últimas N líneas al API o a zctl (`--tail`). El `RemoteError` de un comando fallido muestra el final del log, donde está el error. Antes, el log se cortaba desde el principio y el error no aparecía (SDK-10).
+14. **`call.logs()`** es el final del log: su último 0.5 MB desde el inicio de una línea, con una primera línea que dice cuánto se omitió; `call.logs(tail=N)`, sus últimas N líneas. `call.logs(follow=True)` da eso y luego cada línea según se escribe, hasta que el job termina (`with` o `.close()` lo detienen). Si la conexión se corta, sigue justo después de lo que ya dio, sin repetir ni perder líneas; si el job pasa a otro intento, una línea lo dice. El `RemoteError` de un comando fallido muestra el final del log, donde está el error (SDK-10). Por la red el log viaja en zstd, un frame por bloque; tú ves siempre texto.
 15. **El SDK ya no escribe `spec.tenant`**, que está deprecado y el controller ignora (SDK-12).
 16. **La API nunca lee el store.** Para listar firma una URL de ListObjectsV2 de un prefijo (método LIST de `objects/presign`, permiso `list zenthrosobjects`), con el prefijo dentro de la firma. El SDK lee las páginas con `after`.
 17. **El coste lo cuenta la API, no el SDK.** El SDK no conoce precios ni la máquina de un job. Sin un precio observado, no hay número: nunca se estima.
@@ -413,6 +416,8 @@ En un **comando** no hay excepciones que mirar. Ahí `retries` se traduce en `re
 26. **Un `map` repartido se recupera por sus jobs.** No hay un objeto "map" en el hub: la etiqueta y las anotaciones de cada job bastan, y los configs salen de la llamada guardada (verificada), no de una anotación que podría no caber.
 27. **Un secreto del Workspace lo sella el controller, no el cliente.** Sellar exige la clave de una máquina concreta, y una plantilla la crea después. El valor vive en un Secret de Kubernetes (etiquetado, en el namespace del Workspace), lo escribe zenthros-api y lo lee el controller (sin caché, al mandar el job, para sellarlo), cada uno con un permiso que el Workspace le da solo en su namespace: un RoleBinding a un ClusterRole fijo del chart. El controller solo puede enlazar esos dos ClusterRoles; no tiene Secrets propios en todo el cluster (Kubernetes no deja dar un permiso que no se tiene, y así lo vimos en el E2E). El hub ve el valor, como con `Secret.k8s`; quien no quiera eso sigue teniendo `Secret.encrypted`.
 28. **`clean` solo borra llamadas, y por defecto no sus salidas.** Lo que no lleva un `call-<sha16>.pkl` puede ser del usuario, y dentro de una llamada es salida todo lo que no sea la llamada, el resultado o un checkpoint: un modelo no se puede volver a pedir, una llamada sí. El código se queda: pesa KB y se guarda una vez por contenido.
+
+29. **El log completo va a un bucket solo si lo pides** (`logs=`). Lo guarda el agente de la máquina mientras el job escribe, en objetos comprimidos de ~1 MiB (o cada 30 s), y `END.json` al final; el job nunca espera al bucket, y un bucket que rechaza aparece en `status.reasons` (`LOGS_NOT_SAVED`), nunca como fallo. Antes de soltar una máquina hecha para la llamada, el SDK espera `END.json` hasta 60 s, salvo con `LOGS_NOT_SAVED`. `call.logs(to=)` comprueba cada objeto por su cola (cursor, bytes y SHA-256), pide a la máquina lo que falte después del último, y marca con una línea propia lo que no está: un hueco, el corte de `max_bytes`, o "incompleto". Sin `logs=`, `to=` trae lo que guarda la máquina (50 MiB). `logs=True` pide un store por https; en modo local no se guarda nada. Las credenciales son secretos del Workspace que solo resuelve el agente: nunca llegan al entorno del job. El diseño y sus mediciones: `benchmarks/loglab/PLAN.md` y `operator/docs/logs.md`.
 
 ---
 

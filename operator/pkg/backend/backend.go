@@ -108,8 +108,8 @@ type JobState struct {
 }
 
 // LogChunk is a fragment of user-facing log output from a backend job. The agent
-// produces these from the backend-native log source (journalctl, pod logs) and the
-// controller proxies them to zctl.
+// reads it from the job's log (its file on a machine or in a container, the pod's
+// log in Kubernetes) and the Gateway forwards it to whoever reads.
 type LogChunk struct {
 	// Stream is "stdout" or "stderr".
 	Stream string
@@ -119,6 +119,71 @@ type LogChunk struct {
 
 	// Timestamp when the log line was produced (zero if unknown).
 	Timestamp time.Time
+
+	// Cursor is where a read goes on right after this chunk (LogRequest.After):
+	// a reader that lost its connection asks for it and gets every byte once.
+	// Empty where the source has none.
+	Cursor string
+
+	// Gap is how many bytes of the log, right before Data, never come, and
+	// GapReason why: Uncounted when the source no longer knows how many.
+	Gap       int64
+	GapReason GapReason
+
+	// Omitted, on a read's first chunk, is how many bytes of the log come
+	// before where the read started: what its history left out. Uncounted
+	// when the source cannot say whether any do (the Kubernetes API serves
+	// only the kubelet's latest file of a log).
+	Omitted int64
+}
+
+// Uncounted, as LogChunk.Gap or Omitted, is a part of the log the source
+// cannot count.
+const Uncounted = -1
+
+// GapReason is why a part of a log never comes.
+type GapReason int
+
+const (
+	// GapFreed: the machine freed it, past the cap of the job's file.
+	GapFreed GapReason = iota
+	// GapBudget: the machine's hourly log budget ran out, and the read went
+	// on from where the log was when it came back.
+	GapBudget
+)
+
+// LogRequest is what a read of a job's log asks for: a history, the end of
+// the log as it is, then, when it follows, what the job writes next.
+type LogRequest struct {
+	// Follow keeps the read open after the history until the job ends.
+	Follow bool
+	// TailLines makes the history the last TailLines lines; -1 leaves it to
+	// HistoryBytes.
+	TailLines int
+	// HistoryBytes is the most of the log's end the history holds, from the
+	// start of a line: 0 is DefaultHistoryBytes, AllHistory all the source
+	// keeps.
+	HistoryBytes int64
+	// After goes on right after a cursor an earlier read gave, with no
+	// history. Empty starts with the history.
+	After string
+}
+
+// DefaultHistoryBytes is the history a read starts with when it names none:
+// ~3,600-4,600 lines of training output, more than any terminal keeps
+// (benchmarks/loglab/PLAN.md, decision 4).
+const DefaultHistoryBytes = 512 << 10
+
+// AllHistory, as LogRequest.HistoryBytes, asks for all the source keeps.
+const AllHistory = -1
+
+// History is how many bytes of the log's end the history of req holds, or
+// AllHistory.
+func (req LogRequest) History() int64 {
+	if req.HistoryBytes == 0 {
+		return DefaultHistoryBytes
+	}
+	return req.HistoryBytes
 }
 
 // ExecutionBackend is implemented by each backend adapter. Submit is idempotent

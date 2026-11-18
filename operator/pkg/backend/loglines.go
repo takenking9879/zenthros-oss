@@ -7,8 +7,15 @@ import (
 	"io"
 )
 
-// MaxLogLine is the longest piece of a log line one LogChunk carries.
-const MaxLogLine = 256 << 10
+// MaxLogChunk is the most data one LogChunk carries, from any reader through
+// the agent's batches to the Gateway, which refuses a larger one.
+const MaxLogChunk = 256 << 10
+
+// MaxLogLine is the longest piece of a log line one LogChunk carries. It
+// leaves room in MaxLogChunk for what a reader adds to a piece: its newline,
+// and a manifest's [pod/container] prefix (at most 320 bytes with the longest
+// names Kubernetes allows).
+const MaxLogLine = MaxLogChunk - 1<<10
 
 // LogLines scans r line by line, as a log is read. A line longer than
 // MaxLogLine comes in pieces of at most that size: bufio.Scanner stopped at

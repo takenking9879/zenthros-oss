@@ -108,11 +108,12 @@ class TLSHub:
                     self.wfile.write(b" " * 989)
                     return
                 if self.path.endswith("/logs?follow=1"):
+                    raw = b'{"n":6,"cursor":"6"}\nline\n\n'
                     self.send_response(200)
-                    self.send_header("Content-Type", "text/plain")
-                    self.send_header("Content-Length", "6")
+                    self.send_header("Content-Type", "application/vnd.zenthros.log-records")
+                    self.send_header("Content-Length", str(len(raw)))
                     self.end_headers()
-                    self.wfile.write(b"line\n\n")
+                    self.wfile.write(raw)
                     return
                 code = 201 if self.command == "POST" else 200
                 raw = json.dumps(JOB if "/jobs" in self.path else {"backendId": "b"}).encode()

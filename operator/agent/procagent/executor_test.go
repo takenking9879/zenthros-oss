@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/zenthros/operator/agent/logpersist"
 	v1 "github.com/zenthros/operator/api/v1"
 	"github.com/zenthros/operator/pkg/backend"
 	"github.com/zenthros/operator/pkg/capability"
@@ -294,7 +295,7 @@ func TestCancelOfAnEndedJobKeepsItsLog(t *testing.T) {
 	if err := e.Cancel(context.Background(), handle, owner.Ref{}); err != nil {
 		t.Fatal(err)
 	}
-	ch, err := e.Logs(context.Background(), handle, false, -1)
+	ch, err := e.Logs(context.Background(), handle, backend.LogRequest{TailLines: -1})
 	if err != nil {
 		t.Fatalf("Logs after Cancel: %v", err)
 	}
@@ -352,6 +353,65 @@ func TestReleasedLogsAreCapped(t *testing.T) {
 		if got := err == nil; got != want {
 			t.Errorf("%s kept = %v, want %v", handle, got, want)
 		}
+	}
+}
+
+// openLog is a job's log that never ends: its reader for the bucket holds on.
+type openLog struct{}
+
+func (openLog) Logs(ctx context.Context, _ string, _ backend.LogRequest) (<-chan backend.LogChunk, error) {
+	ch := make(chan backend.LogChunk)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func (openLog) Ended(context.Context, string) bool { return false }
+
+// A released job's log still read for its bucket is not pruned, however
+// old: its reader gets to its end first (logpersist.Saving).
+func TestALogReadForItsBucketIsNotPruned(t *testing.T) {
+	e := newTestExecutor(t, "")
+	e.cfg.KeptLogs = 1
+	saver, err := logpersist.New(logpersist.Config{Dir: t.TempDir(), Source: openLog{}, Logger: logr.Discard(),
+		Open: func(context.Context, logpersist.Job) (logpersist.Store, error) { return nil, errors.New("not reached") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().Add(-time.Hour)
+	for i, handle := range []string{"saving", "older", "newer"} {
+		dir := e.jobDir(handle)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, logFile)
+		if err := os.WriteFile(path, []byte(handle), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		at := base.Add(time.Duration(i) * time.Minute)
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := saver.Start(logpersist.Job{Handle: "saving", Logs: v1.LogsSpec{Destination: "s3://b"}}); err != nil {
+		t.Fatal(err)
+	}
+	e.pruneLogs()
+	for handle, want := range map[string]bool{"saving": true, "older": false, "newer": true} {
+		_, err := os.Stat(filepath.Join(e.jobDir(handle), logFile))
+		if got := err == nil; got != want {
+			t.Errorf("%s kept = %v, want %v", handle, got, want)
+		}
+	}
+	// Its reader done, it goes as any other.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	saver.Drain(ctx)
+	e.pruneLogs()
+	if _, err := os.Stat(filepath.Join(e.jobDir("saving"), logFile)); !os.IsNotExist(err) {
+		t.Fatalf("a log no longer read for its bucket stays: %v", err)
 	}
 }
 
@@ -481,7 +541,7 @@ func TestLogsTailAndFollowUntilTheJobEnds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch, err := e.Logs(context.Background(), handle, true, -1)
+	ch, err := e.Logs(context.Background(), handle, backend.LogRequest{Follow: true, TailLines: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +552,7 @@ func TestLogsTailAndFollowUntilTheJobEnds(t *testing.T) {
 	if got := all.String(); !strings.Contains(got, "line1") || !strings.Contains(got, "line5") {
 		t.Fatalf("followed log = %q", got)
 	}
-	ch, err = e.Logs(context.Background(), handle, false, 2)
+	ch, err = e.Logs(context.Background(), handle, backend.LogRequest{TailLines: 2})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -318,6 +318,23 @@ class Service:
 
 
 @dataclass
+class Logs:
+    # The job's whole log, saved by its agent to a bucket of yours as the job
+    # writes it: zstd objects under
+    # <destination>/<job>/<uid>/g<generation>-a<attempt>/<handle>/, and
+    # END.json last, which says whether it is complete.
+    destination: str = ""  # s3://bucket/prefix | gs://bucket/prefix
+    endpoint: str = ""  # an S3-compatible server, https://host[:port]
+    region: str = ""
+    ca_data: str = ""  # PEM, for a server with a private CA
+    # What the agent alone writes with, as env secret sources:
+    # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (and AWS_SESSION_TOKEN), or
+    # GOOGLE_STORE_KEY. None: the machine's own identity.
+    credentials: list = field(default_factory=list, metadata={"of": "SecretSource"})
+    max_bytes: Optional[int] = None  # 1 GiB when unset
+
+
+@dataclass
 class Template:
     entrypoint: str = ""
     command: list = field(default_factory=list)
@@ -335,6 +352,7 @@ class Template:
     spark: Optional[Spark] = None
     manifest: Optional[Manifest] = None
     service: Optional[Service] = None
+    logs: Optional[Logs] = None
 
 
 @dataclass

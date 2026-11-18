@@ -225,3 +225,51 @@ func TestValidateWorkloadRefusesASizeComputeCannotParse(t *testing.T) {
 		}
 	}
 }
+
+// spec.workload.template.logs travels with the job, and a bucket the agent
+// would not write to is refused as the job is sent and as it is received.
+func TestALogsBucketTravelsAndOneAMachineMustNotWriteToIsRefused(t *testing.T) {
+	job := testJob(nil)
+	job.Spec.Workload.Kind = v1.WorkloadKindJob
+	job.Spec.Workload.Template.Entrypoint = "python train.py"
+	env := func(name string) v1.SecretSourceRef {
+		return v1.SecretSourceRef{Type: v1.SecretSourceTypeWorkspace, Name: "k",
+			Materialization: v1.SecretMaterialization{Mode: v1.SecretMaterializationEnv, EnvName: name}}
+	}
+	job.Spec.Workload.Template.Logs = &v1.LogsSpec{Destination: "s3://b/logs", Endpoint: "https://s3.example:9000",
+		Credentials: []v1.SecretSourceRef{env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY")}}
+	spec := FromZenthrosJob(job, "vm", "tenant-default")
+	if spec.Logs == nil || spec.Logs.Destination != "s3://b/logs" || spec.Secrets() != 2 {
+		t.Fatalf("logs %+v, secrets %d", spec.Logs, spec.Secrets())
+	}
+	if err := ValidateWorkload(spec); err != nil {
+		t.Fatalf("a valid bucket: %v", err)
+	}
+	small := int64(1000)
+	for name, mutate := range map[string]func(l *v1.LogsSpec){
+		"an http endpoint":    func(l *v1.LogsSpec) { l.Endpoint = "http://s3.example" },
+		"a metadata endpoint": func(l *v1.LogsSpec) { l.Endpoint = "https://169.254.169.254" },
+		"not a bucket":        func(l *v1.LogsSpec) { l.Destination = "https://b/logs" },
+		"half a key":          func(l *v1.LogsSpec) { l.Credentials = l.Credentials[:1] },
+		"a credential file": func(l *v1.LogsSpec) {
+			l.Credentials = []v1.SecretSourceRef{{Type: v1.SecretSourceTypeWorkspace, Name: "k", Materialization: v1.SecretMaterialization{Mode: v1.SecretMaterializationFile}}}
+		},
+		"an unknown credential": func(l *v1.LogsSpec) { l.Credentials = []v1.SecretSourceRef{env("PASSWORD")} },
+		"a CA that is none":     func(l *v1.LogsSpec) { l.CAData = "not pem" },
+		"a max under 1 MiB":     func(l *v1.LogsSpec) { l.MaxBytes = &small },
+	} {
+		bad := *job.Spec.Workload.Template.Logs
+		bad.Credentials = append([]v1.SecretSourceRef(nil), bad.Credentials...)
+		mutate(&bad)
+		spec := spec
+		spec.Logs = &bad
+		if err := ValidateWorkload(spec); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	cluster := spec
+	cluster.Kind, cluster.Entrypoint, cluster.Image = v1.WorkloadKindRayCluster, "", "ray:2"
+	if err := ValidateWorkload(cluster); err == nil || !strings.Contains(err.Error(), "RayCluster") {
+		t.Fatalf("a RayCluster with logs: %v", err)
+	}
+}

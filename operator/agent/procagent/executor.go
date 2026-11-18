@@ -30,6 +30,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/zenthros/operator/agent/agepayload"
+	"github.com/zenthros/operator/agent/logfile"
+	"github.com/zenthros/operator/agent/logpersist"
 	"github.com/zenthros/operator/agent/secretfile"
 	v1 "github.com/zenthros/operator/api/v1"
 	"github.com/zenthros/operator/pkg/backend"
@@ -49,15 +51,6 @@ const EnvContainerImage = "ZENTHROS_CONTAINER_IMAGE"
 
 // defaultKeptLogs is how many released jobs' logs a container keeps.
 const defaultKeptLogs = 20
-
-// defaultMaxLogBytes caps one job's log: twenty kept logs stay well inside
-// the 10 GB overlay of a RunPod or Vast.ai container, where the agent's
-// certificate lives too.
-const defaultMaxLogBytes = 128 << 20
-
-// logDrainWait is how long a finished job's last output may take to reach
-// its log before the result is recorded.
-const logDrainWait = 2 * time.Second
 
 // defaultKillGrace is how long a cancelled job has between SIGTERM and SIGKILL.
 const defaultKillGrace = 10 * time.Second
@@ -96,8 +89,10 @@ type Config struct {
 	// KeptLogs is how many released jobs' logs stay; older ones go, so a
 	// long-lived container's state dir does not fill with them. Zero is 20.
 	KeptLogs int
-	// MaxLogBytes caps each job's log; past it the log says it was cut and
-	// the rest of the output is dropped. Zero is 128 MiB.
+	// MaxLogBytes caps each job's log: past it the oldest part is freed
+	// (logfile). Zero is logfile.DefaultMax: twenty kept logs stay well
+	// inside the 10 GB overlay of a RunPod or Vast.ai container, where the
+	// agent's certificate lives too.
 	MaxLogBytes int64
 	// BaseEnv is the environment a job inherits: the container's, which
 	// carries the image's PATH, CUDA and library settings. Nil reads it from
@@ -118,6 +113,9 @@ type Executor struct {
 	host func(context.Context) capability.Host
 	// noGPU: the GPU nvidia-smi lists does not start (WithoutGPU).
 	noGPU atomic.Bool
+
+	// logs holds every job's log to MaxLogBytes.
+	logs *logfile.Keeper
 
 	mu   sync.Mutex
 	jobs map[string]*job
@@ -169,16 +167,14 @@ func New(cfg Config) (*Executor, error) {
 	if cfg.KeptLogs <= 0 {
 		cfg.KeptLogs = defaultKeptLogs
 	}
-	if cfg.MaxLogBytes <= 0 {
-		cfg.MaxLogBytes = defaultMaxLogBytes
-	}
 	if cfg.BaseEnv == nil {
 		cfg.BaseEnv = os.Environ()
 	}
 	// A container's jobs never outlive its agent (Close); those of an agent
 	// that died do not outlive the next one either.
 	killOrphans(filepath.Join(cfg.StateDir, "jobs"), cfg.Logger)
-	e := &Executor{cfg: cfg, jobs: map[string]*job{}, starting: map[string]*startSlot{}}
+	e := &Executor{cfg: cfg, logs: logfile.NewKeeper(cfg.MaxLogBytes, cfg.Logger.WithName("logs")),
+		jobs: map[string]*job{}, starting: map[string]*startSlot{}}
 	facts := sync.OnceValue(func() capability.Host {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -289,7 +285,10 @@ func (e *Executor) prepare(ctx context.Context, spec jobspec.JobSpec, env map[st
 		return nil, nil
 	}
 	// Anything else in the directory is from a process that died with an
-	// earlier agent session: it is not this run's.
+	// earlier agent session: it is not this run's. Its log goes too: the
+	// keeper forgets it first, or the new file is read from where the old
+	// one was freed.
+	e.logs.Forget(filepath.Join(dir, logFile))
 	if err := os.RemoveAll(dir); err != nil {
 		return nil, fmt.Errorf("clear job directory: %w", err)
 	}
@@ -298,6 +297,7 @@ func (e *Executor) prepare(ctx context.Context, spec jobspec.JobSpec, env map[st
 	}
 	j, err := e.start(ctx, spec, env, dir, hash)
 	if err != nil {
+		e.logs.Forget(filepath.Join(dir, logFile))
 		if cleanup := os.RemoveAll(dir); cleanup != nil {
 			err = errors.Join(err, fmt.Errorf("and its directory, secrets included, stayed: %w", cleanup))
 		}
@@ -363,30 +363,24 @@ func (e *Executor) start(ctx context.Context, spec jobspec.JobSpec, env map[stri
 			return nil, err
 		}
 	}
+	// The job writes its log itself: the agent copies nothing, which cost it
+	// 13-94 mCPU with nobody reading when a job flushes every line (W0,
+	// loglab wake). The keeper frees the oldest part past MaxLogBytes, and
+	// an *os.File keeps cmd.Wait from waiting for a process the job left
+	// behind that still holds it.
 	logOut, err := os.OpenFile(filepath.Join(dir, logFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open job log: %w", err)
 	}
-	// The job writes into a pipe the executor drains into the log, up to
-	// MaxLogBytes. The pipe is an *os.File, so cmd.Wait does not wait
-	// for a process the job left behind that still holds it.
-	pipeOut, pipeIn, err := os.Pipe()
-	if err != nil {
-		logOut.Close()
-		return nil, fmt.Errorf("open job log pipe: %w", err)
+	defer logOut.Close() // the job holds its own copy
+	if _, err := e.logs.File(logOut.Name()); err != nil {
+		return nil, fmt.Errorf("keep job log: %w", err)
 	}
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		defer logOut.Close()
-		defer pipeOut.Close()
-		copyCapped(logOut, pipeOut, e.cfg.MaxLogBytes)
-	}()
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = append(jobEnv, envJobDir+"="+dir)
 	cmd.Dir = workDir
-	cmd.Stdout = pipeIn
-	cmd.Stderr = pipeIn
+	cmd.Stdout = logOut
+	cmd.Stderr = logOut
 	// Its own process group: Cancel and the preempt signal reach every
 	// process the job started, and nothing else.
 	// Pdeathsig ends the leader with the agent (D9, 07#5); killOrphans
@@ -398,9 +392,7 @@ func (e *Executor) start(ctx context.Context, spec jobspec.JobSpec, env map[stri
 	runtime.LockOSThread()
 	err = cmd.Start()
 	runtime.UnlockOSThread()
-	pipeIn.Close() // the job holds its own copy
 	if err != nil {
-		<-drained
 		return nil, startFailed(argv[0], err)
 	}
 	j := &job{
@@ -411,14 +403,14 @@ func (e *Executor) start(ctx context.Context, spec jobspec.JobSpec, env map[stri
 		start:  started,
 		done:   make(chan struct{}),
 	}
-	go e.wait(j, cmd, drained)
+	go e.wait(j, cmd)
 	return j, nil
 }
 
 // wait records how the process ended, then marks the job finished. The
 // result is on disk before Status can read the job as finished, so a
 // finished job reads the same after an agent restart as before it.
-func (e *Executor) wait(j *job, cmd *exec.Cmd, drained <-chan struct{}) {
+func (e *Executor) wait(j *job, cmd *exec.Cmd) {
 	err := cmd.Wait()
 	// What the job left behind ends with it, now that its group still
 	// names it: a Cancel minutes later (the GC cancels every finished job)
@@ -426,14 +418,6 @@ func (e *Executor) wait(j *job, cmd *exec.Cmd, drained <-chan struct{}) {
 	// another job's leader. stop does not signal
 	// an ended job.
 	_ = killGroup(-j.pgid, syscall.SIGKILL)
-	// The last lines reach the log before the job reads as finished; a
-	// process the job left behind does not hold it up past logDrainWait.
-	timer := time.NewTimer(logDrainWait)
-	select {
-	case <-drained:
-	case <-timer.C:
-	}
-	timer.Stop()
 	res := result{ExitCode: cmd.ProcessState.ExitCode(), StartedAt: j.start, FinishedAt: time.Now()}
 	if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 		res.Signal = status.Signal().String()
@@ -479,7 +463,7 @@ func (e *Executor) Status(_ context.Context, handle string) (backend.JobState, e
 		return backend.JobState{}, backend.Classified(backend.ErrNotFound,
 			fmt.Errorf("job %s is not running in this container: it never started here, or it ended with an earlier agent session", handle))
 	}
-	return stateOf(res, tail(filepath.Join(dir, logFile), 3)), nil
+	return stateOf(res, e.logTail(handle, 3)), nil
 }
 
 func stateOf(res result, lastLines string) backend.JobState {
@@ -512,7 +496,7 @@ func stateOf(res result, lastLines string) backend.JobState {
 // Cancel stops the job's process group (SIGTERM, then SIGKILL after the
 // grace) and removes its directory unless the job asked to retain it. The
 // log stays: a Managed slot's release cancels a job that already ended, and
-// its logs are still read afterwards, as a VM's journal outlives the unit.
+// its logs are still read afterwards, as a VM's log outlives its unit.
 // The result goes, so Status no longer knows the job.
 // Idempotent: a job that is not here is not an error.
 func (e *Executor) Cancel(ctx context.Context, handle string, _ owner.Ref) error {
@@ -642,6 +626,10 @@ func (e *Executor) pruneLogs() {
 		if _, starting := e.starting[filepath.Base(l.dir)]; starting {
 			continue
 		}
+		if logpersist.Saving(filepath.Base(l.dir)) {
+			continue // still read for its bucket
+		}
+		e.logs.Forget(filepath.Join(l.dir, logFile))
 		_ = os.RemoveAll(l.dir)
 	}
 }
@@ -971,9 +959,38 @@ func timePtr(t time.Time) *metav1.Time {
 	return &mt
 }
 
+// LogCredentials opens the job's log credentials, for the agent alone: a
+// container resolves only encrypted payloads, as for the job's secrets.
+func (e *Executor) LogCredentials(_ context.Context, spec jobspec.JobSpec) (map[string]string, error) {
+	for _, ref := range spec.SecretSources {
+		if ref.Type != v1.SecretSourceTypeEncryptedPayload {
+			return nil, backend.NewSecretSourceError(v1.ReasonUnsupportedSecretSource,
+				fmt.Sprintf("secret source type %q is not resolved in a container", ref.Type))
+		}
+	}
+	bindings, err := agepayload.Bindings(spec, e.cfg.Age)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(bindings))
+	for _, b := range bindings {
+		out[secretsource.EnvName(b.Ref)] = b.Value
+	}
+	return out, nil
+}
+
 // SetAge sets the identity encrypted payloads are decrypted with.
 func (e *Executor) SetAge(age agepayload.Config) {
 	e.cfg.Age = age
+}
+
+func finished(j *job) bool {
+	select {
+	case <-j.done:
+		return true
+	default:
+		return false
+	}
 }
 
 // Running is how many jobs have a live process.

@@ -110,6 +110,17 @@ func TestAgentUnitDoesNotRestartADetachedAgent(t *testing.T) {
 	}
 }
 
+// A stopping agent sends what its jobs' logs left in the queue (agent
+// logDrain, 25 s) before systemd kills it: the unit gives it 30 s, not the
+// default 90 s a reboot would wait on (benchmarks/loglab RESULTS.md, W0).
+func TestAgentUnitGivesTheLogQueueItsTimeToStop(t *testing.T) {
+	unit := renderAgentUnit(JoinParams{BackendID: "vm-a", BackendType: "vm", ControllerAddr: "controller:9443", StateDir: "/var/lib/zenthros"},
+		"/usr/local/bin/zenthros-agent")
+	if !strings.Contains(unit, "TimeoutStopSec=30\n") {
+		t.Fatalf("the agent unit lacks TimeoutStopSec=30:\n%s", unit)
+	}
+}
+
 // The folders the owner opens reach the agent as its HostRootsEnv, quoted:
 // a folder may hold a space. Each is bound into the agent's view too, as its
 // jobs see it, writable: under ProtectHome=tmpfs a folder in /home was not

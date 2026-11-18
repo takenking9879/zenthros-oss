@@ -74,6 +74,9 @@ class Settings:
     # Where each call's local record goes (zenthros.remote.runlog): "" is
     # ZENTHROS_LOG_DIR, else ./.zenthros/runs; "off" writes none.
     log_dir: str = ""
+    # Every call's logs= unless it gives its own (savedlogs): True, a bucket
+    # URI or a zenthros.Logs.
+    logs: object = None
 
 
 _configured = {}

@@ -11,8 +11,11 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 readme = "README.md"
 # What a notebook needs through zenthros-api: a call is pickled here
-# (cloudpickle, pure Python); the store is reached by URLs the API signs.
-dependencies = ["cloudpickle>=3"]
+# (cloudpickle, pure Python); the store is reached by URLs the API signs; a
+# job's log comes packed in zstd frames, unpacked by Python's own zstd from
+# 3.14 (compression.zstd) and by its backport before (the same API, a wheel
+# of 0.3-0.5 MB: benchmarks/loglab RESULTS.md).
+dependencies = ["cloudpickle>=3", "backports.zstd>=1.8; python_version < '3.14'"]
 keywords = ["remote execution", "machine learning", "notebook", "gpu", "spot"]
 classifiers = [
     "Programming Language :: Python :: 3",

@@ -75,6 +75,24 @@ func applyDestinationSecrets(ctx context.Context, spec jobspec.JobSpec, root str
 	return secretfile.Apply(root, spec.ID, bindings)
 }
 
+// LogCredentials resolves the job's log credentials as it resolves the job's
+// own secrets, for the agent alone: by the env name each would land at.
+func (e SystemdExecutor) LogCredentials(ctx context.Context, spec jobspec.JobSpec) (map[string]string, error) {
+	return bindingValues(resolveSecrets(ctx, spec, machineSecretBackends(e.Secrets, e.Age)))
+}
+
+// bindingValues are resolved bindings by the env name each lands at.
+func bindingValues(bindings []secretfile.Binding, err error) (map[string]string, error) {
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(bindings))
+	for _, b := range bindings {
+		out[secretsource.EnvName(b.Ref)] = b.Value
+	}
+	return out, nil
+}
+
 // hasDefaultFileSecret: the job has a file secret without an explicit path,
 // which it finds under $ZENTHROS_SECRETS_DIR.
 func hasDefaultFileSecret(spec jobspec.JobSpec) bool {

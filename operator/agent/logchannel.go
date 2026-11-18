@@ -215,9 +215,8 @@ func (a *Agent) cancelLogChannelOnEpochChange(ctx context.Context, cancel contex
 
 func (a *Agent) serveLogPulls(ctx context.Context, stream agentpb.Agent_LogChannelClient) error {
 	logs := NewLogServer(a.executor, a.tracker, a.logger)
-	logs.maxLogBytes = a.cfg.maxLogBytes()
-	logs.leftoverHint = leftoverHintFor(a.cfg.BackendType)
-	logs.hourly = a.hourlyLogs
+	logs.readers = a.logReaders
+	logs.history = a.cfg.LogHistoryBytes
 	client := &logChannelClient{stream: stream}
 
 	for {
@@ -244,7 +243,7 @@ func (a *Agent) serveLogPulls(ctx context.Context, stream agentpb.Agent_LogChann
 
 func (a *Agent) handleLogPull(ctx context.Context, client *logChannelClient, logs *LogServer, requestID string, req *agentpb.StreamLogsRequest) {
 	defer client.cancelPull(requestID)
-	sender := newChannelLogSender(ctx, client, requestID, a.logBatchWindow())
+	sender := newChannelLogSender(ctx, client, requestID, a.logBatchWindow(), a.hourlyLogs)
 	err := logs.streamLogs(req, sender)
 	// The lines waiting leave before the pull says how it ended.
 	if flushErr := sender.Flush(); err == nil {

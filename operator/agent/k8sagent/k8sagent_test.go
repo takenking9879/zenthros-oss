@@ -42,7 +42,9 @@ func newTestExecutor(t *testing.T, objects ...client.Object) *Executor {
 	t.Helper()
 	scheme := testutil.Scheme(t, rayv1.AddToScheme, corev1.AddToScheme, batchv1.AddToScheme, appsv1.AddToScheme, spark.AddToScheme, networkingv1.AddToScheme, rbacv1.AddToScheme)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(withSecretRole(objects)...).WithStatusSubresource(&batchv1.Job{}, &appsv1.DaemonSet{}).
-		WithInterceptorFuncs(interceptor.Funcs{Create: testutil.CreateWithUID}).Build()
+		WithInterceptorFuncs(interceptor.Funcs{Create: testutil.CreateWithUID}).
+		// The API server selects pods by their node.
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string { return []string{o.(*corev1.Pod).Spec.NodeName} }).Build()
 	e, err := New(c, &rest.Config{Host: "http://localhost:1"}, logr.Discard())
 	if err != nil {
 		t.Fatalf("build executor: %v", err)

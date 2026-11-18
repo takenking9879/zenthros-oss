@@ -116,6 +116,10 @@ func renderUnit(spec jobspec.JobSpec, env map[string]string, cfg Config, workDir
 		fmt.Fprintf(&b, "WorkingDirectory=%s\n", systemdEscape(dir))
 	}
 	fmt.Fprintf(&b, "ExecStart=%s\n", execStart(spec, execWrapper))
+	// The job writes its log itself; the Manager made the file first, only
+	// root's (prepareLog).
+	fmt.Fprintf(&b, "StandardOutput=append:%s\n", unitLogPath(cfg, unitName(spec.ID)))
+	fmt.Fprintf(&b, "StandardError=append:%s\n", unitLogPath(cfg, unitName(spec.ID)))
 	b.WriteString("Restart=no\n")
 	fmt.Fprintf(&b, "ExecStopPost=%s\n", recordResultCommand(cfg, unitName(spec.ID)))
 	if containerUnit(execWrapper) {

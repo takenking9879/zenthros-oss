@@ -149,10 +149,19 @@ spec:
               value: {{ .Values.agent.reportEndpoint | default (printf "http://%s.%s.svc.cluster.local:%s" (include "zenthros-agent.fullname" .) .Release.Namespace (.Values.agent.reportListen | trimPrefix ":")) | quote }}
             - name: ZENTHROS_REPORT_SPOOL
               value: {{ .Values.agent.reportSpoolPath | quote }}
-            - name: ZENTHROS_AGENT_MAX_LOG_BYTES
-              value: {{ .Values.agent.maxLogBytes | default "8388608" | toString | quote }}
             - name: ZENTHROS_AGENT_MAX_LOG_BYTES_HOURLY
               value: {{ .Values.agent.maxLogBytesHourly | default "52428800" | toString | quote }}
+            - name: ZENTHROS_AGENT_LOG_HISTORY_BYTES
+              value: {{ .Values.logs.historyBytes | toString | quote }}
+            {{- if .Values.logs.nodeReader }}
+            # The node log readers (templates/node-log-reader.yaml).
+            - name: ZENTHROS_NODE_LOGS_NAMESPACE
+              value: {{ include "zenthros-agent.nodeLogsNamespace" . | quote }}
+            - name: ZENTHROS_NODE_LOGS_PORT
+              value: {{ .Values.logs.nodeReaderPort | toString | quote }}
+            - name: ZENTHROS_NODE_LOGS_TLS_DIR
+              value: /etc/zenthros/node-logs
+            {{- end }}
             {{- if .Values.agent.maxJobs }}
             - name: ZENTHROS_AGENT_MAX_JOBS
               value: {{ .Values.agent.maxJobs | quote }}
@@ -204,6 +213,11 @@ spec:
               readOnly: true
             - name: report-spool
               mountPath: /var/lib/zenthros
+            {{- if .Values.logs.nodeReader }}
+            - name: node-logs-tls
+              mountPath: /etc/zenthros/node-logs
+              readOnly: true
+            {{- end }}
             {{- if .Values.clusterAutoscaler.enabled }}
             - name: ca-proxy-tls
               mountPath: /etc/zenthros/ca-proxy
@@ -217,6 +231,15 @@ spec:
         - name: agent-tls
           secret:
             secretName: {{ .Values.agent.tls.secretName }}
+        {{- if .Values.logs.nodeReader }}
+        - name: node-logs-tls
+          secret:
+            secretName: {{ include "zenthros-agent.fullname" . }}-node-logs-tls
+            items:
+              - {key: ca.crt, path: ca.crt}
+              - {key: client.crt, path: client.crt}
+              - {key: client.key, path: client.key}
+        {{- end }}
         {{- if .Values.clusterAutoscaler.enabled }}
         - name: ca-proxy-tls
           secret:

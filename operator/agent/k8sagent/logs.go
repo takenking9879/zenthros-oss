@@ -29,12 +29,12 @@ const containerStartGrace = 60 * time.Second
 
 // Logs streams the user-facing log of the workload behind h, as its kind's
 // translator reads it.
-func (e *Executor) Logs(ctx context.Context, h string, follow bool, tailLines int) (<-chan backend.LogChunk, error) {
+func (e *Executor) Logs(ctx context.Context, h string, req backend.LogRequest) (<-chan backend.LogChunk, error) {
 	t, r, err := translatorForHandle(h)
 	if err != nil {
 		return nil, err
 	}
-	chunks, err := t.logs(e, ctx, r, follow, tailLines)
+	chunks, err := t.logs(e, ctx, r, req)
 	return chunks, k8serr.Classify(err)
 }
 
@@ -42,67 +42,37 @@ func (e *Executor) Logs(ctx context.Context, h string, follow bool, tailLines in
 // K8sJobMode, else the Ray Jobs API on Status.DashboardURL
 // (GET /api/jobs/{jobId}/logs). The hub never dials Ray; this stays on the
 // spoke agent.
-func (e *Executor) rayJobLogs(ctx context.Context, namespace, name string, follow bool, tailLines int) (<-chan backend.LogChunk, error) {
+func (e *Executor) rayJobLogs(ctx context.Context, namespace, name string, req backend.LogRequest) (<-chan backend.LogChunk, error) {
 	var rayJob rayv1.RayJob
 	if err := e.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &rayJob); err != nil {
 		return nil, fmt.Errorf("get RayJob %s/%s: %w", namespace, name, err)
 	}
 	podName, podErr := e.findSubmitterPod(ctx, &rayJob)
 	if rayJob.Spec.SubmissionMode == rayv1.HTTPMode || podErr != nil {
-		return e.streamRayJobLogs(ctx, namespace, name, follow, tailLines)
+		return e.streamRayJobLogs(ctx, namespace, name, req.Follow, req.TailLines)
 	}
-	return e.streamPodLogs(ctx, namespace, podName, "", follow, tailLines)
+	var pod corev1.Pod
+	if err := e.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: podName}, &pod); err != nil {
+		return nil, fmt.Errorf("get the submitter pod of RayJob %s/%s: %w", namespace, name, err)
+	}
+	return e.podLogs(ctx, &pod, "", req)
 }
 
-func (e *Executor) sparkLogTarget(ctx context.Context, namespace, applicationName string) (string, string, string, error) {
-	podName, err := e.findSparkDriverPod(ctx, namespace, applicationName)
-	if err != nil {
-		return "", "", "", fmt.Errorf("find Spark driver pod for %s/%s: %w", namespace, applicationName, err)
-	}
-	return namespace, podName, spark.DriverContainerName, nil
-}
-
-func (e *Executor) streamPodLogs(ctx context.Context, namespace, podName, containerName string, follow bool, tailLines int) (<-chan backend.LogChunk, error) {
-
-	opts := &corev1.PodLogOptions{
-		Follow:     follow,
-		Timestamps: false,
-		Container:  containerName,
-	}
-	if tailLines >= 0 {
-		tl := int64(tailLines)
-		opts.TailLines = &tl
-	}
-
-	stream, err := e.openLogStream(ctx, namespace, podName, opts)
-	if err != nil {
-		return nil, fmt.Errorf("open log stream for pod %s/%s: %w", namespace, podName, err)
-	}
-
-	ch := make(chan backend.LogChunk, 64)
-	go func() {
-		defer close(ch)
-		defer stream.Close()
-		pipeToChannel(ctx, stream, ch)
-	}()
-	return ch, nil
-}
-
-func (e *Executor) findSparkDriverPod(ctx context.Context, namespace, applicationName string) (string, error) {
+func (e *Executor) findSparkDriverPod(ctx context.Context, namespace, applicationName string) (*corev1.Pod, error) {
 	var pods corev1.PodList
 	err := e.client.List(ctx, &pods,
 		client.InNamespace(namespace),
 		client.MatchingLabels{spark.ApplicationNameLabel: applicationName},
 	)
 	if err != nil {
-		return "", fmt.Errorf("list pods for SparkApplication %s/%s: %w", namespace, applicationName, err)
+		return nil, fmt.Errorf("list pods for SparkApplication %s/%s: %w", namespace, applicationName, err)
 	}
-	for _, pod := range pods.Items {
+	for i, pod := range pods.Items {
 		if pod.Labels["spark-role"] == "driver" || hasContainer(pod.Spec.Containers, spark.DriverContainerName) {
-			return pod.Name, nil
+			return &pods.Items[i], nil
 		}
 	}
-	return "", fmt.Errorf("driver pod not found for SparkApplication %s/%s", namespace, applicationName)
+	return nil, fmt.Errorf("driver pod not found for SparkApplication %s/%s", namespace, applicationName)
 }
 
 func hasContainer(containers []corev1.Container, name string) bool {
@@ -122,8 +92,7 @@ func hasContainer(containers []corev1.Container, name string) bool {
 func (e *Executor) openLogStream(ctx context.Context, namespace, podName string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
 	deadline := time.Now().Add(containerStartGrace)
 	for {
-		req := e.clientset.CoreV1().Pods(namespace).GetLogs(podName, opts)
-		stream, err := req.Stream(ctx)
+		stream, err := e.clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
 		if err == nil {
 			return stream, nil
 		}

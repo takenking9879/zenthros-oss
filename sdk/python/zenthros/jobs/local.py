@@ -34,8 +34,9 @@ from pathlib import Path
 
 from zenthros import errors
 from zenthros.core.storage import is_carried
+from zenthros.jobs import logrecords
 from zenthros.jobs import spec as S
-from zenthros.jobs.client import JobClient, clip_log, parse_report_body, require_job
+from zenthros.jobs.client import JobClient, parse_report_body, require_job
 from zenthros.jobs.handle import (
     CANCELLED,
     FAILED,
@@ -796,7 +797,7 @@ class LocalJobClient(JobClient):
         record = self._read(job_id)
         if record.get("final"):
             try:
-                return clip_log(self._log_file(job_id).read_bytes(), tail)
+                return logrecords.clip(self._log_file(job_id).read_bytes(), tail)
             except FileNotFoundError:
                 return ""
         text = []
@@ -806,18 +807,41 @@ class LocalJobClient(JobClient):
             if code != 0:
                 raise errors.TransientError(f"logs of {job_id}: {err.strip()}")
             text.append(out)
-        return clip_log("".join(text).encode("utf-8"), tail)
+        return logrecords.clip("".join(text).encode("utf-8"), tail)
 
-    def follow_logs(self, job_id):
+    def whole_log(self, job_id, after=None):  # noqa: ARG002 - a local call keeps no log in a bucket
+        """All of a local job's log: its container keeps it whole."""
+        record = self._read(job_id)
+        if record.get("final"):
+            try:
+                return self._log_file(job_id).read_bytes().decode("utf-8", "replace")
+            except FileNotFoundError:
+                return ""
+        text = []
+        for task in (record.get("local") or {}).get("tasks", []):
+            code, out, err = self._exec(record["container"], "logs", task["handle"], timeout=600)
+            if code != 0:
+                raise errors.TransientError(f"logs of {job_id}: {err.strip()}")
+            text.append(out)
+        return "".join(text)
+
+    def follow_logs(self, job_id, after=None, tail=None):
         """The log as it is written, from a process: its stdout is read until
-        the job ends. A map's tasks are read one after the other."""
+        the job ends. After a stream that gave lines (its .position), only
+        what comes next: on this computer a stream ends with its job."""
         record = self._read(job_id)
         tasks = (record.get("local") or {}).get("tasks", [])
         if record.get("final") or len(tasks) != 1:
             return None
-        return subprocess.Popen(
-            [self.engine.binary, *self._exec_args(record["container"], "logs", "--follow", tasks[0]["handle"])],
+        if after is not None:
+            tail = 0
+        lines = ["--tail", str(int(tail))] if tail is not None else []
+        proc = subprocess.Popen(
+            [self.engine.binary, *self._exec_args(record["container"], "logs", "--follow", *lines, tasks[0]["handle"])],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        proc.position = after
+        proc.stdout = _noting(proc, proc.stdout)
+        return proc
 
     def reports(self, job_id):
         record = self._read(job_id)
@@ -1024,3 +1048,10 @@ def _explained(status, container, client):
             status = {**status, "message": f"{message}\nThis container has run out of memory, which may be why: raise "
                                            "memory= (zenthros.configure(local_memory=...))"}
     return status
+
+
+def _noting(proc, lines):
+    """lines, and once one came, a .position on proc: the log was read."""
+    for line in lines:
+        proc.position = proc.position or logrecords.Position()
+        yield line

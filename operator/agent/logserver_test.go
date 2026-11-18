@@ -12,35 +12,25 @@ import (
 
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	agentpb "github.com/zenthros/operator/internal/grpc/gen"
 	"github.com/zenthros/operator/pkg/backend"
 )
 
-type logChunk struct {
-	stream    string
-	data      string
-	truncated bool
-}
-
 type mockLogStream struct {
 	grpc.ServerStream
-	chunks   []logChunk
-	sendErr  error
-	recvErrs []error
-	recvIdx  int
-	ctx      context.Context
+	chunks  []*agentpb.LogChunk
+	sendErr error
+	ctx     context.Context
 }
 
 func (m *mockLogStream) Send(chunk *agentpb.LogChunk) error {
 	if m.sendErr != nil {
 		return m.sendErr
 	}
-	m.chunks = append(m.chunks, logChunk{
-		stream:    chunk.GetStream(),
-		data:      string(chunk.GetData()),
-		truncated: chunk.GetTruncated(),
-	})
+	m.chunks = append(m.chunks, chunk)
 	return nil
 }
 
@@ -51,72 +41,17 @@ func (m *mockLogStream) Context() context.Context {
 	return context.Background()
 }
 
-func payloadData(stream *mockLogStream) string {
-	var b strings.Builder
-	for _, chunk := range stream.chunks {
-		if chunk.truncated {
-			continue
-		}
-		b.WriteString(chunk.data)
-	}
-	return b.String()
-}
-
-func TestLogServerStreamLogs(t *testing.T) {
-	exec := newMockExecutor()
-	tracker := newJobTracker()
-	server := NewLogServer(exec, tracker, logr.Discard())
-
-	stream := &mockLogStream{}
-	req := &agentpb.StreamLogsRequest{
-		BackendId:  "vm-test",
-		JobId:      "job-1",
-		HandleName: "handle-1",
-		Follow:     false,
-		TailLines:  10,
-	}
-
-	err := server.streamLogs(req, stream)
-	if err != nil {
-		t.Fatalf("StreamLogs() error = %v", err)
-	}
+// testLogServer is a LogServer as an agent makes it.
+func testLogServer(exec Executor) *LogServer {
+	server := NewLogServer(exec, newJobTracker(), logr.Discard())
+	server.readers = newLogReaders()
+	return server
 }
 
 func TestLogServerStreamLogsEmptyHandle(t *testing.T) {
-	exec := newMockExecutor()
-	tracker := newJobTracker()
-	server := NewLogServer(exec, tracker, logr.Discard())
-
-	stream := &mockLogStream{}
-	req := &agentpb.StreamLogsRequest{
-		BackendId: "vm-test",
-		JobId:     "job-1",
-	}
-
-	err := server.streamLogs(req, stream)
-	if err == nil {
+	server := testLogServer(newMockExecutor())
+	if err := server.streamLogs(&agentpb.StreamLogsRequest{BackendId: "vm-test", JobId: "job-1"}, &mockLogStream{}); err == nil {
 		t.Fatal("expected error for empty handle_name")
-	}
-}
-
-func TestToProtoLogChunk(t *testing.T) {
-	chunk := backend.LogChunk{
-		Stream:    "stdout",
-		Data:      []byte("hello\n"),
-		Timestamp: time.Unix(1000, 0),
-	}
-	proto := toProtoLogChunk(chunk)
-	if proto.GetStream() != "stdout" {
-		t.Errorf("stream = %q, want stdout", proto.GetStream())
-	}
-	if string(proto.GetData()) != "hello\n" {
-		t.Errorf("data = %q, want hello\\n", proto.GetData())
-	}
-	if proto.GetTimestampUnix() != 1000 {
-		t.Errorf("timestamp = %d, want 1000", proto.GetTimestampUnix())
-	}
-	if proto.GetTruncated() {
-		t.Error("payload chunks must not set truncated")
 	}
 }
 
@@ -125,7 +60,7 @@ type scriptedLogExecutor struct {
 	chunks [][]byte
 }
 
-func (e *scriptedLogExecutor) Logs(ctx context.Context, _ string, _ bool, _ int) (<-chan backend.LogChunk, error) {
+func (e *scriptedLogExecutor) Logs(ctx context.Context, _ string, _ backend.LogRequest) (<-chan backend.LogChunk, error) {
 	ch := make(chan backend.LogChunk)
 	go func() {
 		defer close(ch)
@@ -158,193 +93,63 @@ func summaryReq() *agentpb.StreamLogsRequest {
 func collectedData(stream *mockLogStream) string {
 	var b strings.Builder
 	for _, chunk := range stream.chunks {
-		b.WriteString(chunk.data)
+		b.Write(chunk.GetData())
 	}
 	return b.String()
 }
 
-func hasTruncated(stream *mockLogStream) bool {
-	for _, chunk := range stream.chunks {
-		if chunk.truncated {
-			return true
-		}
+// A read had a cap of its own: a followed log stopped at 8 MiB, and the
+// reader that came back saw it again from the start (P9). Only the
+// machine's hourly budget bounds it now (channelLogSender).
+func TestAReadHasNoCapOfItsOwn(t *testing.T) {
+	block := bytes.Repeat([]byte("x"), 128<<10)
+	var chunks [][]byte
+	for i := 0; i < 100; i++ { // 12.5 MiB
+		chunks = append(chunks, block)
 	}
-	return false
-}
-
-func TestStreamLogsUnderCapCompletes(t *testing.T) {
-	exec := &scriptedLogExecutor{chunks: [][]byte{[]byte("hello\n"), []byte("world\n")}}
-	server := NewLogServer(exec, newJobTracker(), logr.Discard())
-	server.maxLogBytes = 64
-	server.leftoverHint = leftoverHintFor("vm")
-
-	stream := &mockLogStream{}
-	if err := server.streamLogs(streamReq(), stream); err != nil {
-		t.Fatalf("StreamLogs() error = %v", err)
-	}
-	if got := collectedData(stream); got != "hello\nworld\n" {
-		t.Errorf("data = %q, want hello\\nworld\\n", got)
-	}
-	if hasTruncated(stream) {
-		t.Error("under-cap stream must not send a truncated signal")
-	}
-}
-
-func TestStreamLogsOverCapStopsAndSignals(t *testing.T) {
-	exec := &scriptedLogExecutor{chunks: [][]byte{
-		[]byte("AAAA"),
-		[]byte("BBBB"),
-		[]byte("CCCC"),
-		[]byte("LEFTOVER"),
-	}}
-	server := NewLogServer(exec, newJobTracker(), logr.Discard())
-	server.maxLogBytes = 6
-	server.leftoverHint = leftoverHintFor("k8s")
-
-	stream := &mockLogStream{}
-	if err := server.streamLogs(streamReq(), stream); err != nil {
-		t.Fatalf("StreamLogs() error = %v", err)
-	}
-
-	payload := ""
-	var signal logChunk
-	for _, chunk := range stream.chunks {
-		if chunk.truncated {
-			signal = chunk
-			continue
-		}
-		payload += chunk.data
-	}
-	if payload != "AAAABB" {
-		t.Errorf("payload = %q, want AAAABB (cap 6)", payload)
-	}
-	if !signal.truncated {
-		t.Fatal("over-cap stream must include a truncated signal")
-	}
-	if !strings.Contains(signal.data, "truncated") {
-		t.Errorf("truncated signal %q must name truncated", signal.data)
-	}
-	if !strings.Contains(signal.data, "kubectl logs") {
-		t.Errorf("truncated signal %q must name kubectl logs", signal.data)
-	}
-	if strings.Contains(payload, "LEFTOVER") || strings.Contains(payload, "CCCC") {
-		t.Errorf("payload %q must stop at the cap", payload)
-	}
-}
-
-func TestStreamLogsHourlyBudgetDistinctFromRequestCap(t *testing.T) {
-	exec := &scriptedLogExecutor{chunks: [][]byte{[]byte("0123456789")}}
-	server := NewLogServer(exec, newJobTracker(), logr.Discard())
-	server.maxLogBytes = 8 << 20
-	server.hourly = newHourlyBudget(6)
-	server.leftoverHint = leftoverHintFor("vm")
-
-	first := &mockLogStream{}
-	if err := server.streamLogs(streamReq(), first); err != nil {
-		t.Fatalf("first StreamLogs() error = %v", err)
-	}
-	if payloadData(first) != "012345" {
-		t.Fatalf("first hourly payload = %q, want 012345", payloadData(first))
-	}
-	if !hasTruncated(first) {
-		t.Fatal("hourly cap must send a truncated signal")
-	}
-	got := ""
-	for _, chunk := range first.chunks {
-		if chunk.truncated {
-			got = chunk.data
-		}
-	}
-	if !strings.Contains(got, "hourly") {
-		t.Errorf("hourly truncated signal %q must name hourly", got)
-	}
-
-	second := &mockLogStream{}
-	if err := server.streamLogs(streamReq(), second); err != nil {
-		t.Fatalf("second StreamLogs() error = %v", err)
-	}
-	if payloadData(second) != "" {
-		t.Fatalf("exhausted hourly budget still sent %q", payloadData(second))
-	}
-	if !hasTruncated(second) {
-		t.Fatal("exhausted hourly budget must truncate the next request")
-	}
-}
-
-func TestStreamLogsHourlyWindowReset(t *testing.T) {
-	now := time.Unix(1000, 0)
-	exec := &scriptedLogExecutor{chunks: [][]byte{[]byte("AAAA")}}
-	server := NewLogServer(exec, newJobTracker(), logr.Discard())
-	server.maxLogBytes = 8 << 20
-	server.hourly = newHourlyBudget(4)
-	server.hourly.now = func() time.Time { return now }
-
-	first := &mockLogStream{}
-	if err := server.streamLogs(streamReq(), first); err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(time.Hour + time.Second)
-	second := &mockLogStream{}
-	if err := server.streamLogs(streamReq(), second); err != nil {
-		t.Fatal(err)
-	}
-	if payloadData(second) != "AAAA" {
-		t.Fatalf("after hourly window data = %q, want AAAA", payloadData(second))
-	}
-	if hasTruncated(second) {
-		t.Fatal("new hourly window must not truncate a 4-byte request")
-	}
-}
-
-func TestStreamLogsPerRequestCapUnchangedByHourly(t *testing.T) {
-	exec := &scriptedLogExecutor{chunks: [][]byte{[]byte("0123456789")}}
-	server := NewLogServer(exec, newJobTracker(), logr.Discard())
-	server.maxLogBytes = 4
-	server.hourly = newHourlyBudget(50 << 20)
+	server := testLogServer(&scriptedLogExecutor{chunks: chunks})
 	stream := &mockLogStream{}
 	if err := server.streamLogs(streamReq(), stream); err != nil {
 		t.Fatal(err)
 	}
-	if payloadData(stream) != "0123" {
-		t.Fatalf("per-request cap data = %q, want 0123", payloadData(stream))
-	}
-	if !hasTruncated(stream) {
-		t.Fatal("per-request cap must still truncate")
+	if got := len(collectedData(stream)); got != 100*len(block) {
+		t.Fatalf("sent %d bytes of %d", got, 100*len(block))
 	}
 }
 
-func TestStreamLogsSecondRequestIsNewBudget(t *testing.T) {
-	exec := &scriptedLogExecutor{chunks: [][]byte{[]byte("0123456789")}}
-	server := NewLogServer(exec, newJobTracker(), logr.Discard())
-	server.maxLogBytes = 4
-	server.leftoverHint = leftoverHintFor("vm")
-
-	first := &mockLogStream{}
-	if err := server.streamLogs(streamReq(), first); err != nil {
-		t.Fatalf("first StreamLogs() error = %v", err)
+// A machine serves a bounded number of reads, and one job a share of them:
+// each holds a file and an inotify instance.
+func TestLogReadsAreCapped(t *testing.T) {
+	readers := newLogReaders()
+	var releases []func()
+	for i := 0; i < maxLogReadersPerJob; i++ {
+		release, err := readers.take("job-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
 	}
-	second := &mockLogStream{}
-	if err := server.streamLogs(streamReq(), second); err != nil {
-		t.Fatalf("second StreamLogs() error = %v", err)
+	if _, err := readers.take("job-a"); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("one read past the job's share: %v", err)
 	}
-
-	if !hasTruncated(first) || !hasTruncated(second) {
-		t.Fatal("each over-cap request must include its own truncated signal")
+	for i := maxLogReadersPerJob; i < maxLogReaders; i++ {
+		release, err := readers.take("job-" + strconv.Itoa(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
 	}
-	if got := collectedData(first); !strings.HasPrefix(got, "0123") {
-		t.Errorf("first request data = %q, want prefix 0123", got)
+	if _, err := readers.take("job-z"); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("one read past the machine's: %v", err)
 	}
-	if got := collectedData(second); !strings.HasPrefix(got, "0123") {
-		t.Errorf("second request is a new budget, data = %q, want prefix 0123", got)
-	}
-	if collectedData(first) == "0123456789" || collectedData(second) == "0123456789" {
-		t.Error("neither request may exceed the per-request cap")
+	releases[0]()
+	if _, err := readers.take("job-a"); err != nil {
+		t.Fatalf("a read after one ended: %v", err)
 	}
 }
 
-func TestStreamLogsFilterThenCap(t *testing.T) {
-	// Resource probe + 20 epoch ticks. Filter keeps probe + first + last epoch;
-	// the cap then applies to that reduced stream (not the raw 20 ticks).
+// The summary drops the middle of a progress series and keeps the rest.
+func TestStreamLogsSummaryCollapsesProgress(t *testing.T) {
 	var chunks [][]byte
 	chunks = append(chunks, []byte("[zenthros-resources] host CPU=2 RAM=1.00 GiB torch.cuda=False gpu=none\n"))
 	chunks = append(chunks, []byte("[RAY CLUSTER RESOURCES]\n"))
@@ -353,32 +158,19 @@ func TestStreamLogsFilterThenCap(t *testing.T) {
 		chunks = append(chunks, []byte("[synth-train] Epoch "+strconv.Itoa(i)+" loss=1.39\n"))
 	}
 	chunks = append(chunks, []byte("[synth] Training job failed: boom\n"))
-
-	exec := &scriptedLogExecutor{chunks: chunks}
-	server := NewLogServer(exec, newJobTracker(), logr.Discard())
-	// Small cap: middle epochs must not consume budget (filter first).
-	server.maxLogBytes = 220
-	server.leftoverHint = leftoverHintFor("k8s")
-
+	server := testLogServer(&scriptedLogExecutor{chunks: chunks})
 	stream := &mockLogStream{}
 	if err := server.streamLogs(summaryReq(), stream); err != nil {
 		t.Fatalf("StreamLogs() error = %v", err)
 	}
 	got := collectedData(stream)
-	if !strings.Contains(got, "[zenthros-resources]") {
-		t.Errorf("filtered stream must keep resource probe, got %q", got)
-	}
-	if !strings.Contains(got, "[RAY CLUSTER RESOURCES]") {
-		t.Errorf("filtered stream must keep cluster resources, got %q", got)
-	}
-	if !strings.Contains(got, "Epoch 0") {
-		t.Errorf("filtered stream must keep first epoch, got %q", got)
+	for _, want := range []string{"[zenthros-resources]", "[RAY CLUSTER RESOURCES]", "Epoch 0", "Training job failed"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the summary lost %q: %q", want, got)
+		}
 	}
 	if strings.Contains(got, "Epoch 10") {
-		t.Errorf("filtered stream must collapse middle epochs, got %q", got)
-	}
-	if !hasTruncated(stream) && !strings.Contains(got, "Training job failed") {
-		t.Errorf("filter-then-cap must still surface the error or the truncated signal, got %q", got)
+		t.Errorf("the summary kept the middle epochs: %q", got)
 	}
 }
 
@@ -388,9 +180,7 @@ func TestStreamLogsSecondRequestNewFilterWindow(t *testing.T) {
 		[]byte("[synth-train] Epoch 1 loss=0.9\n"),
 		[]byte("[synth-train] Epoch 2 loss=0.8\n"),
 	}
-	exec := &scriptedLogExecutor{chunks: chunks}
-	server := NewLogServer(exec, newJobTracker(), logr.Discard())
-	server.maxLogBytes = 8 << 20
+	server := testLogServer(&scriptedLogExecutor{chunks: chunks})
 
 	first := &mockLogStream{}
 	if err := server.streamLogs(summaryReq(), first); err != nil {
@@ -420,7 +210,7 @@ func TestStreamLogsSendsEveryLineUnlessSummaryIsAsked(t *testing.T) {
 		[]byte("[synth-train] Epoch 1 loss=0.9\n"),
 		[]byte("[synth-train] Epoch 2 loss=0.8\n"),
 	}
-	server := NewLogServer(&scriptedLogExecutor{chunks: chunks}, newJobTracker(), logr.Discard())
+	server := testLogServer(&scriptedLogExecutor{chunks: chunks})
 	stream := &mockLogStream{}
 	if err := server.streamLogs(streamReq(), stream); err != nil {
 		t.Fatal(err)

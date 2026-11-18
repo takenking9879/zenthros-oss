@@ -27,8 +27,9 @@ type StatusWatcher struct {
 	logger    Logger
 	interval  time.Duration
 	lastPhase map[string]v1.Phase
-	// lastEndpoints is each job's endpoint key last pushed: a Service whose
-	// port opens is pushed with its phase unchanged.
+	// lastEndpoints is each job's endpoint and reasons key last pushed: a
+	// Service whose port opens, or a job whose log stops being saved, is
+	// pushed with its phase unchanged.
 	lastEndpoints map[string]string
 	// decorate adds what the agent knows beyond the executor (a Service's
 	// endpoints); finished is told a job ended. Both optional.
@@ -113,7 +114,7 @@ func (w *StatusWatcher) pollAll(ctx context.Context) {
 			state = w.decorate(ctx, job.handleName, state)
 		}
 		_, seen := w.lastPhase[job.handleName]
-		key := endpointKey(state)
+		key := endpointKey(state) + reasonsKey(state)
 		// Taken at every poll: a state answered after the watcher saw the
 		// job was kept, and spared a later stream's first push of it.
 		answered, wasAnswered := w.tracker.TakeAnswered(job.handleName)
@@ -159,9 +160,9 @@ func (w *StatusWatcher) pollAll(ctx context.Context) {
 }
 
 // statusKey is what a push of state says that the watcher compares: its
-// phase and its endpoints.
+// phase, its endpoints and its reasons' codes.
 func statusKey(state backend.JobState) string {
-	return string(state.Phase) + "/" + endpointKey(state)
+	return string(state.Phase) + "/" + endpointKey(state) + reasonsKey(state)
 }
 
 // observeLifecycle records the agent job metrics driven by phase transitions:

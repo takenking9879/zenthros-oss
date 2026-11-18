@@ -3,14 +3,21 @@
 package procagent
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
+
+	"github.com/zenthros/operator/agent/logfile"
 	v1 "github.com/zenthros/operator/api/v1"
+	"github.com/zenthros/operator/pkg/backend"
 	"github.com/zenthros/operator/pkg/owner"
 )
 
@@ -55,26 +62,49 @@ func TestProcagentSubmitDoesNotBlockStatusDuringClone(t *testing.T) {
 }
 
 // A noisy job's log grew without bound and filled the 10 GB overlay of a
-// RunPod or Vast.ai container, where the agent's certificate lives.
-// The log stops at a cap, with a marker that says so.
-func TestProcagentJobLogIsCapped(t *testing.T) {
+// RunPod or Vast.ai container, where the agent's certificate lives. Then it
+// stopped at a cap and dropped what came after it: the end of a log, its
+// error, was what was lost (P11). The file keeps its end, and the disk
+// holds no more than the cap.
+func TestAContainerJobsLogKeepsItsEnd(t *testing.T) {
 	e := newTestExecutor(t, "")
-	e.cfg.MaxLogBytes = 64 << 10
-	handle, err := e.Submit(context.Background(), shellJob("noisy", "yes 0123456789abcdef | head -c 1048576"), nil)
+	e.logs.Close()
+	e.logs = logfile.NewKeeper(64<<10, logr.Discard())
+	t.Cleanup(e.logs.Close)
+	handle, err := e.Submit(context.Background(), shellJob("noisy", "yes 0123456789abcdef | head -c 1048576; echo; echo the-end"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitTerminal(t, e, handle)
-	info, err := os.Stat(filepath.Join(e.jobDir(handle), logFile))
+	path := filepath.Join(e.jobDir(handle), logFile)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if used := info.Sys().(*syscall.Stat_t).Blocks * 512; used <= (64<<10)+8192 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the job log takes %d bytes of disk, over the %d cap", info.Sys().(*syscall.Stat_t).Blocks*512, 64<<10)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	ch, err := e.Logs(context.Background(), handle, backend.LogRequest{TailLines: -1, HistoryBytes: backend.AllHistory})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() > (64<<10)+4096 {
-		t.Fatalf("the job log is %d bytes, over the %d cap", info.Size(), 64<<10)
+	var got strings.Builder
+	var omitted int64
+	for chunk := range ch {
+		if got.Len() == 0 {
+			omitted = chunk.Omitted
+		}
+		got.Write(chunk.Data)
 	}
-	raw, _ := os.ReadFile(filepath.Join(e.jobDir(handle), logFile))
-	if !strings.Contains(string(raw), "truncated") {
-		t.Fatal("a capped log does not say it was cut")
+	if !strings.HasSuffix(got.String(), "the-end\n") || strings.ContainsRune(got.String(), 0) || omitted < 900<<10 {
+		t.Fatalf("read %d bytes after %d omitted, ending %q", got.Len(), omitted, got.String()[max(0, got.Len()-30):])
 	}
 }
 
@@ -126,5 +156,51 @@ func TestCancelDuringStartStopsTheJob(t *testing.T) {
 	}
 	if _, err := e.Status(context.Background(), slow.ID); err == nil {
 		t.Fatal("the cancelled job is still known")
+	}
+}
+
+// A job run again in the directory an earlier agent session left (no
+// result in it) starts a log of its own: the keeper forgets the old file
+// before it goes, or the new one is read from where the old one was freed.
+func TestAJobRunAgainReadsItsNewLogFromItsFirstByte(t *testing.T) {
+	e := newTestExecutor(t, "")
+	dir := e.jobDir("again")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(dir, logFile)
+	if err := os.WriteFile(old, bytes.Repeat([]byte("x"), 64<<10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The old file freed below 32 KiB, as the keeper frees one past its cap.
+	f, err := os.OpenFile(old, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Fallocate(int(f.Fd()), unix.FALLOC_FL_PUNCH_HOLE|unix.FALLOC_FL_KEEP_SIZE, 0, 32<<10); err != nil {
+		t.Skipf("no punch hole here: %v", err)
+	}
+	f.Close()
+	if kept, err := e.logs.File(old); err != nil || kept.Floor() != 32<<10 {
+		t.Fatalf("the old log kept from %v (%v)", kept, err)
+	}
+	handle, err := e.Submit(context.Background(), shellJob("again", "echo new-run"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTerminal(t, e, handle)
+	ch, err := e.Logs(context.Background(), handle, backend.LogRequest{TailLines: -1, HistoryBytes: backend.AllHistory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got strings.Builder
+	for chunk := range ch {
+		if chunk.Gap != 0 || chunk.Omitted != 0 {
+			t.Fatalf("the new log says %d bytes missing, %d left out", chunk.Gap, chunk.Omitted)
+		}
+		got.Write(chunk.Data)
+	}
+	if got.String() != "new-run\n" {
+		t.Fatalf("read %q", got.String())
 	}
 }

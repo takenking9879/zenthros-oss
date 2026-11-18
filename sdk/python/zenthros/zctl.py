@@ -58,13 +58,15 @@ class Zctl:
             raise refusal((proc.stderr or proc.stdout or "").strip(), proc.returncode)
         return proc.stdout or ""
 
-    def popen(self, *args):
-        """zctl as a running process (logs --watch): iterate .stdout."""
+    def popen(self, *args, binary=False):
+        """zctl as a running process (logs --watch): iterate .stdout, for its
+        lines, or with binary for its bytes as they come."""
         try:
-            proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    text=not binary)
         except FileNotFoundError as err:
             raise errors.ZctlMissing(errors.zctl_missing(self.binary), MISSING) from err
-        proc.stdout = _read_closing(proc.stdout)
+        proc.stdout = _pieces_closing(proc.stdout) if binary else _read_closing(proc.stdout)
         return proc
 
 
@@ -73,6 +75,13 @@ def _read_closing(pipe):
     (as jobs/http.py's followed log is): nothing else closes a Popen's pipe."""
     with pipe:
         yield from pipe
+
+
+def _pieces_closing(pipe):
+    """The pipe's bytes as they come, closed as _read_closing closes it."""
+    with pipe:
+        while piece := pipe.read1(1 << 16):
+            yield piece
 
 
 def refusal(text, returncode=1):

@@ -35,7 +35,6 @@ import json
 import os
 import pickle
 import re
-import subprocess
 import sys
 import threading
 import time
@@ -47,8 +46,9 @@ from zenthros import console, errors
 from zenthros.core import checkpoint
 from zenthros.core.storage import GCS_KEY_ENV
 from zenthros.jobs import spec as S
+from zenthros.jobs.follow import FollowedLog
 from zenthros.jobs.handle import CANCELLED, FAILED, TERMINAL_PHASES, JobHandle, seconds_at
-from zenthros.remote import bundle, carried, envs, runlog
+from zenthros.remote import bundle, carried, envs, runlog, savedlogs
 from zenthros.remote import snapshot as code_snapshot
 from zenthros.remote.options import (
     _own_bucket,
@@ -200,7 +200,7 @@ class Upstream:
 
 
 def run(target, *args, on=None, cpu=None, memory=None, gpu=None, instance_type="", spot=None,
-        image="", python=None, code_dir=".", env=None, secrets=None, retries=0, retry_on=(), timeout=None,
+        image="", python=None, code_dir=".", env=None, secrets=None, logs=None, retries=0, retry_on=(), timeout=None,
         after=(), resilient=True, name=None, labels=None, requirements=None, packages=None, tools=(), params=None,
         keep=False, dry_run=False, keep_for=None, snapshot=False, cache=False, deps=None, inputs=None, outputs=None,
         upload=False, fresh=False, _where=None, _note=None, _keyed=False, _resume=None, _same=None, **kwargs):
@@ -223,7 +223,10 @@ def run(target, *args, on=None, cpu=None, memory=None, gpu=None, instance_type="
     that runs images (containerd, a cluster).
     Environment: env for plain values, or the name of an environment
     (zenthros.env) to run in; secrets={NAME or /path: Secret} for
-    secrets. Failure: retry_on=(ConnectionError, ...) retries those
+    secrets. logs=True keeps the whole log in your store (<store>/logs), or
+    logs="s3://bucket/prefix" (or zenthros.Logs(...)) in that bucket, saved
+    by the machine as it is written; call.logs(to="x.log") reads it back
+    whole, also once the machine is gone. Failure: retry_on=(ConnectionError, ...) retries those
     exceptions of a function in place, up to retries times; a command's
     retries re-run it. resilient moves the call to another machine when its
     machine is lost (Spot), where zenthros.Task and zenthros.phase resume
@@ -249,7 +252,7 @@ def run(target, *args, on=None, cpu=None, memory=None, gpu=None, instance_type="
     if isinstance(target, (str, list, tuple)) and (cache or deps or inputs or outputs):
         raise errors.ValidationError("cache=, deps=, inputs= and outputs= are a function's: a command leaves no value")
     options = dict(cpu=cpu, memory=memory, gpu=gpu, instance_type=instance_type,
-                   spot=spot, image=image, python=python, code_dir=code_dir, env=env, secrets=secrets,
+                   spot=spot, image=image, python=python, code_dir=code_dir, env=env, secrets=secrets, logs=logs,
                    timeout=timeout, after=after, resilient=resilient, labels=labels, requirements=requirements,
                    packages=packages, tools=tools, keep_for=keep_for)
     if _where is None:
@@ -673,7 +676,7 @@ def _service(port, ports):
 
 # run()'s machine, environment and failure options, with their defaults: map takes the same.
 _OPTIONS = dict(cpu=None, memory=None, gpu=None, instance_type="", spot=None, image="",
-                python=None, code_dir=".", env=None, secrets=None, timeout=None, after=(), resilient=True,
+                python=None, code_dir=".", env=None, secrets=None, logs=None, timeout=None, after=(), resilient=True,
                 labels=None, requirements=None, packages=None, tools=(), keep_for=None)
 # Where a call runs, as its spec says it: only on= sets these (machines.place).
 _WHERE = dict(pool="", backend="", acquire=None, client=None)
@@ -876,7 +879,7 @@ def _depends_on(after, upstream):
 
 def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(), service=None, *, pool, backend, cpu,
             memory, gpu, instance_type, spot, image, python, code_dir, env, secrets, timeout, after,
-            resilient, labels, requirements=None, packages=None, tools=(), acquire=None, keep_for=None,
+            resilient, labels, logs=None, requirements=None, packages=None, tools=(), acquire=None, keep_for=None,
             annotations=None, client=None, snapshot=False, note=None, deps=None, contracts=None, resume_from=None,
             same=None):
     if count > MAX_TASKS:
@@ -990,11 +993,19 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
         access_env, access_secrets = userstore.machine_access(current.store, backend, current.workspace)
     if no_bucket:
         code = carried.pack(code, {**store.files, **({call_uri: stored} if call_uri else {})}, bundle.MAX_CODE_BYTES)
+    # The whole log, saved by the machine's agent (savedlogs); a local
+    # call's stays whole on this computer.
+    wanted = savedlogs.chosen(current.logs if logs is None else logs)
+    saved_logs = None if local or wanted is None else \
+        savedlogs.spec_for(wanted, "" if no_bucket else root, access_env, access_secrets)
+    if saved_logs is not None:
+        pinned = {**pinned, savedlogs.LOGS_SAVED_ENV: "1"}
     template = S.Template(
         command=command,
         image=image or "",
         env=_env({**access_env, **(current.env or {})}, {**(env or {}), **pinned}, prefix),
         secret_sources=sources + access_secrets,
+        logs=saved_logs,
         artifacts=S.Artifacts(output="" if no_bucket else client.output_for(name) if local else prefix),
         source=S.Source(inline=base64.b64encode(code).decode("ascii")) if code else None,
         restart_policy=S.RestartPolicy(backoff_limit=int(backoff)) if backoff else None,
@@ -1528,9 +1539,14 @@ class RemoteCall:
     def status(self):
         return self.handle.status()
 
-    def logs(self, tail=None):
-        """The job's log; tail=N, its last N lines."""
-        return self.handle.logs(tail=tail)
+    def logs(self, tail=None, follow=False, to=None):
+        """The end of the job's log as text: its last 512 KiB from the start
+        of a line, or its last tail lines; what it leaves out said on a line.
+        follow=True: that, then each line as it is written until the job
+        ends, to iterate (close() or a with block stops it). to="x.log": the
+        whole log into that file, its path returned: with logs=, from its
+        bucket and the machine; without, all the machine keeps (50 MiB)."""
+        return self.handle.logs(tail=tail, follow=follow, to=to)
 
     def reports(self):
         """What the code published with zenthros.report, oldest first."""
@@ -1715,10 +1731,16 @@ class RemoteCall:
 
     def release(self):
         """Remove the machine made for this call, once. result() does it
-        after the result is collected."""
+        after the result is collected. A call with logs= keeps it up to 60 s
+        more, until its log is all in its bucket (END.json), unless the
+        bucket refused it."""
         release, self._release = self._release, None
         if release is not None:
-            release()
+            try:
+                savedlogs.wait_end(self._client, self.name)
+            finally:
+                # Ctrl-C while it waits stops the wait, not the release.
+                release()
 
     def outcomes(self, timeout=None, stream_logs=True, cancel_on_interrupt=True):
         """A map's items one by one once it ended: [(True, value) or (False,
@@ -2068,53 +2090,22 @@ class _ReportFollower(threading.Thread):
             self.join(timeout=self._poll + 1)
 
 
-# The printed lines a log replay is matched against.
-LOG_LINES_KEPT = 10_000
-
-
 class _LogFollower(threading.Thread):
-    """Prints the job's log while it runs. zctl logs --watch fails until
-    the job has a backend and may end early, so it is restarted, skipping
-    the lines already printed."""
+    """Prints the job's log while it runs, until stop(): a FollowedLog, which
+    opens the stream again right after what it gave (the stream fails until
+    the job has a backend, and ends with each attempt)."""
 
     def __init__(self, client, name, poll_seconds=2.0, out=None, tee=None):
         super().__init__(daemon=True)
-        self._client, self._name, self._poll = client, name, poll_seconds
+        self._client, self._name = client, name
         self._out = out or sys.stdout
         # Each new line also goes here (the call's local record).
         self._tee = tee
-        self._stopping = threading.Event()
-        self._proc = None
-        self._followed = False
+        self._log = FollowedLog(client, name, ended=lambda: False, poll=poll_seconds)
 
     def run(self):
-        printed = []
-        while not self._stopping.is_set():
-            try:
-                self._proc = self._client.follow_logs(self._name)
-            except (errors.ZenthrosError, OSError):  # tried again below
-                self._proc = None
-            if self._proc is not None:
-                self._followed = True
-                # A reconnect replays the log from wherever zctl starts it
-                # (not always its first line), and after a move to another
-                # machine it is that attempt's log. The replay's lines are
-                # held while they continue printed from some line on (every
-                # such line is a candidate, not only the first equal one);
-                # once one reaches printed's end the rest is new, and if none
-                # does, the held lines were new too.
-                starts, held = list(range(len(printed))), []
-                for line in self._proc.stdout:
-                    if starts is not None and not any(j + len(held) == len(printed) for j in starts):
-                        starts = [j for j in starts if printed[j + len(held)] == line]
-                        if starts:
-                            held.append(line)
-                            continue
-                        self._print(printed, held)
-                    starts, held = None, []
-                    self._print(printed, [line])
-                self._proc.wait()
-            self._stopping.wait(self._poll)
+        for line in self._log:
+            self._print(line)
 
     def _print_the_log(self):
         """A job that ended before any stream opened: its log, once."""
@@ -2122,29 +2113,20 @@ class _LogFollower(threading.Thread):
             text = self._client.logs(self._name)
         except errors.ZenthrosError:
             return
-        self._print([], text.splitlines(keepends=True))
+        for line in text.splitlines(keepends=True):
+            self._print(line)
 
-    def _print(self, printed, lines):
-        for line in lines:
-            printed.append(line)
-            console.write(line, self._out)
-            if self._tee is not None:
-                self._tee(line)
-        if len(printed) > 2 * LOG_LINES_KEPT:
-            del printed[:-LOG_LINES_KEPT]
+    def _print(self, line):
+        console.write(line, self._out)
+        if self._tee is not None:
+            self._tee(line)
 
     def stop(self, grace=3.0):
-        # The last lines reach zctl a moment after the job ends: a stream
+        # The last lines reach the stream a moment after the job ends: one
         # still open is waited for, up to grace.
-        self._stopping.set()
-        proc = self._proc
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.wait(timeout=grace)
-            except subprocess.TimeoutExpired:
-                proc.terminate()
+        self._log.finish(grace)
         self.join(timeout=grace)
-        if not self._followed:
+        if not self._log.opened:
             self._print_the_log()
 
 

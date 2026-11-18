@@ -19,8 +19,9 @@ from unittest import mock
 from wireread import paths as _paths
 from wireread import wrap as _wrap
 
-from zenthros import machines, signin, view
+from zenthros import errors, machines, signin, view
 from zenthros.attaching import AttachCommand
+from zenthros.jobs import logrecords
 from zenthros.jobs import spec as S
 from zenthros.jobs.http import HTTPJobClient, PresignedBlobStore
 from zenthros.remote.call import Cost
@@ -45,6 +46,9 @@ class _Answer:
     def getheader(self, name, default=None):
         return default
 
+    def close(self):
+        pass
+
     def __enter__(self):
         return self
 
@@ -60,15 +64,29 @@ class WireClient(HTTPJobClient):
         self.sent = []
         self._answering = answering
 
-    def _open(self, method, url, body=None, timeout=None, idempotent=None, lane="calls", gzip=False):
+    def _open(self, method, url, body=None, timeout=None, idempotent=None, lane="calls", gzip=False, accept=None):
         path = urllib.parse.urlsplit(url).path
         self.sent.append((method, path, body))
         route = _route_of(method, path)
         self._answering[0] = route
         answer = WIRE["routes"][route].get("answer")
         if route.endswith("/logs"):
-            return _Answer(b"line\n")
+            return _Answer(_log_records())
         return _Answer(json.dumps(answer).encode())
+
+
+def _log_records():
+    """The logs route's answer: a record with every key of the sample's
+    header, packed as it says, and the one that says why a read broke."""
+    head = {k: v for k, v in WIRE["log_record"].items() if k != "error"}
+    data = logrecords.zstd_module().compress(b"x" * head["raw_len"])
+    head["n"] = len(data)
+    return json.dumps(head).encode() + b"\n" + data + json.dumps({"n": 0, "error": WIRE["log_record"]["error"]}).encode() + b"\n"
+
+
+def _answer_of(route):
+    """The sample of what route answers, whose keys the SDK may read."""
+    return WIRE["log_record"] if route.endswith("/logs") else WIRE["routes"][route].get("answer")
 
 
 def _route_of(method, path):
@@ -107,7 +125,7 @@ DRIVERS = {
     "POST /v1/workspaces/{ws}/jobs/{name}/cancel": lambda c: c.cancel("j"),
     "DELETE /v1/workspaces/{ws}/jobs/{name}": lambda c: c.delete("j"),
     "GET /v1/workspaces/{ws}/jobs/{name}/wait": lambda c: c._status_since("j", "", 5),
-    "GET /v1/workspaces/{ws}/jobs/{name}/logs": lambda c: c.logs("j"),
+    "GET /v1/workspaces/{ws}/jobs/{name}/logs": lambda c: (_broken(lambda: c.logs("j")), list(c.follow_logs("j").stdout)),
     "GET /v1/workspaces/{ws}/jobs/{name}/reports": lambda c: c.reports("j"),
     "GET /v1/workspaces/{ws}/jobs/{name}/cost": lambda c: Cost.from_api(c.job_cost("j")),
     "GET /v1/workspaces/{ws}/jobs/{name}/source": lambda c: c.source_of("j"),
@@ -132,6 +150,15 @@ HUB_DRIVERS = {
     "GET /v1/signup": lambda server: signin.how_to_sign_in(server),
     "POST /v1/signup": lambda server: signin.exchange(server, "t", "v"),
 }
+
+
+def _broken(read):
+    """read(), which raises: the sample's read broke."""
+    try:
+        read()
+    except errors.TransientError:
+        return
+    raise AssertionError("a read that broke was taken for the whole log")
 
 
 def _presigned(c):
@@ -189,7 +216,7 @@ class APIWireTest(unittest.TestCase):
                 else:
                     self.assertIsNone(body, f"{route}: the SDK sends a body the API takes none of")
                 for answered, read in seen.items():
-                    missing = sorted(p for p in read if p not in _paths(WIRE["routes"][answered].get("answer")))
+                    missing = sorted(p for p in read if p not in _paths(_answer_of(answered)))
                     self.assertFalse(missing, f"{answered} (driving {route}): the SDK reads keys the API never answers: {missing}")
 
 

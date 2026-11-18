@@ -24,6 +24,19 @@ machine_side = unittest.skipUnless(sys.platform == "linux", "the machine's side,
 local_in_wsl = unittest.skipIf(os.name == "nt", "on Windows this computer's jobs run in WSL2, the SDK installed there")
 
 
+def record(data, **head):
+    """One record of a job's log, as zenthros-api answers the SDK
+    (zenthros.jobs.logrecords)."""
+    return json.dumps({"n": len(data), **head}).encode() + b"\n" + data
+
+
+def packed_record(data, **head):
+    """One record of a job's log as the agent packs it: a zstd frame of data."""
+    from zenthros.jobs.logrecords import zstd_module
+
+    return record(zstd_module().compress(data), encoding="zstd", raw_len=len(data), **head)
+
+
 def script_fake(tool):
     """For a test whose fake tool is a #! script, which Windows does not run."""
     return unittest.skipIf(os.name == "nt", f"its fake {tool} is a #! script, which Windows does not run")

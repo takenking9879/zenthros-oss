@@ -18,7 +18,7 @@ from unittest import mock
 from zenthros import errors, remote
 from zenthros.core.storage import MemoryBlobStore
 from zenthros.jobs.fake import FakeJobClient
-from zenthros.remote import bundle, runner, snapshot
+from zenthros.remote import bundle, runner, savedlogs, snapshot
 from zenthros.remote import call as remote_call
 
 from support import machine_side
@@ -318,6 +318,14 @@ class SavedLogTest(RunTest):
         self.assertLessEqual(len(saved), 1000)
         self.assertIn(b"line-1999", saved)
         self.assertIn(b"line-1", bytes(self.sink)[:40], "the job's own log is whole")
+
+    def test_a_log_its_agent_saves_whole_is_not_kept_twice(self):
+        """logs=: the machine's agent saves the whole log to its bucket, from
+        the job's own output; no copy goes among the outputs."""
+        with mock.patch.dict(os.environ, {savedlogs.LOGS_SAVED_ENV: "1"}):
+            self.assertEqual(self.run_it("echo out\nexit 5\n"), 5)
+        with self.assertRaises(FileNotFoundError):
+            self.store.get(self.saved)
 
     def test_a_store_that_refuses_does_not_end_the_job(self):
         real = self.store.put

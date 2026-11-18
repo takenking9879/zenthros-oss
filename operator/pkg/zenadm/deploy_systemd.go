@@ -146,6 +146,7 @@ Environment=ZENTHROS_AGENT_HEALTH_ADDR=` + agentHealthAddr + `
 Restart=always
 RestartSec=5
 RestartPreventExitStatus=78
+TimeoutStopSec=30
 CPUAccounting=yes
 CPUQuota=50%
 ` + agentConfinement + `

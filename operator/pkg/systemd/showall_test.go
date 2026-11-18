@@ -157,7 +157,7 @@ func TestFollowStreamsShareOneSweep(t *testing.T) {
 		runner.set(name, "active", "success")
 	}
 	watch := NewTerminalWatch(Config{Scope: ScopeSystem}, runner)
-	watch.interval = 5 * time.Millisecond
+	watch.subscribe, watch.interval = noBus, 5*time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ended := map[string][]<-chan struct{}{}
@@ -229,7 +229,7 @@ func TestOneBadUnitDoesNotHoldEveryStreamOpen(t *testing.T) {
 	runner := &showRunner{active: map[string]string{}, result: map[string]string{}, broken: "zenthros-bad.service"}
 	runner.set("zenthros-ok.service", "inactive", "success")
 	watch := NewTerminalWatch(Config{Scope: ScopeSystem}, runner)
-	watch.interval = 5 * time.Millisecond
+	watch.subscribe, watch.interval = noBus, 5*time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

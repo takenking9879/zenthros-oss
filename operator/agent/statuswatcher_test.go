@@ -51,7 +51,7 @@ func (m *mockExecutor) Status(_ context.Context, handle string) (backend.JobStat
 	return backend.JobState{Phase: phase, Reasons: m.reasons[handle], ResolvedImage: m.images[handle]}, nil
 }
 
-func (m *mockExecutor) Logs(_ context.Context, _ string, _ bool, _ int) (<-chan backend.LogChunk, error) {
+func (m *mockExecutor) Logs(_ context.Context, _ string, _ backend.LogRequest) (<-chan backend.LogChunk, error) {
 	ch := make(chan backend.LogChunk)
 	close(ch)
 	return ch, nil

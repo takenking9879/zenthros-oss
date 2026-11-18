@@ -26,8 +26,9 @@ import zlib
 
 from zenthros import errors
 from zenthros.core.storage import BlobStore
+from zenthros.jobs import logrecords
 from zenthros.jobs import spec as S
-from zenthros.jobs.client import JobClient, clip_log, parse_report_body, require_job
+from zenthros.jobs.client import JobClient, parse_report_body, require_job
 from zenthros.jobs.handle import JobHandle, status_from_object
 from zenthros.jobs.hubconn import Hub
 from zenthros.jobs.wire import HEADERS
@@ -166,19 +167,23 @@ class HTTPJobClient(JobClient):
             url += "?" + urllib.parse.urlencode(query)
         return url
 
-    def _open(self, method, url, body=None, timeout=None, idempotent=None, lane="calls", gzip=False):
+    def _open(self, method, url, body=None, timeout=None, idempotent=None, lane="calls", gzip=False, accept=None):
         """The answer (2xx) to one request, its body to read; a refusal
         raised. On this thread's kept connection of lane (hubconn): None, one
         of its own. idempotent: whether sending it twice does what once does,
         so a kept connection the server had closed sends it again; by
         default a GET, PUT or DELETE. gzip: it may come compressed (the job
-        list and the logs, which zenthros-api compresses and nothing else)."""
+        list, which zenthros-api compresses and nothing else: a log's
+        records come packed by its agent).
+        accept: the media type asked for, when it is not JSON."""
         data = None if body is None else json.dumps(body).encode()
         headers = {**HEADERS, "Authorization": "Bearer " + self._token()}
         if data is not None:
             headers["Content-Type"] = "application/json"
         if gzip:
             headers["Accept-Encoding"] = "gzip"
+        if accept:
+            headers["Accept"] = accept
         if idempotent is None:
             idempotent = method in ("GET", "PUT", "DELETE")
         for attempt in range(1, RATE_LIMIT_ATTEMPTS + 1):
@@ -202,8 +207,9 @@ class HTTPJobClient(JobClient):
                 raise _refusal(answer.status, *_status(raw, answer.reason)) from None
             _sleep(wait)
 
-    def _call(self, method, path, body=None, query=None, idempotent=None, timeout=None, lane="calls", gzip=False):
-        with self._open(method, self._url(path, query), body, timeout, idempotent, lane, gzip) as resp:
+    def _call(self, method, path, body=None, query=None, idempotent=None, timeout=None, lane="calls", gzip=False,
+              accept=None):
+        with self._open(method, self._url(path, query), body, timeout, idempotent, lane, gzip, accept) as resp:
             # The network's errors are this client's to name, while the
             # answer is read as when it was asked.
             try:
@@ -385,16 +391,42 @@ class HTTPJobClient(JobClient):
         self._json("DELETE", "/jobs/" + urllib.parse.quote(job_id, safe=""))
 
     def logs(self, job_id, tail=None):
+        """The end of the job's log: its last 512 KiB from the start of a
+        line, or its last tail lines; what it leaves out said on a line."""
         query = {"tail": str(int(tail))} if tail is not None else None
-        return clip_log(self._call("GET", "/jobs/" + urllib.parse.quote(job_id, safe="") + "/logs", query=query, gzip=True), tail)
+        raw = self._call("GET", "/jobs/" + urllib.parse.quote(job_id, safe="") + "/logs", query=query,
+                         accept=logrecords.CONTENT_TYPE)
+        try:
+            return logrecords.read_text([raw])
+        except logrecords.Broken as err:
+            raise errors.TransientError(f"the log of {job_id} broke off: {err}") from err
 
-    def follow_logs(self, job_id):
+    def whole_log(self, job_id, after=None):
+        """All of the job's log its machine keeps (up to 50 MiB), the first
+        line saying what is left out; after a Position, all of it from right
+        after it."""
+        query = {"after": after.cursor, "handle": after.handle} if after is not None and after.cursor else {"history": "all"}
+        raw = self._call("GET", "/jobs/" + urllib.parse.quote(job_id, safe="") + "/logs", query=query,
+                         accept=logrecords.CONTENT_TYPE, timeout=600)
+        try:
+            return logrecords.read_text([raw])
+        except logrecords.Broken as err:
+            raise errors.TransientError(f"the log of {job_id} broke off: {err}") from err
+
+    def follow_logs(self, job_id, after=None, tail=None):
         """The followed log as a process would give it (zctl logs --watch):
-        iterate .stdout for lines; wait() when it ends; terminate() to stop."""
-        url = self._url("/jobs/" + urllib.parse.quote(job_id, safe="") + "/logs", {"follow": "1"})
+        iterate .stdout for lines; wait() when it ends; terminate() to stop.
+        It starts from the end of the log (or its last tail lines), or right
+        after the Position after a stream before it left in its .position."""
+        query = {"follow": "1"}
+        if after is not None and after.cursor:
+            query.update(after=after.cursor, handle=after.handle)
+        elif tail is not None:
+            query["tail"] = str(int(tail))
+        url = self._url("/jobs/" + urllib.parse.quote(job_id, safe="") + "/logs", query)
         # A followed log stays open as long as the job runs, on a connection
         # of its own.
-        return _LogStream(self._open("GET", url, timeout=3600, lane=None, gzip=True))
+        return _LogStream(self._open("GET", url, timeout=3600, lane=None, accept=logrecords.CONTENT_TYPE), after)
 
     def reports(self, job_id):
         return parse_report_body(job_id, self._call("GET", "/jobs/" + urllib.parse.quote(job_id, safe="") + "/reports").decode())
@@ -498,37 +530,32 @@ def _gunzip(raw):
     return gzip.decompress(raw)
 
 
-def _gunzipped_lines(response):
-    """A gzip answer's lines as each piece comes: zenthros-api flushes the
-    stream after each one, so each decompresses whole."""
-    unzip = zlib.decompressobj(16 + zlib.MAX_WBITS)
-    pending = b""
+def _pieces(response):
+    """An answer's bytes as each piece comes."""
     while chunk := response.read1(1 << 16):
-        pending += unzip.decompress(chunk)
-        *lines, pending = pending.split(b"\n")
-        for line in lines:
-            yield line + b"\n"
-    *lines, rest = (pending + unzip.flush()).split(b"\n")
-    for line in lines:
-        yield line + b"\n"
-    if rest:
-        yield rest
+        yield chunk
 
 
 class _LogStream:
-    def __init__(self, response):
+    def __init__(self, response, after=None):
         self._response = response
         self._ended = threading.Event()
         self._closed = False
+        self._text = logrecords.Text(after)
         self.stdout = self._lines()
+
+    @property
+    def position(self):
+        """Where the next stream goes on: right after what this one gave."""
+        return self._text.position
 
     def _lines(self):
         try:
-            for raw in _gunzipped_lines(self._response) if _compressed(self._response) else self._response:
-                yield raw.decode("utf-8", "replace")
-        except (OSError, ValueError, zlib.error, http.client.HTTPException):
-            # The stream broke off (a cut mid-chunk, a piece that does not
-            # decompress): the log ends here, as a closed one does.
+            yield from logrecords.follow_lines(_pieces(self._response), self._text)
+        except (OSError, ValueError, http.client.HTTPException):
+            # The stream broke off (a cut mid-chunk, a piece that is not a
+            # record): the next one goes on from where this one was.
+            self._text.broke()
             return
         except AttributeError:
             # http.client, closed by terminate() from another thread mid-read,

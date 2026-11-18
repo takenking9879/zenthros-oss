@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -104,7 +106,7 @@ func TestContainerModeWritesOnlyUnderItsStateDir(t *testing.T) {
 	paths := []string{
 		cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.CAFile,
 		defaultReportListen(agentModeContainer), defaultPreemptDir(agentModeContainer),
-		defaultReportSpool(agentModeContainer), os.Getenv(runtimegate.EnvReadyFile), os.Getenv(runtimegate.EnvPendingFile),
+		defaultReportSpool(agentModeContainer), defaultLogQueueDir(agentModeContainer), os.Getenv(runtimegate.EnvReadyFile), os.Getenv(runtimegate.EnvPendingFile),
 		strings.TrimPrefix(defaultReportEndpoint(agentModeContainer), "unix://"),
 	}
 	for _, path := range paths {
@@ -436,6 +438,33 @@ func TestAnOwnContainerWhoseGPUDoesNotStartOffersNone(t *testing.T) {
 	}
 	if err := <-done; err != nil || strings.Join(order, ",") != "pending,cuInit,ready" {
 		t.Fatalf("order %v: %v", order, err)
+	}
+}
+
+// The harness knows a container takes work by the line its agent logs when
+// the gate opens (test/cluster reads runtimegate.ReadyMessage), logged after
+// the gate opened. A renamed line failed the toolchain E2E while the agent
+// did right (2026-11-11).
+func TestTheGateOpeningIsLoggedAsTheHarnessReadsIt(t *testing.T) {
+	var said []string
+	logger := funcr.New(func(_, args string) { said = append(said, args) }, funcr.Options{})
+	steps := runtimeSteps{
+		markPending: func() error { return nil },
+		markReady:   func() error { said = append(said, "MARK READY"); return nil },
+		checkGPU:    func(context.Context) error { return nil },
+	}
+	done, err := prepareRuntime(context.Background(), "", steps, &toolchainEnv{}, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	marked, logged := slices.Index(said, "MARK READY"), slices.IndexFunc(said, func(line string) bool {
+		return strings.Contains(line, `"msg"="`+runtimegate.ReadyMessage+`"`)
+	})
+	if marked < 0 || logged < marked {
+		t.Fatalf("the gate opened at %d, %q logged at %d: %q", marked, runtimegate.ReadyMessage, logged, said)
 	}
 }
 

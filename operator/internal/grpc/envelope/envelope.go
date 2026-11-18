@@ -28,8 +28,8 @@ func Encode(spec jobspec.JobSpec) (*agentpb.JobEnvelope, error) {
 	if err := jobspec.ValidateWorkload(spec); err != nil {
 		return nil, fmt.Errorf("encode job spec: %w", err)
 	}
-	if err := secretsource.Validate(spec.SecretSources); err != nil {
-		return nil, fmt.Errorf("encode job spec: invalid secret source: %w", err)
+	if err := validSecrets(spec); err != nil {
+		return nil, fmt.Errorf("encode job spec: %w", err)
 	}
 	raw, err := marshalSpec(spec)
 	if err != nil {
@@ -60,14 +60,28 @@ func Decode(env *agentpb.JobEnvelope) (jobspec.JobSpec, error) {
 	if err != nil {
 		return jobspec.JobSpec{}, fmt.Errorf("decode job spec (apiVersion=%s): %w", env.ApiVersion, err)
 	}
-	if err := secretsource.Validate(spec.SecretSources); err != nil {
-		return jobspec.JobSpec{}, fmt.Errorf("decode job spec: invalid secret source: %w", err)
+	if err := validSecrets(spec); err != nil {
+		return jobspec.JobSpec{}, fmt.Errorf("decode job spec: %w", err)
 	}
 	spec.ID, spec.Name, spec.Namespace, spec.Kind = env.Id, env.Name, env.Namespace, env.Kind
 	if err := jobspec.ValidateWorkload(spec); err != nil {
 		return jobspec.JobSpec{}, fmt.Errorf("decode job spec: %w", err)
 	}
 	return spec, nil
+}
+
+// validSecrets checks the job's secret sources and, apart, its log's
+// credentials: they materialize for the agent, not beside the job's.
+func validSecrets(spec jobspec.JobSpec) error {
+	if err := secretsource.Validate(spec.SecretSources); err != nil {
+		return fmt.Errorf("invalid secret source: %w", err)
+	}
+	if spec.Logs != nil {
+		if err := secretsource.Validate(spec.Logs.Credentials); err != nil {
+			return fmt.Errorf("invalid logs credential: %w", err)
+		}
+	}
+	return nil
 }
 
 func marshalSpec(spec jobspec.JobSpec) (string, error) {

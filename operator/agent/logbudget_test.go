@@ -7,21 +7,21 @@ import (
 	"time"
 )
 
-func TestHourlyBudgetTakeAndReset(t *testing.T) {
+func TestHourlyBudgetTakeAllAndReset(t *testing.T) {
 	now := time.Unix(0, 0)
 	b := newHourlyBudget(5)
 	b.now = func() time.Time { return now }
-	if got := b.take(3); got != 3 {
-		t.Fatalf("take 3 = %d", got)
+	if !b.takeAll(3) {
+		t.Fatal("take 3 of 5")
 	}
-	if got := b.take(3); got != 2 {
-		t.Fatalf("take remainder = %d, want 2", got)
+	if b.takeAll(3) {
+		t.Fatal("took 3 with 2 left")
 	}
-	if got := b.take(1); got != 0 {
-		t.Fatalf("exhausted take = %d", got)
+	if !b.takeAll(2) {
+		t.Fatal("take the 2 left")
 	}
 	now = now.Add(time.Hour)
-	if got := b.take(4); got != 4 {
-		t.Fatalf("after window take = %d, want 4", got)
+	if !b.takeAll(4) {
+		t.Fatal("after the window, take 4")
 	}
 }

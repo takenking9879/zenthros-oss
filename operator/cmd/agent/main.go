@@ -84,6 +84,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "local" {
 		os.Exit(agent.RunLocalCLI(context.Background(), os.Args[2:], localSocket(), os.Stdin, os.Stdout, os.Stderr))
 	}
+	// `zenthros-agent node-log-reader` is a node's log reader, the agent
+	// chart's DaemonSet: it serves the log files of the pods on its node to
+	// the cluster's agent.
+	if len(os.Args) > 1 && os.Args[1] == "node-log-reader" {
+		os.Exit(runNodeLogReader())
+	}
 	// A container whose entrypoint is the agent makes it PID 1: it becomes
 	// the container's init and runs the agent proper as its child.
 	if os.Getpid() == 1 && os.Getenv("ZENTHROS_AGENT_MODE") == agentModeContainer {
@@ -103,10 +109,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "zenthros-agent: %v\n", err)
 	}
 	zapOpts := zap.Options{Development: false}
-	maxLogBytes := envconf.Int("ZENTHROS_AGENT_MAX_LOG_BYTES", 0)
-	flag.IntVar(&maxLogBytes, "max-log-bytes", maxLogBytes, "Per-request StreamLogs byte cap. 0 uses the 8 MiB default. When hit, the stream ends with a truncated signal; leftover stays on the pod (kubectl logs) or unit (journalctl).")
 	maxLogBytesHourly := envconf.Int("ZENTHROS_AGENT_MAX_LOG_BYTES_HOURLY", 0)
-	flag.IntVar(&maxLogBytesHourly, "max-log-bytes-hourly", maxLogBytesHourly, "Agent-wide StreamLogs hourly budget. 0 uses the 50 MiB default. Distinct from --max-log-bytes.")
+	flag.IntVar(&maxLogBytesHourly, "max-log-bytes-hourly", maxLogBytesHourly, "Agent-wide StreamLogs hourly budget. 0 uses the 50 MiB default. Past it a read goes on from where the log is when the budget comes back, and says what it skipped.")
 	metricsPublic := envconf.Bool("ZENTHROS_AGENT_METRICS_PUBLIC", false)
 	flag.BoolVar(&metricsPublic, "metrics-public", metricsPublic, "Bind metrics on all interfaces. Default rewrites :8080 to 127.0.0.1:8080.")
 	zapOpts.BindFlags(flag.CommandLine)
@@ -133,13 +137,14 @@ func main() {
 		MaxJobs:           envconf.Int("ZENTHROS_AGENT_MAX_JOBS", defaultMaxJobs(envconf.Or("ZENTHROS_AGENT_MODE", agentModeVM))),
 		MaxMessageBytes:   envconf.Int("ZENTHROS_MAX_MESSAGE_BYTES", 0),
 		Network:           envNetwork(os.Getenv("ZENTHROS_AGENT_MODE")),
-		MaxLogBytes:       maxLogBytes,
 		MaxLogBytesHourly: maxLogBytesHourly,
+		LogHistoryBytes:   int64(envconf.Int("ZENTHROS_AGENT_LOG_HISTORY_BYTES", 0)),
 		ReportListen:      envconf.Or("ZENTHROS_REPORT_LISTEN", defaultReportListen(os.Getenv("ZENTHROS_AGENT_MODE"))),
 		ReportEndpoint:    envconf.Or("ZENTHROS_REPORT_ENDPOINT", defaultReportEndpoint(os.Getenv("ZENTHROS_AGENT_MODE"))),
 		PreemptDir:        envconf.Or("ZENTHROS_PREEMPT_DIR", defaultPreemptDir(os.Getenv("ZENTHROS_AGENT_MODE"))),
 		ReportSpoolPath:   envconf.Or("ZENTHROS_REPORT_SPOOL", defaultReportSpool(os.Getenv("ZENTHROS_AGENT_MODE"))),
 		ServiceDir:        envconf.Or("ZENTHROS_SERVICE_DIR", defaultServiceDir(os.Getenv("ZENTHROS_AGENT_MODE"))),
+		LogQueueDir:       envconf.Or("ZENTHROS_LOG_QUEUE_DIR", defaultLogQueueDir(os.Getenv("ZENTHROS_AGENT_MODE"))),
 		HeartbeatInterval: envconf.Duration("ZENTHROS_HEARTBEAT_INTERVAL", 0),
 		JobGrace:          envconf.Duration(containerhosts.EnvJobGrace, 0),
 		TLS: tlsconfig.ClientConfig{
@@ -245,7 +250,7 @@ func runAgent(cfg agent.Config, logger logr.Logger) error {
 		"backendType", cfg.BackendType,
 		"ownership", infrav1alpha1.NormalizeOwnership(cfg.Ownership),
 		"ageRecipients", len(cfg.AgeRecipients),
-		"maxLogBytes", cfg.MaxLogBytes,
+		"maxLogBytesHourly", cfg.MaxLogBytesHourly,
 	)
 	a := agent.NewWithExecutor(cfg, executor, logger)
 	proc, inContainer := executor.(*procagent.Executor)
@@ -411,6 +416,11 @@ func newExecutor(mode string, logger logr.Logger) (agent.Executor, agepayload.Bu
 		}
 		// For the agent's life: a machine's images are swept while it runs.
 		go images.Run(context.Background())
+		// And its units' logs held to their cap, the ones that ran on while
+		// it restarted too.
+		if err := executor.KeepLogs(logger.WithName("logs")); err != nil {
+			return nil, agepayload.Bundle{}, err
+		}
 		return executor, bundle, nil
 	case agentModeK8s:
 		executor, err := newK8sExecutor(logger)
@@ -440,6 +450,16 @@ func newExecutor(mode string, logger logr.Logger) (agent.Executor, agepayload.Bu
 				ServiceAccount: envconf.Or("ZENTHROS_SERVICE_ACCOUNT", "zenthros-agent"),
 				Namespace:      namespace,
 			}
+		}
+		// The chart's node log readers, when it installs them
+		// (logs.nodeReader): else every pod's log is read through the API.
+		if dir := os.Getenv("ZENTHROS_NODE_LOGS_TLS_DIR"); dir != "" {
+			readers, err := k8sagent.NewNodeLogReaders(os.Getenv("ZENTHROS_NODE_LOGS_NAMESPACE"),
+				envconf.Int("ZENTHROS_NODE_LOGS_PORT", k8sagent.NodeLogPort), dir)
+			if err != nil {
+				return nil, agepayload.Bundle{}, err
+			}
+			executor.NodeLogs = readers
 		}
 		bundle, err := agepayload.LoadSecret(context.Background(), executor.Client(), namespace, envconf.Or("ZENTHROS_AGE_IDENTITY_SECRET", agepayload.DefaultSecretName))
 		if err != nil {
@@ -607,6 +627,23 @@ func defaultServiceDir(mode string) string {
 	}
 	return "/var/lib/zenthros/services"
 }
+
+// defaultLogQueueDir is where saved logs wait for their buckets: the
+// machine's disk, or on Kubernetes the agent's volume (the report spool's),
+// which outlives its pod.
+func defaultLogQueueDir(mode string) string {
+	if mode == agentModeContainer {
+		return containerPath("log-queue")
+	}
+	return "/var/lib/zenthros/log-queue"
+}
+
+// Every executor resolves a job's log credentials for the agent.
+var (
+	_ agent.LogCredentialer = agent.SystemdExecutor{}
+	_ agent.LogCredentialer = (*procagent.Executor)(nil)
+	_ agent.LogCredentialer = (*k8sagent.Executor)(nil)
+)
 
 func defaultReportSpool(mode string) string {
 	if mode == agentModeContainer {

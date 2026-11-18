@@ -138,6 +138,9 @@ func (m *Manager) InstallWithWrapper(ctx context.Context, spec jobspec.JobSpec, 
 		// into inactive/Result=success, which a status read before the start
 		// takes for a success (MapState). Job units set
 		// StartLimitIntervalSec=0, so there is no start limit to clear.
+		if err := m.prepareLog(ctx, name); err != nil {
+			return "", err
+		}
 		if _, err := m.runner.Run(ctx, m.cfg.Systemctl("enable --now "+name)); err != nil {
 			return "", fmt.Errorf("start unit %s: %w", name, err)
 		}
@@ -196,11 +199,28 @@ func (m *Manager) InstallWithWrapper(ctx context.Context, spec jobspec.JobSpec, 
 	if _, err := m.runner.Run(ctx, m.cfg.Systemctl("reset-failed "+name)+" || true"); err != nil {
 		return "", fmt.Errorf("reset-failed for %s: %w", name, err)
 	}
+	if err := m.prepareLog(ctx, name); err != nil {
+		return "", err
+	}
 	if _, err := m.runner.Run(ctx, m.cfg.Systemctl("enable --now "+name)); err != nil {
 		return "", fmt.Errorf("start unit %s: %w", name, err)
 	}
 	m.logger.Info("installed unit", "unit", name)
 	return name, nil
+}
+
+// prepareLog makes the unit's log file before its start: 0600 under umask
+// 077, in a directory only its owner reads. systemd would make it 0644, and
+// fail the start without the directory. A file an earlier start of the unit
+// wrote is kept, and the job appends to it.
+func (m *Manager) prepareLog(ctx context.Context, name string) error {
+	sudo := m.cfg.SudoPrefix()
+	cmd := fmt.Sprintf(`%[1]smkdir -p -m 0700 "%[2]s" && %[1]ssh -c 'umask 077 && : >> "$1"' sh "%[3]s"`,
+		sudo, logDir(m.cfg), LogPath(m.cfg, name))
+	if _, err := m.runner.Run(ctx, cmd); err != nil {
+		return fmt.Errorf("make the log of %s: %w", name, err)
+	}
+	return nil
 }
 
 // writeEnvFile writes a system unit's environment (EnvFilePath): created
@@ -343,20 +363,4 @@ func (m *Manager) Status(ctx context.Context, name string) (map[string]string, e
 		return nil, fmt.Errorf("show unit %s: %w", name, err)
 	}
 	return ParseShow(stdout), nil
-}
-
-// JournalTail returns the last few journal lines for a unit, best-effort.
-func (m *Manager) JournalTail(ctx context.Context, name string, lines int) string {
-	cmd := "journalctl"
-	if m.cfg.Scope == ScopeUser {
-		cmd += " --user"
-	}
-	if m.cfg.UseSudo {
-		cmd = "sudo " + cmd
-	}
-	stdout, err := m.runner.Run(ctx, fmt.Sprintf("%s -u %s -n %d --no-pager", cmd, name, lines))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(stdout)
 }

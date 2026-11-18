@@ -11,9 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+
+	"github.com/go-logr/logr"
 
 	"github.com/zenthros/operator/agent/agepayload"
 	"github.com/zenthros/operator/agent/awssecret"
+	"github.com/zenthros/operator/agent/logfile"
+	"github.com/zenthros/operator/agent/logpersist"
 	"github.com/zenthros/operator/agent/secretfile"
 	v1 "github.com/zenthros/operator/api/v1"
 	agentpb "github.com/zenthros/operator/internal/grpc/gen"
@@ -45,17 +50,18 @@ type Executor interface {
 	Cancel(ctx context.Context, handle string, job owner.Ref) error
 
 	// Status returns the job's observed state in Zenthros terms, enriching a failure
-	// with implementation-specific detail (e.g. the systemd journal tail).
+	// with implementation-specific detail (e.g. the end of a unit's log).
 	Status(ctx context.Context, handle string) (backend.JobState, error)
 
-	// Logs returns a channel of log chunks for the job. If follow is true, the
-	// channel stays open until the job terminates or ctx is cancelled. tailLines
-	// limits initial output (-1 = all).
-	Logs(ctx context.Context, handle string, follow bool, tailLines int) (<-chan backend.LogChunk, error)
+	// Logs returns a channel of log chunks for the job: the history req asks
+	// for, then, if it follows, what the job writes next, until the job
+	// ends or ctx is cancelled.
+	Logs(ctx context.Context, handle string, req backend.LogRequest) (<-chan backend.LogChunk, error)
 }
 
 // SystemdExecutor adapts the systemd Manager to the Executor interface: jobs run as
-// per-job units and a failed unit's recent journal is folded into the status message.
+// per-job units, each writing its own log file, and the end of a failed unit's log
+// is folded into the status message.
 // It is the VM execution path.
 type SystemdExecutor struct {
 	Manager *systemd.Manager
@@ -294,13 +300,15 @@ func attemptScoped(spec jobspec.JobSpec, env map[string]string) (jobspec.JobSpec
 // (falling back to the marker inside the job dir when a prior Cancel already
 // removed the unit), so the decision survives agent restarts and repeat Cancels.
 // Destination secrets are removed only after uninstall returns, so a unit that
-// is still running does not lose its credentials. Journal entries are not
-// purged: journald cannot prune per-unit, and its own retention bounds disk
-// usage once the unit stops producing entries.
+// is still running does not lose its credentials. The log stays, to be read
+// after the job: the last keptLogs of ended units are kept.
 func (e SystemdExecutor) Cancel(ctx context.Context, handle string, _ owner.Ref) error {
 	retain := e.Manager.RetainWorkdir(ctx, handle)
 	if err := e.Manager.Uninstall(ctx, handle); err != nil {
 		return err
+	}
+	if err := e.pruneLogs(ctx); err != nil {
+		return fmt.Errorf("prune the units' logs: %w", err)
 	}
 	jobID := systemd.JobIDFromUnit(handle)
 	if jobID != "" {
@@ -317,8 +325,8 @@ func (e SystemdExecutor) Cancel(ctx context.Context, handle string, _ owner.Ref)
 	return nil
 }
 
-// Status maps the unit's systemd state to a JobState, appending the journal tail on
-// failure.
+// Status maps the unit's systemd state to a JobState, appending the end of its log
+// on failure.
 func (e SystemdExecutor) Status(ctx context.Context, handle string) (backend.JobState, error) {
 	props, err := e.Manager.Status(ctx, handle)
 	if err != nil {
@@ -354,19 +362,113 @@ func (e SystemdExecutor) stateOf(ctx context.Context, handle string, props map[s
 		}
 	}
 	if state.Phase == v1.PhaseFailed {
-		if tail := e.Manager.JournalTail(ctx, handle, 3); tail != "" {
+		if tail := e.logTail(handle, 3); tail != "" {
 			state.Message += "; last log: " + tail
 		}
 	}
 	return state, nil
 }
 
-// Logs streams journalctl output for the unit. The channel closes when the journal
-// ends (non-follow) or ctx is cancelled. On follow, the stream also closes once the
-// unit reaches a terminal state (the Manager's TerminalWatch, shared by every stream).
-func (e SystemdExecutor) Logs(ctx context.Context, handle string, follow bool, tailLines int) (<-chan backend.LogChunk, error) {
-	streamer := systemd.NewWatchedLogStreamer(e.Manager.Config(), e.Manager.TerminalWatch())
-	return streamer.Stream(ctx, handle, follow, tailLines)
+// Logs reads the unit's log file (systemd.LogPath) as req asks. A following
+// read ends once systemd says the unit ended (the Manager's TerminalWatch,
+// shared by every read) and its last bytes are sent, or when ctx ends.
+func (e SystemdExecutor) Logs(ctx context.Context, handle string, req backend.LogRequest) (<-chan backend.LogChunk, error) {
+	f, err := e.logFile(handle)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, backend.Classified(backend.ErrNotFound, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	ended := endedBefore
+	if req.Follow {
+		ended = e.Manager.TerminalWatch().Ended(ctx, handle)
+	}
+	return f.Read(ctx, req, ended)
+}
+
+// endedBefore is the end a read that does not follow never waits for.
+var endedBefore = func() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}()
+
+// vmLogs keeps the job units' logs of this host to their cap: one keeper a
+// log directory (the Manager's scope names it), for the life of the agent.
+var vmLogs = struct {
+	sync.Mutex
+	keepers map[string]*logfile.Keeper
+}{keepers: map[string]*logfile.Keeper{}}
+
+// logKeeper is the keeper of the units' logs, and their directory. The
+// first call makes it, with logger.
+func (e SystemdExecutor) logKeeper(logger logr.Logger) (*logfile.Keeper, string, error) {
+	dir, err := e.Manager.Config().LogDir()
+	if err != nil {
+		return nil, "", err
+	}
+	vmLogs.Lock()
+	defer vmLogs.Unlock()
+	k, ok := vmLogs.keepers[dir]
+	if !ok {
+		k = logfile.NewKeeper(logfile.DefaultMax, logger)
+		// Every unit's, read or not: a unit goes on writing while the agent
+		// restarts.
+		k.Within(dir, systemd.LogSuffix)
+		vmLogs.keepers[dir] = k
+	}
+	return k, dir, nil
+}
+
+// KeepLogs starts holding the units' logs to their cap, saying to logger
+// what it cannot free; the agent calls it once it starts.
+func (e SystemdExecutor) KeepLogs(logger logr.Logger) error {
+	_, _, err := e.logKeeper(logger)
+	return err
+}
+
+func (e SystemdExecutor) logFile(handle string) (*logfile.File, error) {
+	k, dir, err := e.logKeeper(logr.Discard())
+	if err != nil {
+		return nil, err
+	}
+	return k.File(filepath.Join(dir, handle+systemd.LogSuffix))
+}
+
+// keptLogs is how many ended units' logs a machine keeps, as a container
+// does (procagent KeptLogs).
+const keptLogs = 20
+
+// pruneLogs removes the oldest ended units' logs past keptLogs. A unit that
+// is installed keeps its log.
+func (e SystemdExecutor) pruneLogs(ctx context.Context) error {
+	k, dir, err := e.logKeeper(logr.Discard())
+	if err != nil {
+		return err
+	}
+	units, err := e.Manager.JobUnits(ctx)
+	if err != nil {
+		return err
+	}
+	installed := make(map[string]bool, len(units))
+	for _, unit := range units {
+		installed[unit+systemd.LogSuffix] = true
+	}
+	// A log still read for its bucket stays too.
+	k.Prune(dir, systemd.LogSuffix, keptLogs, func(name string) bool {
+		return installed[name] || logpersist.Saving(strings.TrimSuffix(name, systemd.LogSuffix))
+	})
+	return nil
+}
+
+// logTail is the last n lines of the unit's log, for a failure message.
+func (e SystemdExecutor) logTail(handle string, n int) string {
+	f, err := e.logFile(handle)
+	if err != nil {
+		return ""
+	}
+	return f.Tail(n)
 }
 
 // containerRuntime reports whether the runtime the controller resolved runs

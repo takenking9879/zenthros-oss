@@ -1,5 +1,5 @@
 {
-  "_about": "One sample of every route of zenthros-api, shared by pkg/api (TestTheWireSamplesFitTheRoutes: each sample fits the Go type the route decodes or encodes, and an answer whose type the API owns sets every key, \"full\") and sdk/python/tests/test_api_wire.py (the SDK sends exactly the request's keys and reads only keys the answer has). {ws} is risk; {name} any. \"sdk\": the SDK calls the route.",
+  "_about": "One sample of every route of zenthros-api, shared by pkg/api (TestTheWireSamplesFitTheRoutes: each sample fits the Go type the route decodes or encodes, and an answer whose type the API owns sets every key, \"full\") and sdk/python/tests/test_api_wire.py (the SDK sends exactly the request's keys and reads only keys the answer has). {ws} is risk; {name} any. \"sdk\": the SDK calls the route. \"log_record\" is the header of each record the logs route answers the SDK and zctl (pkg/logstream Header): a JSON line, then its n bytes, packed as encoding says (zstd: one frame of raw_len bytes of log); TestTheLogRecordSampleIsTheHeader holds it to the Go type.",
   "routes": {
     "GET /v1/signup": {
       "sdk": true,
@@ -1173,5 +1173,17 @@
       },
       "full": true
     }
+  },
+  "log_record": {
+    "n": 1,
+    "encoding": "zstd",
+    "raw_len": 1,
+    "cursor": "x",
+    "gap": 1,
+    "gap_reason": "x",
+    "omitted": 1,
+    "handle": "x",
+    "attempt": 1,
+    "error": "x"
   }
 }

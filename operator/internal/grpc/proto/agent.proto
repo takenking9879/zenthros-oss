@@ -54,6 +54,15 @@ service AgentLogs {
   rpc StreamLogs(StreamLogsRequest) returns (stream LogChunk);
 }
 
+// NodeLogs is served by a node's log reader (zenthros-agent node-log-reader,
+// the agent chart's DaemonSet) to the cluster's agent alone: the log files of
+// the pods on its node, over mTLS with a CA of the chart's own.
+service NodeLogs {
+  // ReadPodLog reads one container's log files as StreamLogs reads a job's:
+  // its history, then with follow what it writes next, until the call ends.
+  rpc ReadPodLog(PodLogRequest) returns (stream LogChunk);
+}
+
 // LogService is served by the controller for zctl to consume job logs. zctl dials
 // the controller over the same mTLS channel; the controller proxies StreamLogs to
 // the owning agent. This keeps the CLI's only dependency the controller endpoint.
@@ -705,12 +714,34 @@ message StreamLogsRequest {
   // returns existing logs and closes.
   bool follow = 4;
 
-  // tail_lines limits initial output (-1 = all).
+  // tail_lines makes the history the last tail_lines lines; -1 leaves it to
+  // history_bytes.
   int32 tail_lines = 5;
 
   // summarize collapses Ray/train/tune progress lines into a summary. Off,
   // every line the job wrote arrives as written.
   bool summarize = 6;
+
+  // after goes on right after a cursor an earlier read gave
+  // (LogChunk.cursor), with no history. Empty starts with the history.
+  string after = 7;
+
+  // history_bytes is the most of the log's end the history holds, from the
+  // start of a line: 0 is the agent's (512 KiB), -1 all the machine keeps.
+  int64 history_bytes = 8;
+}
+
+// PodLogRequest names one container of a pod on the reader's node, by the
+// pod's UID, and what of its log to read (StreamLogsRequest's fields).
+message PodLogRequest {
+  string namespace = 1;
+  string pod = 2;
+  string uid = 3;
+  string container = 4;
+  bool follow = 5;
+  int32 tail_lines = 6;
+  int64 history_bytes = 7;
+  string after = 8;
 }
 
 // LogChunk is a fragment of user-facing log output. The agent produces these from
@@ -719,16 +750,61 @@ message LogChunk {
   // stream is "stdout" or "stderr".
   string stream = 1;
 
-  // data is the raw log bytes for this chunk.
+  // data is the chunk's log bytes, packed as encoding says: raw_len bytes of
+  // log in one zstd frame (the agent packs every chunk it sends when that
+  // makes it smaller), or the bytes as they are. The Gateway forwards it as
+  // it came; only a reader unpacks it, bounded by raw_len (pkg/logstream).
   bytes data = 2;
 
   // timestamp_unix is when the log line was produced (0 if unknown).
   int64 timestamp_unix = 3;
 
-  // truncated is set on the last chunk when the Agent hit the per-request
-  // byte cap. data then carries the leftover hint (kubectl logs / journalctl).
-  // The stream ends after this chunk. A later StreamLogs is a new budget.
-  bool truncated = 4;
+  reserved 4;
+
+  // cursor is where a read goes on right after this chunk: a reader that
+  // lost its connection asks for it (after) and gets every byte once. Empty
+  // where the source has none. Opaque: only the agent reads it.
+  string cursor = 5;
+
+  // gap is how many bytes of the log, right before data, never come, and
+  // gap_reason why: -1 when the source no longer knows how many.
+  int64 gap = 6;
+  GapReason gap_reason = 7;
+
+  // omitted, on a read's first chunk, is how many bytes of the log come
+  // before where the read started: what its history left out. -1 when the
+  // source cannot say whether any do (the Kubernetes API serves only the
+  // kubelet's latest file of a log).
+  int64 omitted = 8;
+
+  // handle is the attempt the read is of (the job's handle on its backend),
+  // and attempt its number: the Gateway sets them on a read's first chunk.
+  // A cursor goes on only within its attempt.
+  string handle = 9;
+  int32 attempt = 10;
+
+  LogEncoding encoding = 11;
+  // raw_len is how many bytes of log data unpacks to; a zstd frame that
+  // unpacks to any other size is refused.
+  int64 raw_len = 12;
+}
+
+// LogEncoding is how a LogChunk's data is packed.
+enum LogEncoding {
+  // LOG_RAW: the log's bytes as they are.
+  LOG_RAW = 0;
+  // LOG_ZSTD: one zstd frame, compressed at level 1 (benchmarks/loglab
+  // RESULTS.md: 0.19x the bytes for +0.8 mCPU at 145 KB/s).
+  LOG_ZSTD = 1;
+}
+
+// GapReason is why a part of a log never comes.
+enum GapReason {
+  // GAP_FREED: the machine freed it, past the cap of the job's file.
+  GAP_FREED = 0;
+  // GAP_BUDGET: the machine's hourly log budget ran out, and the read went
+  // on from where the log was when it came back.
+  GAP_BUDGET = 1;
 }
 
 // LogChannelFromAgent is Agent → Gateway on the log TCP.
@@ -762,12 +838,23 @@ message JobLogRequest {
   // follow tails new output (like `kubectl logs -f`).
   bool follow = 3;
 
-  // tail_lines limits initial output (-1 = all).
+  // tail_lines makes the history the last tail_lines lines; -1 leaves it to
+  // history_bytes.
   int32 tail_lines = 4;
 
   // summarize collapses Ray/train/tune progress lines into a summary. Off,
   // every line the job wrote arrives as written.
   bool summarize = 5;
+
+  // after goes on right after a cursor an earlier read of attempt handle
+  // gave. Of another attempt (the job ran again since), the read starts
+  // with that attempt's history.
+  string after = 6;
+  string handle = 7;
+
+  // history_bytes is the most of the log's end the history holds: 0 is the
+  // agent's (512 KiB), -1 all the machine keeps.
+  int64 history_bytes = 8;
 }
 
 // DeleteBackendRequest asks the controller to decommission a backend.

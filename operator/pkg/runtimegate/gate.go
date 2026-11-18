@@ -13,6 +13,11 @@ import (
 	"path/filepath"
 )
 
+// ReadyMessage is the line the agent logs when it opens the gate after
+// preparing the guest runtime: whoever reads its log (test/cluster) knows
+// from it that no job was taken before.
+const ReadyMessage = "ready for work"
+
 // Env names that move the marker files; a container keeps them in its state dir.
 const (
 	EnvReadyFile   = "ZENTHROS_RUNTIME_READY_FILE"

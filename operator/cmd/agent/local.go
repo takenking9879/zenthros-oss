@@ -44,4 +44,6 @@ func applyLocalDefaults(cfg *agent.Config) {
 	cfg.BackendID = agent.LocalWorkspace
 	cfg.HealthAddr, cfg.MetricsAddr = "", ""
 	cfg.SkipMetadataNotices = true
+	// The log is on the person's own disk: nothing is saved to a bucket.
+	cfg.LogQueueDir = ""
 }

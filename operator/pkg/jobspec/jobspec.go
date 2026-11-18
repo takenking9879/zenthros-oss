@@ -13,6 +13,7 @@ import (
 
 	v1 "github.com/zenthros/operator/api/v1"
 	"github.com/zenthros/operator/pkg/checkpoint"
+	"github.com/zenthros/operator/pkg/objectput"
 	"github.com/zenthros/operator/pkg/resultdigest"
 )
 
@@ -113,6 +114,12 @@ type JobSpec struct {
 	// that runs every task itself (a Kubernetes cluster: one Indexed Job).
 	// Tasks on machines are jobs of their own and carry none.
 	Distribution *v1.Distribution `json:"distribution,omitempty"`
+
+	// Logs is where the agent saves the job's whole log
+	// (spec.workload.template.logs). Its credentials are the agent's:
+	// never the job's environment.
+	Logs *v1.LogsSpec `json:"logs,omitempty"`
+
 	// Owner identity lets the adapter set a controller ownerReference on the
 	// native resource, enabling owner-based watches and garbage collection.
 	OwnerKind       string `json:"ownerKind,omitempty"`
@@ -152,6 +159,7 @@ func FromZenthrosJob(job *v1.ZenthrosJob, backendType, namespace string) JobSpec
 		Manifest:      template.Manifest,
 		Distribution:  template.Distribution,
 		Service:       template.Service,
+		Logs:          template.Logs,
 
 		OwnerKind:       "ZenthrosJob",
 		OwnerAPIVersion: v1.GroupVersion.String(),
@@ -182,6 +190,9 @@ func FromZenthrosJob(job *v1.ZenthrosJob, backendType, namespace string) JobSpec
 // boundary. The CRD enforces the same contract for Kubernetes API submissions.
 func ValidateWorkload(spec JobSpec) error {
 	if err := validSizes(spec); err != nil {
+		return err
+	}
+	if err := validLogs(spec); err != nil {
 		return err
 	}
 	if spec.Manifest != nil && spec.Kind != v1.WorkloadKindManifest {
@@ -272,6 +283,47 @@ func ValidateWorkload(spec JobSpec) error {
 	default:
 		return fmt.Errorf("unsupported workload kind %q", spec.Kind)
 	}
+}
+
+// validLogs refuses a bucket the agent would not write a log to (pkg/objectput).
+// Its credentials are secret sources, checked with the job's
+// (envelope, secretsource.Validate).
+func validLogs(spec JobSpec) error {
+	logs := spec.Logs
+	if logs == nil {
+		return nil
+	}
+	if spec.Kind == v1.WorkloadKindRayCluster {
+		return fmt.Errorf("a RayCluster runs no command and has no log of its own to save; set logs on the RayJobs submitted to it")
+	}
+	names := make([]string, 0, len(logs.Credentials))
+	for _, ref := range logs.Credentials {
+		if ref.Materialization.Mode != v1.SecretMaterializationEnv {
+			return fmt.Errorf("logs.credentials: each is materialized as env, by its name")
+		}
+		names = append(names, ref.Materialization.EnvName)
+	}
+	if err := objectput.Validate(logs.Destination, logs.Endpoint, []byte(logs.CAData), names); err != nil {
+		return fmt.Errorf("logs: %w", err)
+	}
+	if logs.Max() < 1<<20 {
+		return fmt.Errorf("logs.maxBytes %d: at least 1 MiB", logs.Max())
+	}
+	return nil
+}
+
+// LogCredentials are the secret sources the agent saves the log with.
+func (s JobSpec) LogCredentials() []v1.SecretSourceRef {
+	if s.Logs == nil {
+		return nil
+	}
+	return s.Logs.Credentials
+}
+
+// Secrets is how many secret sources the job sends its machine: its own and
+// its log's credentials.
+func (s JobSpec) Secrets() int {
+	return len(s.SecretSources) + len(s.LogCredentials())
 }
 
 // validSizes refuses a size that does not parse: Encode and Decode both run

@@ -120,7 +120,7 @@ func (mismatchExecutor) Cancel(context.Context, string, owner.Ref) error { retur
 func (mismatchExecutor) Status(context.Context, string) (backend.JobState, error) {
 	return backend.JobState{}, nil
 }
-func (mismatchExecutor) Logs(context.Context, string, bool, int) (<-chan backend.LogChunk, error) {
+func (mismatchExecutor) Logs(context.Context, string, backend.LogRequest) (<-chan backend.LogChunk, error) {
 	ch := make(chan backend.LogChunk)
 	close(ch)
 	return ch, nil

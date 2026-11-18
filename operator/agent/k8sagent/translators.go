@@ -51,7 +51,7 @@ type translator struct {
 	// object is the native resource r names, unread: Cancel reads it and
 	// deletes it only if it is the job's.
 	object func(r ref) client.Object
-	logs   func(e *Executor, ctx context.Context, r ref, follow bool, tailLines int) (<-chan backend.LogChunk, error)
+	logs   func(e *Executor, ctx context.Context, r ref, req backend.LogRequest) (<-chan backend.LogChunk, error)
 }
 
 // ref is the workload a handle names. gvk is set only for a Manifest, whose
@@ -72,9 +72,9 @@ func parseNamespaced(rest string) (ref, error) {
 
 // The fixed kinds address their resource by namespace and name alone.
 
-func logsByName(f func(*Executor, context.Context, string, string, bool, int) (<-chan backend.LogChunk, error)) func(*Executor, context.Context, ref, bool, int) (<-chan backend.LogChunk, error) {
-	return func(e *Executor, ctx context.Context, r ref, follow bool, tailLines int) (<-chan backend.LogChunk, error) {
-		return f(e, ctx, r.namespace, r.name, follow, tailLines)
+func logsByName(f func(*Executor, context.Context, string, string, backend.LogRequest) (<-chan backend.LogChunk, error)) func(*Executor, context.Context, ref, backend.LogRequest) (<-chan backend.LogChunk, error) {
+	return func(e *Executor, ctx context.Context, r ref, req backend.LogRequest) (<-chan backend.LogChunk, error) {
+		return f(e, ctx, r.namespace, r.name, req)
 	}
 }
 
@@ -235,7 +235,7 @@ func (c cachedReads) List(ctx context.Context, list client.ObjectList, opts ...c
 	return c.Client.List(ctx, list, opts...)
 }
 
-func (e *Executor) batchJobLogs(ctx context.Context, namespace, name string, follow bool, tailLines int) (<-chan backend.LogChunk, error) {
+func (e *Executor) batchJobLogs(ctx context.Context, namespace, name string, req backend.LogRequest) (<-chan backend.LogChunk, error) {
 	var job batchv1.Job
 	if err := e.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &job); err != nil {
 		return nil, fmt.Errorf("get Job %s/%s: %w", namespace, name, err)
@@ -244,7 +244,7 @@ func (e *Executor) batchJobLogs(ctx context.Context, namespace, name string, fol
 	if len(pods) == 0 {
 		return nil, fmt.Errorf("Job %s/%s has no pods yet", namespace, name)
 	}
-	return e.streamPodLogs(ctx, namespace, pods[0].Name, k8s.WorkloadContainerName, follow, tailLines)
+	return e.podLogs(ctx, &pods[0], k8s.WorkloadContainerName, req)
 }
 
 // RayCluster: a standing cluster, a service until cancelled.
@@ -261,7 +261,7 @@ func rayClusterPods(_ *Executor, ctx context.Context, reads client.Client, obj c
 	return k8s.RayClusterPods(ctx, reads, obj.(*rayv1.RayCluster))
 }
 
-func (e *Executor) rayClusterLogs(context.Context, string, string, bool, int) (<-chan backend.LogChunk, error) {
+func (e *Executor) rayClusterLogs(context.Context, string, string, backend.LogRequest) (<-chan backend.LogChunk, error) {
 	return nil, fmt.Errorf("%w: a RayCluster has no single log; read its head pod", backend.ErrUnsupportedKind)
 }
 
@@ -298,12 +298,12 @@ func sparkPods(_ *Executor, ctx context.Context, reads client.Client, obj client
 	return spark.ApplicationPods(ctx, reads, obj.(*unstructured.Unstructured))
 }
 
-func (e *Executor) sparkLogs(ctx context.Context, namespace, name string, follow bool, tailLines int) (<-chan backend.LogChunk, error) {
-	ns, podName, containerName, err := e.sparkLogTarget(ctx, namespace, name)
+func (e *Executor) sparkLogs(ctx context.Context, namespace, name string, req backend.LogRequest) (<-chan backend.LogChunk, error) {
+	driver, err := e.findSparkDriverPod(ctx, namespace, name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("find Spark driver pod for %s/%s: %w", namespace, name, err)
 	}
-	return e.streamPodLogs(ctx, ns, podName, containerName, follow, tailLines)
+	return e.podLogs(ctx, driver, spark.DriverContainerName, req)
 }
 
 // RayJob: KubeRay's job resource, on a dedicated or an existing cluster.

@@ -166,11 +166,20 @@ def _saved_log(client, prefix):
 
 
 def _log_text(client, name, tail):
-    """The log from the machine, or what the job saved once the machine is gone.
-    With neither, the machine's answer is the one said."""
+    """The log from the machine, or once the machine is gone what was saved:
+    its bucket's (logs=), else the copy among its outputs. With neither,
+    the machine's answer is the one said."""
+    from zenthros.remote import savedlogs
+
     try:
         return client.logs(name, tail=tail)
     except errors.ZenthrosError:
+        try:
+            kept = savedlogs.tail(client, name, tail)
+        except Exception:  # noqa: BLE001 - a store's client raises its own errors; the machine's is the one said
+            kept = None
+        if kept is not None:
+            return kept
         prefix = _output_of(client.job_object(name))
         saved = _saved_log(client, prefix) if prefix else None
         if saved is None:

@@ -31,3 +31,9 @@ imagePullSecrets:
 {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- end -}}
+
+{{- /* The node log readers' namespace: one per release, as attached clusters
+are releases of their own on one cluster. */ -}}
+{{- define "zenthros-agent.nodeLogsNamespace" -}}
+{{- .Values.logs.nodeReaderNamespace | default (printf "%s-node-logs" (include "zenthros-agent.fullname" .)) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}

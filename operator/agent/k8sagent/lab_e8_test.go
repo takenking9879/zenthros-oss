@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
+	"github.com/zenthros/operator/internal/testutil"
 	k8s "github.com/zenthros/operator/pkg/backend/k8s"
 )
 
@@ -66,11 +67,7 @@ func TestLabE8K8sAgent(t *testing.T) {
 		t.Skip("a lab: set ZENTHROS_E2E_LAB=E8 and KUBEBUILDER_ASSETS")
 	}
 	env := &envtest.Environment{}
-	cfg, err := env.Start()
-	if err != nil {
-		t.Fatalf("start envtest: %v", err)
-	}
-	defer func() { _ = env.Stop() }()
+	cfg := testutil.StartEnvtest(t, env)
 	cfg.QPS, cfg.Burst = -1, 0 // the lab's own writes are not what is measured
 
 	ctx, cancel := context.WithCancel(context.Background())

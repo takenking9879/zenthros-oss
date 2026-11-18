@@ -135,6 +135,106 @@ func (ErrorClass) EnumDescriptor() ([]byte, []int) {
 	return file_agent_proto_rawDescGZIP(), []int{0}
 }
 
+// LogEncoding is how a LogChunk's data is packed.
+type LogEncoding int32
+
+const (
+	// LOG_RAW: the log's bytes as they are.
+	LogEncoding_LOG_RAW LogEncoding = 0
+	// LOG_ZSTD: one zstd frame, compressed at level 1 (benchmarks/loglab
+	// RESULTS.md: 0.19x the bytes for +0.8 mCPU at 145 KB/s).
+	LogEncoding_LOG_ZSTD LogEncoding = 1
+)
+
+// Enum value maps for LogEncoding.
+var (
+	LogEncoding_name = map[int32]string{
+		0: "LOG_RAW",
+		1: "LOG_ZSTD",
+	}
+	LogEncoding_value = map[string]int32{
+		"LOG_RAW":  0,
+		"LOG_ZSTD": 1,
+	}
+)
+
+func (x LogEncoding) Enum() *LogEncoding {
+	p := new(LogEncoding)
+	*p = x
+	return p
+}
+
+func (x LogEncoding) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (LogEncoding) Descriptor() protoreflect.EnumDescriptor {
+	return file_agent_proto_enumTypes[1].Descriptor()
+}
+
+func (LogEncoding) Type() protoreflect.EnumType {
+	return &file_agent_proto_enumTypes[1]
+}
+
+func (x LogEncoding) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use LogEncoding.Descriptor instead.
+func (LogEncoding) EnumDescriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{1}
+}
+
+// GapReason is why a part of a log never comes.
+type GapReason int32
+
+const (
+	// GAP_FREED: the machine freed it, past the cap of the job's file.
+	GapReason_GAP_FREED GapReason = 0
+	// GAP_BUDGET: the machine's hourly log budget ran out, and the read went
+	// on from where the log was when it came back.
+	GapReason_GAP_BUDGET GapReason = 1
+)
+
+// Enum value maps for GapReason.
+var (
+	GapReason_name = map[int32]string{
+		0: "GAP_FREED",
+		1: "GAP_BUDGET",
+	}
+	GapReason_value = map[string]int32{
+		"GAP_FREED":  0,
+		"GAP_BUDGET": 1,
+	}
+)
+
+func (x GapReason) Enum() *GapReason {
+	p := new(GapReason)
+	*p = x
+	return p
+}
+
+func (x GapReason) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (GapReason) Descriptor() protoreflect.EnumDescriptor {
+	return file_agent_proto_enumTypes[2].Descriptor()
+}
+
+func (GapReason) Type() protoreflect.EnumType {
+	return &file_agent_proto_enumTypes[2]
+}
+
+func (x GapReason) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use GapReason.Descriptor instead.
+func (GapReason) EnumDescriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{2}
+}
+
 type SilenceKind int32
 
 const (
@@ -178,11 +278,11 @@ func (x SilenceKind) String() string {
 }
 
 func (SilenceKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_agent_proto_enumTypes[1].Descriptor()
+	return file_agent_proto_enumTypes[3].Descriptor()
 }
 
 func (SilenceKind) Type() protoreflect.EnumType {
-	return &file_agent_proto_enumTypes[1]
+	return &file_agent_proto_enumTypes[3]
 }
 
 func (x SilenceKind) Number() protoreflect.EnumNumber {
@@ -191,7 +291,7 @@ func (x SilenceKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use SilenceKind.Descriptor instead.
 func (SilenceKind) EnumDescriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{1}
+	return file_agent_proto_rawDescGZIP(), []int{3}
 }
 
 // EnrollRequest bootstraps an agent's identity. The agent holds no client certificate
@@ -2564,11 +2664,18 @@ type StreamLogsRequest struct {
 	// follow tails new output (like `kubectl logs -f`). When false, the stream
 	// returns existing logs and closes.
 	Follow bool `protobuf:"varint,4,opt,name=follow,proto3" json:"follow,omitempty"`
-	// tail_lines limits initial output (-1 = all).
+	// tail_lines makes the history the last tail_lines lines; -1 leaves it to
+	// history_bytes.
 	TailLines int32 `protobuf:"varint,5,opt,name=tail_lines,json=tailLines,proto3" json:"tail_lines,omitempty"`
 	// summarize collapses Ray/train/tune progress lines into a summary. Off,
 	// every line the job wrote arrives as written.
-	Summarize     bool `protobuf:"varint,6,opt,name=summarize,proto3" json:"summarize,omitempty"`
+	Summarize bool `protobuf:"varint,6,opt,name=summarize,proto3" json:"summarize,omitempty"`
+	// after goes on right after a cursor an earlier read gave
+	// (LogChunk.cursor), with no history. Empty starts with the history.
+	After string `protobuf:"bytes,7,opt,name=after,proto3" json:"after,omitempty"`
+	// history_bytes is the most of the log's end the history holds, from the
+	// start of a line: 0 is the agent's (512 KiB), -1 all the machine keeps.
+	HistoryBytes  int64 `protobuf:"varint,8,opt,name=history_bytes,json=historyBytes,proto3" json:"history_bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2645,27 +2752,164 @@ func (x *StreamLogsRequest) GetSummarize() bool {
 	return false
 }
 
+func (x *StreamLogsRequest) GetAfter() string {
+	if x != nil {
+		return x.After
+	}
+	return ""
+}
+
+func (x *StreamLogsRequest) GetHistoryBytes() int64 {
+	if x != nil {
+		return x.HistoryBytes
+	}
+	return 0
+}
+
+// PodLogRequest names one container of a pod on the reader's node, by the
+// pod's UID, and what of its log to read (StreamLogsRequest's fields).
+type PodLogRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Pod           string                 `protobuf:"bytes,2,opt,name=pod,proto3" json:"pod,omitempty"`
+	Uid           string                 `protobuf:"bytes,3,opt,name=uid,proto3" json:"uid,omitempty"`
+	Container     string                 `protobuf:"bytes,4,opt,name=container,proto3" json:"container,omitempty"`
+	Follow        bool                   `protobuf:"varint,5,opt,name=follow,proto3" json:"follow,omitempty"`
+	TailLines     int32                  `protobuf:"varint,6,opt,name=tail_lines,json=tailLines,proto3" json:"tail_lines,omitempty"`
+	HistoryBytes  int64                  `protobuf:"varint,7,opt,name=history_bytes,json=historyBytes,proto3" json:"history_bytes,omitempty"`
+	After         string                 `protobuf:"bytes,8,opt,name=after,proto3" json:"after,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PodLogRequest) Reset() {
+	*x = PodLogRequest{}
+	mi := &file_agent_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PodLogRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PodLogRequest) ProtoMessage() {}
+
+func (x *PodLogRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PodLogRequest.ProtoReflect.Descriptor instead.
+func (*PodLogRequest) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *PodLogRequest) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *PodLogRequest) GetPod() string {
+	if x != nil {
+		return x.Pod
+	}
+	return ""
+}
+
+func (x *PodLogRequest) GetUid() string {
+	if x != nil {
+		return x.Uid
+	}
+	return ""
+}
+
+func (x *PodLogRequest) GetContainer() string {
+	if x != nil {
+		return x.Container
+	}
+	return ""
+}
+
+func (x *PodLogRequest) GetFollow() bool {
+	if x != nil {
+		return x.Follow
+	}
+	return false
+}
+
+func (x *PodLogRequest) GetTailLines() int32 {
+	if x != nil {
+		return x.TailLines
+	}
+	return 0
+}
+
+func (x *PodLogRequest) GetHistoryBytes() int64 {
+	if x != nil {
+		return x.HistoryBytes
+	}
+	return 0
+}
+
+func (x *PodLogRequest) GetAfter() string {
+	if x != nil {
+		return x.After
+	}
+	return ""
+}
+
 // LogChunk is a fragment of user-facing log output. The agent produces these from
 // the backend-native log source; the controller proxies them to zctl.
 type LogChunk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// stream is "stdout" or "stderr".
 	Stream string `protobuf:"bytes,1,opt,name=stream,proto3" json:"stream,omitempty"`
-	// data is the raw log bytes for this chunk.
+	// data is the chunk's log bytes, packed as encoding says: raw_len bytes of
+	// log in one zstd frame (the agent packs every chunk it sends when that
+	// makes it smaller), or the bytes as they are. The Gateway forwards it as
+	// it came; only a reader unpacks it, bounded by raw_len (pkg/logstream).
 	Data []byte `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
 	// timestamp_unix is when the log line was produced (0 if unknown).
 	TimestampUnix int64 `protobuf:"varint,3,opt,name=timestamp_unix,json=timestampUnix,proto3" json:"timestamp_unix,omitempty"`
-	// truncated is set on the last chunk when the Agent hit the per-request
-	// byte cap. data then carries the leftover hint (kubectl logs / journalctl).
-	// The stream ends after this chunk. A later StreamLogs is a new budget.
-	Truncated     bool `protobuf:"varint,4,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	// cursor is where a read goes on right after this chunk: a reader that
+	// lost its connection asks for it (after) and gets every byte once. Empty
+	// where the source has none. Opaque: only the agent reads it.
+	Cursor string `protobuf:"bytes,5,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	// gap is how many bytes of the log, right before data, never come, and
+	// gap_reason why: -1 when the source no longer knows how many.
+	Gap       int64     `protobuf:"varint,6,opt,name=gap,proto3" json:"gap,omitempty"`
+	GapReason GapReason `protobuf:"varint,7,opt,name=gap_reason,json=gapReason,proto3,enum=zenthros.agent.v1.GapReason" json:"gap_reason,omitempty"`
+	// omitted, on a read's first chunk, is how many bytes of the log come
+	// before where the read started: what its history left out. -1 when the
+	// source cannot say whether any do (the Kubernetes API serves only the
+	// kubelet's latest file of a log).
+	Omitted int64 `protobuf:"varint,8,opt,name=omitted,proto3" json:"omitted,omitempty"`
+	// handle is the attempt the read is of (the job's handle on its backend),
+	// and attempt its number: the Gateway sets them on a read's first chunk.
+	// A cursor goes on only within its attempt.
+	Handle   string      `protobuf:"bytes,9,opt,name=handle,proto3" json:"handle,omitempty"`
+	Attempt  int32       `protobuf:"varint,10,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	Encoding LogEncoding `protobuf:"varint,11,opt,name=encoding,proto3,enum=zenthros.agent.v1.LogEncoding" json:"encoding,omitempty"`
+	// raw_len is how many bytes of log data unpacks to; a zstd frame that
+	// unpacks to any other size is refused.
+	RawLen        int64 `protobuf:"varint,12,opt,name=raw_len,json=rawLen,proto3" json:"raw_len,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *LogChunk) Reset() {
 	*x = LogChunk{}
-	mi := &file_agent_proto_msgTypes[27]
+	mi := &file_agent_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2677,7 +2921,7 @@ func (x *LogChunk) String() string {
 func (*LogChunk) ProtoMessage() {}
 
 func (x *LogChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[27]
+	mi := &file_agent_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2690,7 +2934,7 @@ func (x *LogChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogChunk.ProtoReflect.Descriptor instead.
 func (*LogChunk) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{27}
+	return file_agent_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *LogChunk) GetStream() string {
@@ -2714,11 +2958,60 @@ func (x *LogChunk) GetTimestampUnix() int64 {
 	return 0
 }
 
-func (x *LogChunk) GetTruncated() bool {
+func (x *LogChunk) GetCursor() string {
 	if x != nil {
-		return x.Truncated
+		return x.Cursor
 	}
-	return false
+	return ""
+}
+
+func (x *LogChunk) GetGap() int64 {
+	if x != nil {
+		return x.Gap
+	}
+	return 0
+}
+
+func (x *LogChunk) GetGapReason() GapReason {
+	if x != nil {
+		return x.GapReason
+	}
+	return GapReason_GAP_FREED
+}
+
+func (x *LogChunk) GetOmitted() int64 {
+	if x != nil {
+		return x.Omitted
+	}
+	return 0
+}
+
+func (x *LogChunk) GetHandle() string {
+	if x != nil {
+		return x.Handle
+	}
+	return ""
+}
+
+func (x *LogChunk) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *LogChunk) GetEncoding() LogEncoding {
+	if x != nil {
+		return x.Encoding
+	}
+	return LogEncoding_LOG_RAW
+}
+
+func (x *LogChunk) GetRawLen() int64 {
+	if x != nil {
+		return x.RawLen
+	}
+	return 0
 }
 
 // LogChannelFromAgent is Agent → Gateway on the log TCP.
@@ -2737,7 +3030,7 @@ type LogChannelFromAgent struct {
 
 func (x *LogChannelFromAgent) Reset() {
 	*x = LogChannelFromAgent{}
-	mi := &file_agent_proto_msgTypes[28]
+	mi := &file_agent_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2749,7 +3042,7 @@ func (x *LogChannelFromAgent) String() string {
 func (*LogChannelFromAgent) ProtoMessage() {}
 
 func (x *LogChannelFromAgent) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[28]
+	mi := &file_agent_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2762,7 +3055,7 @@ func (x *LogChannelFromAgent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogChannelFromAgent.ProtoReflect.Descriptor instead.
 func (*LogChannelFromAgent) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{28}
+	return file_agent_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *LogChannelFromAgent) GetBackendId() string {
@@ -2819,7 +3112,7 @@ type LogChannelFromGateway struct {
 
 func (x *LogChannelFromGateway) Reset() {
 	*x = LogChannelFromGateway{}
-	mi := &file_agent_proto_msgTypes[29]
+	mi := &file_agent_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2831,7 +3124,7 @@ func (x *LogChannelFromGateway) String() string {
 func (*LogChannelFromGateway) ProtoMessage() {}
 
 func (x *LogChannelFromGateway) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[29]
+	mi := &file_agent_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2844,7 +3137,7 @@ func (x *LogChannelFromGateway) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogChannelFromGateway.ProtoReflect.Descriptor instead.
 func (*LogChannelFromGateway) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{29}
+	return file_agent_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *LogChannelFromGateway) GetRequestId() string {
@@ -2879,18 +3172,27 @@ type JobLogRequest struct {
 	Namespace string `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
 	// follow tails new output (like `kubectl logs -f`).
 	Follow bool `protobuf:"varint,3,opt,name=follow,proto3" json:"follow,omitempty"`
-	// tail_lines limits initial output (-1 = all).
+	// tail_lines makes the history the last tail_lines lines; -1 leaves it to
+	// history_bytes.
 	TailLines int32 `protobuf:"varint,4,opt,name=tail_lines,json=tailLines,proto3" json:"tail_lines,omitempty"`
 	// summarize collapses Ray/train/tune progress lines into a summary. Off,
 	// every line the job wrote arrives as written.
-	Summarize     bool `protobuf:"varint,5,opt,name=summarize,proto3" json:"summarize,omitempty"`
+	Summarize bool `protobuf:"varint,5,opt,name=summarize,proto3" json:"summarize,omitempty"`
+	// after goes on right after a cursor an earlier read of attempt handle
+	// gave. Of another attempt (the job ran again since), the read starts
+	// with that attempt's history.
+	After  string `protobuf:"bytes,6,opt,name=after,proto3" json:"after,omitempty"`
+	Handle string `protobuf:"bytes,7,opt,name=handle,proto3" json:"handle,omitempty"`
+	// history_bytes is the most of the log's end the history holds: 0 is the
+	// agent's (512 KiB), -1 all the machine keeps.
+	HistoryBytes  int64 `protobuf:"varint,8,opt,name=history_bytes,json=historyBytes,proto3" json:"history_bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *JobLogRequest) Reset() {
 	*x = JobLogRequest{}
-	mi := &file_agent_proto_msgTypes[30]
+	mi := &file_agent_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2902,7 +3204,7 @@ func (x *JobLogRequest) String() string {
 func (*JobLogRequest) ProtoMessage() {}
 
 func (x *JobLogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[30]
+	mi := &file_agent_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2915,7 +3217,7 @@ func (x *JobLogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobLogRequest.ProtoReflect.Descriptor instead.
 func (*JobLogRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{30}
+	return file_agent_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *JobLogRequest) GetJobId() string {
@@ -2953,6 +3255,27 @@ func (x *JobLogRequest) GetSummarize() bool {
 	return false
 }
 
+func (x *JobLogRequest) GetAfter() string {
+	if x != nil {
+		return x.After
+	}
+	return ""
+}
+
+func (x *JobLogRequest) GetHandle() string {
+	if x != nil {
+		return x.Handle
+	}
+	return ""
+}
+
+func (x *JobLogRequest) GetHistoryBytes() int64 {
+	if x != nil {
+		return x.HistoryBytes
+	}
+	return 0
+}
+
 // DeleteBackendRequest asks the controller to decommission a backend.
 type DeleteBackendRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -2966,7 +3289,7 @@ type DeleteBackendRequest struct {
 
 func (x *DeleteBackendRequest) Reset() {
 	*x = DeleteBackendRequest{}
-	mi := &file_agent_proto_msgTypes[31]
+	mi := &file_agent_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2978,7 +3301,7 @@ func (x *DeleteBackendRequest) String() string {
 func (*DeleteBackendRequest) ProtoMessage() {}
 
 func (x *DeleteBackendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[31]
+	mi := &file_agent_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2991,7 +3314,7 @@ func (x *DeleteBackendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteBackendRequest.ProtoReflect.Descriptor instead.
 func (*DeleteBackendRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{31}
+	return file_agent_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *DeleteBackendRequest) GetBackendId() string {
@@ -3020,7 +3343,7 @@ type DeleteBackendResponse struct {
 
 func (x *DeleteBackendResponse) Reset() {
 	*x = DeleteBackendResponse{}
-	mi := &file_agent_proto_msgTypes[32]
+	mi := &file_agent_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3032,7 +3355,7 @@ func (x *DeleteBackendResponse) String() string {
 func (*DeleteBackendResponse) ProtoMessage() {}
 
 func (x *DeleteBackendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[32]
+	mi := &file_agent_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3045,7 +3368,7 @@ func (x *DeleteBackendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteBackendResponse.ProtoReflect.Descriptor instead.
 func (*DeleteBackendResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{32}
+	return file_agent_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *DeleteBackendResponse) GetDevices() []*TailnetDevice {
@@ -3066,7 +3389,7 @@ type TailnetDevice struct {
 
 func (x *TailnetDevice) Reset() {
 	*x = TailnetDevice{}
-	mi := &file_agent_proto_msgTypes[33]
+	mi := &file_agent_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3078,7 +3401,7 @@ func (x *TailnetDevice) String() string {
 func (*TailnetDevice) ProtoMessage() {}
 
 func (x *TailnetDevice) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[33]
+	mi := &file_agent_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3091,7 +3414,7 @@ func (x *TailnetDevice) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TailnetDevice.ProtoReflect.Descriptor instead.
 func (*TailnetDevice) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{33}
+	return file_agent_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *TailnetDevice) GetId() string {
@@ -3131,7 +3454,7 @@ type ListBackendsRequest struct {
 
 func (x *ListBackendsRequest) Reset() {
 	*x = ListBackendsRequest{}
-	mi := &file_agent_proto_msgTypes[34]
+	mi := &file_agent_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3143,7 +3466,7 @@ func (x *ListBackendsRequest) String() string {
 func (*ListBackendsRequest) ProtoMessage() {}
 
 func (x *ListBackendsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[34]
+	mi := &file_agent_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3156,7 +3479,7 @@ func (x *ListBackendsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListBackendsRequest.ProtoReflect.Descriptor instead.
 func (*ListBackendsRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{34}
+	return file_agent_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ListBackendsRequest) GetHeartbeatsOnly() bool {
@@ -3235,7 +3558,7 @@ type BackendInfo struct {
 
 func (x *BackendInfo) Reset() {
 	*x = BackendInfo{}
-	mi := &file_agent_proto_msgTypes[35]
+	mi := &file_agent_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3247,7 +3570,7 @@ func (x *BackendInfo) String() string {
 func (*BackendInfo) ProtoMessage() {}
 
 func (x *BackendInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[35]
+	mi := &file_agent_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3260,7 +3583,7 @@ func (x *BackendInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackendInfo.ProtoReflect.Descriptor instead.
 func (*BackendInfo) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{35}
+	return file_agent_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *BackendInfo) GetBackendId() string {
@@ -3406,7 +3729,7 @@ type ListBackendsResponse struct {
 
 func (x *ListBackendsResponse) Reset() {
 	*x = ListBackendsResponse{}
-	mi := &file_agent_proto_msgTypes[36]
+	mi := &file_agent_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3418,7 +3741,7 @@ func (x *ListBackendsResponse) String() string {
 func (*ListBackendsResponse) ProtoMessage() {}
 
 func (x *ListBackendsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[36]
+	mi := &file_agent_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3431,7 +3754,7 @@ func (x *ListBackendsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListBackendsResponse.ProtoReflect.Descriptor instead.
 func (*ListBackendsResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{36}
+	return file_agent_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ListBackendsResponse) GetBackends() []*BackendInfo {
@@ -3468,7 +3791,7 @@ type RefusedBackend struct {
 
 func (x *RefusedBackend) Reset() {
 	*x = RefusedBackend{}
-	mi := &file_agent_proto_msgTypes[37]
+	mi := &file_agent_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3480,7 +3803,7 @@ func (x *RefusedBackend) String() string {
 func (*RefusedBackend) ProtoMessage() {}
 
 func (x *RefusedBackend) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[37]
+	mi := &file_agent_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3493,7 +3816,7 @@ func (x *RefusedBackend) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RefusedBackend.ProtoReflect.Descriptor instead.
 func (*RefusedBackend) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{37}
+	return file_agent_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *RefusedBackend) GetBackendId() string {
@@ -3521,7 +3844,7 @@ type DrainBackendRequest struct {
 
 func (x *DrainBackendRequest) Reset() {
 	*x = DrainBackendRequest{}
-	mi := &file_agent_proto_msgTypes[38]
+	mi := &file_agent_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3533,7 +3856,7 @@ func (x *DrainBackendRequest) String() string {
 func (*DrainBackendRequest) ProtoMessage() {}
 
 func (x *DrainBackendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[38]
+	mi := &file_agent_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3546,7 +3869,7 @@ func (x *DrainBackendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainBackendRequest.ProtoReflect.Descriptor instead.
 func (*DrainBackendRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{38}
+	return file_agent_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *DrainBackendRequest) GetBackendId() string {
@@ -3570,7 +3893,7 @@ type DrainBackendResponse struct {
 
 func (x *DrainBackendResponse) Reset() {
 	*x = DrainBackendResponse{}
-	mi := &file_agent_proto_msgTypes[39]
+	mi := &file_agent_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3582,7 +3905,7 @@ func (x *DrainBackendResponse) String() string {
 func (*DrainBackendResponse) ProtoMessage() {}
 
 func (x *DrainBackendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[39]
+	mi := &file_agent_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3595,7 +3918,7 @@ func (x *DrainBackendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainBackendResponse.ProtoReflect.Descriptor instead.
 func (*DrainBackendResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{39}
+	return file_agent_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *DrainBackendResponse) GetBackendId() string {
@@ -3623,7 +3946,7 @@ type UndrainBackendRequest struct {
 
 func (x *UndrainBackendRequest) Reset() {
 	*x = UndrainBackendRequest{}
-	mi := &file_agent_proto_msgTypes[40]
+	mi := &file_agent_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3635,7 +3958,7 @@ func (x *UndrainBackendRequest) String() string {
 func (*UndrainBackendRequest) ProtoMessage() {}
 
 func (x *UndrainBackendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[40]
+	mi := &file_agent_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3648,7 +3971,7 @@ func (x *UndrainBackendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UndrainBackendRequest.ProtoReflect.Descriptor instead.
 func (*UndrainBackendRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{40}
+	return file_agent_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *UndrainBackendRequest) GetBackendId() string {
@@ -3669,7 +3992,7 @@ type UndrainBackendResponse struct {
 
 func (x *UndrainBackendResponse) Reset() {
 	*x = UndrainBackendResponse{}
-	mi := &file_agent_proto_msgTypes[41]
+	mi := &file_agent_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3681,7 +4004,7 @@ func (x *UndrainBackendResponse) String() string {
 func (*UndrainBackendResponse) ProtoMessage() {}
 
 func (x *UndrainBackendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[41]
+	mi := &file_agent_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3694,7 +4017,7 @@ func (x *UndrainBackendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UndrainBackendResponse.ProtoReflect.Descriptor instead.
 func (*UndrainBackendResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{41}
+	return file_agent_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *UndrainBackendResponse) GetBackendId() string {
@@ -3730,7 +4053,7 @@ type JoinBackendRequest struct {
 
 func (x *JoinBackendRequest) Reset() {
 	*x = JoinBackendRequest{}
-	mi := &file_agent_proto_msgTypes[42]
+	mi := &file_agent_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3742,7 +4065,7 @@ func (x *JoinBackendRequest) String() string {
 func (*JoinBackendRequest) ProtoMessage() {}
 
 func (x *JoinBackendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[42]
+	mi := &file_agent_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3755,7 +4078,7 @@ func (x *JoinBackendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JoinBackendRequest.ProtoReflect.Descriptor instead.
 func (*JoinBackendRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{42}
+	return file_agent_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *JoinBackendRequest) GetWorkspace() string {
@@ -3815,7 +4138,7 @@ type JoinBackendResponse struct {
 
 func (x *JoinBackendResponse) Reset() {
 	*x = JoinBackendResponse{}
-	mi := &file_agent_proto_msgTypes[43]
+	mi := &file_agent_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3827,7 +4150,7 @@ func (x *JoinBackendResponse) String() string {
 func (*JoinBackendResponse) ProtoMessage() {}
 
 func (x *JoinBackendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[43]
+	mi := &file_agent_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3840,7 +4163,7 @@ func (x *JoinBackendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JoinBackendResponse.ProtoReflect.Descriptor instead.
 func (*JoinBackendResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{43}
+	return file_agent_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *JoinBackendResponse) GetBackendId() string {
@@ -3897,7 +4220,7 @@ type RetireBackendRequest struct {
 
 func (x *RetireBackendRequest) Reset() {
 	*x = RetireBackendRequest{}
-	mi := &file_agent_proto_msgTypes[44]
+	mi := &file_agent_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3909,7 +4232,7 @@ func (x *RetireBackendRequest) String() string {
 func (*RetireBackendRequest) ProtoMessage() {}
 
 func (x *RetireBackendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[44]
+	mi := &file_agent_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3922,7 +4245,7 @@ func (x *RetireBackendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetireBackendRequest.ProtoReflect.Descriptor instead.
 func (*RetireBackendRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{44}
+	return file_agent_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *RetireBackendRequest) GetBackendId() string {
@@ -3953,7 +4276,7 @@ type RetireBackendResponse struct {
 
 func (x *RetireBackendResponse) Reset() {
 	*x = RetireBackendResponse{}
-	mi := &file_agent_proto_msgTypes[45]
+	mi := &file_agent_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3965,7 +4288,7 @@ func (x *RetireBackendResponse) String() string {
 func (*RetireBackendResponse) ProtoMessage() {}
 
 func (x *RetireBackendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[45]
+	mi := &file_agent_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3978,7 +4301,7 @@ func (x *RetireBackendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetireBackendResponse.ProtoReflect.Descriptor instead.
 func (*RetireBackendResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{45}
+	return file_agent_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *RetireBackendResponse) GetBackendId() string {
@@ -4014,7 +4337,7 @@ type ArtifactRef struct {
 
 func (x *ArtifactRef) Reset() {
 	*x = ArtifactRef{}
-	mi := &file_agent_proto_msgTypes[46]
+	mi := &file_agent_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4026,7 +4349,7 @@ func (x *ArtifactRef) String() string {
 func (*ArtifactRef) ProtoMessage() {}
 
 func (x *ArtifactRef) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[46]
+	mi := &file_agent_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4039,7 +4362,7 @@ func (x *ArtifactRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactRef.ProtoReflect.Descriptor instead.
 func (*ArtifactRef) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{46}
+	return file_agent_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *ArtifactRef) GetUri() string {
@@ -4077,7 +4400,7 @@ type ExecutionReport struct {
 
 func (x *ExecutionReport) Reset() {
 	*x = ExecutionReport{}
-	mi := &file_agent_proto_msgTypes[47]
+	mi := &file_agent_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4089,7 +4412,7 @@ func (x *ExecutionReport) String() string {
 func (*ExecutionReport) ProtoMessage() {}
 
 func (x *ExecutionReport) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[47]
+	mi := &file_agent_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4102,7 +4425,7 @@ func (x *ExecutionReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutionReport.ProtoReflect.Descriptor instead.
 func (*ExecutionReport) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{47}
+	return file_agent_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *ExecutionReport) GetApiVersion() string {
@@ -4192,7 +4515,7 @@ type ExecutionReportAck struct {
 
 func (x *ExecutionReportAck) Reset() {
 	*x = ExecutionReportAck{}
-	mi := &file_agent_proto_msgTypes[48]
+	mi := &file_agent_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4204,7 +4527,7 @@ func (x *ExecutionReportAck) String() string {
 func (*ExecutionReportAck) ProtoMessage() {}
 
 func (x *ExecutionReportAck) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[48]
+	mi := &file_agent_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4217,7 +4540,7 @@ func (x *ExecutionReportAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutionReportAck.ProtoReflect.Descriptor instead.
 func (*ExecutionReportAck) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{48}
+	return file_agent_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *ExecutionReportAck) GetReportId() string {
@@ -4280,7 +4603,7 @@ type GetCurrentReportRequest struct {
 
 func (x *GetCurrentReportRequest) Reset() {
 	*x = GetCurrentReportRequest{}
-	mi := &file_agent_proto_msgTypes[49]
+	mi := &file_agent_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4292,7 +4615,7 @@ func (x *GetCurrentReportRequest) String() string {
 func (*GetCurrentReportRequest) ProtoMessage() {}
 
 func (x *GetCurrentReportRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[49]
+	mi := &file_agent_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4305,7 +4628,7 @@ func (x *GetCurrentReportRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCurrentReportRequest.ProtoReflect.Descriptor instead.
 func (*GetCurrentReportRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{49}
+	return file_agent_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *GetCurrentReportRequest) GetJobId() string {
@@ -4350,7 +4673,7 @@ type GetCurrentReportResponse struct {
 
 func (x *GetCurrentReportResponse) Reset() {
 	*x = GetCurrentReportResponse{}
-	mi := &file_agent_proto_msgTypes[50]
+	mi := &file_agent_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4362,7 +4685,7 @@ func (x *GetCurrentReportResponse) String() string {
 func (*GetCurrentReportResponse) ProtoMessage() {}
 
 func (x *GetCurrentReportResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[50]
+	mi := &file_agent_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4375,7 +4698,7 @@ func (x *GetCurrentReportResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCurrentReportResponse.ProtoReflect.Descriptor instead.
 func (*GetCurrentReportResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{50}
+	return file_agent_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *GetCurrentReportResponse) GetWorkspaceId() string {
@@ -4465,7 +4788,7 @@ type ListCurrentReportsRequest struct {
 
 func (x *ListCurrentReportsRequest) Reset() {
 	*x = ListCurrentReportsRequest{}
-	mi := &file_agent_proto_msgTypes[51]
+	mi := &file_agent_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4477,7 +4800,7 @@ func (x *ListCurrentReportsRequest) String() string {
 func (*ListCurrentReportsRequest) ProtoMessage() {}
 
 func (x *ListCurrentReportsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[51]
+	mi := &file_agent_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4490,7 +4813,7 @@ func (x *ListCurrentReportsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCurrentReportsRequest.ProtoReflect.Descriptor instead.
 func (*ListCurrentReportsRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{51}
+	return file_agent_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ListCurrentReportsRequest) GetJobId() string {
@@ -4516,7 +4839,7 @@ type ListCurrentReportsResponse struct {
 
 func (x *ListCurrentReportsResponse) Reset() {
 	*x = ListCurrentReportsResponse{}
-	mi := &file_agent_proto_msgTypes[52]
+	mi := &file_agent_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4528,7 +4851,7 @@ func (x *ListCurrentReportsResponse) String() string {
 func (*ListCurrentReportsResponse) ProtoMessage() {}
 
 func (x *ListCurrentReportsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[52]
+	mi := &file_agent_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4541,7 +4864,7 @@ func (x *ListCurrentReportsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCurrentReportsResponse.ProtoReflect.Descriptor instead.
 func (*ListCurrentReportsResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{52}
+	return file_agent_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *ListCurrentReportsResponse) GetReports() []*GetCurrentReportResponse {
@@ -4569,7 +4892,7 @@ type ClusterReport struct {
 
 func (x *ClusterReport) Reset() {
 	*x = ClusterReport{}
-	mi := &file_agent_proto_msgTypes[53]
+	mi := &file_agent_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4581,7 +4904,7 @@ func (x *ClusterReport) String() string {
 func (*ClusterReport) ProtoMessage() {}
 
 func (x *ClusterReport) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[53]
+	mi := &file_agent_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4594,7 +4917,7 @@ func (x *ClusterReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterReport.ProtoReflect.Descriptor instead.
 func (*ClusterReport) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{53}
+	return file_agent_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *ClusterReport) GetJoinMethod() string {
@@ -4654,7 +4977,7 @@ type ClusterReportAck struct {
 
 func (x *ClusterReportAck) Reset() {
 	*x = ClusterReportAck{}
-	mi := &file_agent_proto_msgTypes[54]
+	mi := &file_agent_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4666,7 +4989,7 @@ func (x *ClusterReportAck) String() string {
 func (*ClusterReportAck) ProtoMessage() {}
 
 func (x *ClusterReportAck) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[54]
+	mi := &file_agent_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4679,7 +5002,7 @@ func (x *ClusterReportAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterReportAck.ProtoReflect.Descriptor instead.
 func (*ClusterReportAck) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{54}
+	return file_agent_proto_rawDescGZIP(), []int{55}
 }
 
 type NodeSlotsRequest struct {
@@ -4690,7 +5013,7 @@ type NodeSlotsRequest struct {
 
 func (x *NodeSlotsRequest) Reset() {
 	*x = NodeSlotsRequest{}
-	mi := &file_agent_proto_msgTypes[55]
+	mi := &file_agent_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4702,7 +5025,7 @@ func (x *NodeSlotsRequest) String() string {
 func (*NodeSlotsRequest) ProtoMessage() {}
 
 func (x *NodeSlotsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[55]
+	mi := &file_agent_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4715,7 +5038,7 @@ func (x *NodeSlotsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeSlotsRequest.ProtoReflect.Descriptor instead.
 func (*NodeSlotsRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{55}
+	return file_agent_proto_rawDescGZIP(), []int{56}
 }
 
 type NodeSlot struct {
@@ -4742,7 +5065,7 @@ type NodeSlot struct {
 
 func (x *NodeSlot) Reset() {
 	*x = NodeSlot{}
-	mi := &file_agent_proto_msgTypes[56]
+	mi := &file_agent_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4754,7 +5077,7 @@ func (x *NodeSlot) String() string {
 func (*NodeSlot) ProtoMessage() {}
 
 func (x *NodeSlot) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[56]
+	mi := &file_agent_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4767,7 +5090,7 @@ func (x *NodeSlot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeSlot.ProtoReflect.Descriptor instead.
 func (*NodeSlot) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{56}
+	return file_agent_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *NodeSlot) GetProviderId() string {
@@ -4828,7 +5151,7 @@ type NodeSlotsResponse struct {
 
 func (x *NodeSlotsResponse) Reset() {
 	*x = NodeSlotsResponse{}
-	mi := &file_agent_proto_msgTypes[57]
+	mi := &file_agent_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4840,7 +5163,7 @@ func (x *NodeSlotsResponse) String() string {
 func (*NodeSlotsResponse) ProtoMessage() {}
 
 func (x *NodeSlotsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[57]
+	mi := &file_agent_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4853,7 +5176,7 @@ func (x *NodeSlotsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeSlotsResponse.ProtoReflect.Descriptor instead.
 func (*NodeSlotsResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{57}
+	return file_agent_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *NodeSlotsResponse) GetSlots() []*NodeSlot {
@@ -4872,7 +5195,7 @@ type ReportDrainedRequest struct {
 
 func (x *ReportDrainedRequest) Reset() {
 	*x = ReportDrainedRequest{}
-	mi := &file_agent_proto_msgTypes[58]
+	mi := &file_agent_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4884,7 +5207,7 @@ func (x *ReportDrainedRequest) String() string {
 func (*ReportDrainedRequest) ProtoMessage() {}
 
 func (x *ReportDrainedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[58]
+	mi := &file_agent_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4897,7 +5220,7 @@ func (x *ReportDrainedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportDrainedRequest.ProtoReflect.Descriptor instead.
 func (*ReportDrainedRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{58}
+	return file_agent_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *ReportDrainedRequest) GetProviderId() string {
@@ -4915,7 +5238,7 @@ type ReportDrainedResponse struct {
 
 func (x *ReportDrainedResponse) Reset() {
 	*x = ReportDrainedResponse{}
-	mi := &file_agent_proto_msgTypes[59]
+	mi := &file_agent_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4927,7 +5250,7 @@ func (x *ReportDrainedResponse) String() string {
 func (*ReportDrainedResponse) ProtoMessage() {}
 
 func (x *ReportDrainedResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[59]
+	mi := &file_agent_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4940,7 +5263,7 @@ func (x *ReportDrainedResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportDrainedResponse.ProtoReflect.Descriptor instead.
 func (*ReportDrainedResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{59}
+	return file_agent_proto_rawDescGZIP(), []int{60}
 }
 
 type IssueJoinRequest struct {
@@ -4964,7 +5287,7 @@ type IssueJoinRequest struct {
 
 func (x *IssueJoinRequest) Reset() {
 	*x = IssueJoinRequest{}
-	mi := &file_agent_proto_msgTypes[60]
+	mi := &file_agent_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4976,7 +5299,7 @@ func (x *IssueJoinRequest) String() string {
 func (*IssueJoinRequest) ProtoMessage() {}
 
 func (x *IssueJoinRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[60]
+	mi := &file_agent_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4989,7 +5312,7 @@ func (x *IssueJoinRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueJoinRequest.ProtoReflect.Descriptor instead.
 func (*IssueJoinRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{60}
+	return file_agent_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *IssueJoinRequest) GetProviderId() string {
@@ -5049,7 +5372,7 @@ type IssueJoinResponse struct {
 
 func (x *IssueJoinResponse) Reset() {
 	*x = IssueJoinResponse{}
-	mi := &file_agent_proto_msgTypes[61]
+	mi := &file_agent_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5061,7 +5384,7 @@ func (x *IssueJoinResponse) String() string {
 func (*IssueJoinResponse) ProtoMessage() {}
 
 func (x *IssueJoinResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[61]
+	mi := &file_agent_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5074,7 +5397,7 @@ func (x *IssueJoinResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueJoinResponse.ProtoReflect.Descriptor instead.
 func (*IssueJoinResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{61}
+	return file_agent_proto_rawDescGZIP(), []int{62}
 }
 
 type ReportRegisteredRequest struct {
@@ -5086,7 +5409,7 @@ type ReportRegisteredRequest struct {
 
 func (x *ReportRegisteredRequest) Reset() {
 	*x = ReportRegisteredRequest{}
-	mi := &file_agent_proto_msgTypes[62]
+	mi := &file_agent_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5098,7 +5421,7 @@ func (x *ReportRegisteredRequest) String() string {
 func (*ReportRegisteredRequest) ProtoMessage() {}
 
 func (x *ReportRegisteredRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[62]
+	mi := &file_agent_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5111,7 +5434,7 @@ func (x *ReportRegisteredRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportRegisteredRequest.ProtoReflect.Descriptor instead.
 func (*ReportRegisteredRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{62}
+	return file_agent_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *ReportRegisteredRequest) GetProviderId() string {
@@ -5129,7 +5452,7 @@ type ReportRegisteredResponse struct {
 
 func (x *ReportRegisteredResponse) Reset() {
 	*x = ReportRegisteredResponse{}
-	mi := &file_agent_proto_msgTypes[63]
+	mi := &file_agent_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5141,7 +5464,7 @@ func (x *ReportRegisteredResponse) String() string {
 func (*ReportRegisteredResponse) ProtoMessage() {}
 
 func (x *ReportRegisteredResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[63]
+	mi := &file_agent_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5154,7 +5477,7 @@ func (x *ReportRegisteredResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportRegisteredResponse.ProtoReflect.Descriptor instead.
 func (*ReportRegisteredResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{63}
+	return file_agent_proto_rawDescGZIP(), []int{64}
 }
 
 type NodeJoinCredentialRequest struct {
@@ -5166,7 +5489,7 @@ type NodeJoinCredentialRequest struct {
 
 func (x *NodeJoinCredentialRequest) Reset() {
 	*x = NodeJoinCredentialRequest{}
-	mi := &file_agent_proto_msgTypes[64]
+	mi := &file_agent_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5178,7 +5501,7 @@ func (x *NodeJoinCredentialRequest) String() string {
 func (*NodeJoinCredentialRequest) ProtoMessage() {}
 
 func (x *NodeJoinCredentialRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[64]
+	mi := &file_agent_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5191,7 +5514,7 @@ func (x *NodeJoinCredentialRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeJoinCredentialRequest.ProtoReflect.Descriptor instead.
 func (*NodeJoinCredentialRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{64}
+	return file_agent_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *NodeJoinCredentialRequest) GetPublicKey() []byte {
@@ -5244,7 +5567,7 @@ type NodeJoinCredentialResponse struct {
 
 func (x *NodeJoinCredentialResponse) Reset() {
 	*x = NodeJoinCredentialResponse{}
-	mi := &file_agent_proto_msgTypes[65]
+	mi := &file_agent_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5256,7 +5579,7 @@ func (x *NodeJoinCredentialResponse) String() string {
 func (*NodeJoinCredentialResponse) ProtoMessage() {}
 
 func (x *NodeJoinCredentialResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[65]
+	mi := &file_agent_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5269,7 +5592,7 @@ func (x *NodeJoinCredentialResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeJoinCredentialResponse.ProtoReflect.Descriptor instead.
 func (*NodeJoinCredentialResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{65}
+	return file_agent_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *NodeJoinCredentialResponse) GetReady() bool {
@@ -5436,7 +5759,7 @@ type NodeJoinReport struct {
 
 func (x *NodeJoinReport) Reset() {
 	*x = NodeJoinReport{}
-	mi := &file_agent_proto_msgTypes[66]
+	mi := &file_agent_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5448,7 +5771,7 @@ func (x *NodeJoinReport) String() string {
 func (*NodeJoinReport) ProtoMessage() {}
 
 func (x *NodeJoinReport) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[66]
+	mi := &file_agent_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5461,7 +5784,7 @@ func (x *NodeJoinReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeJoinReport.ProtoReflect.Descriptor instead.
 func (*NodeJoinReport) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{66}
+	return file_agent_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *NodeJoinReport) GetReason() string {
@@ -5486,7 +5809,7 @@ type NodeJoinReportAck struct {
 
 func (x *NodeJoinReportAck) Reset() {
 	*x = NodeJoinReportAck{}
-	mi := &file_agent_proto_msgTypes[67]
+	mi := &file_agent_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5498,7 +5821,7 @@ func (x *NodeJoinReportAck) String() string {
 func (*NodeJoinReportAck) ProtoMessage() {}
 
 func (x *NodeJoinReportAck) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[67]
+	mi := &file_agent_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5511,7 +5834,7 @@ func (x *NodeJoinReportAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeJoinReportAck.ProtoReflect.Descriptor instead.
 func (*NodeJoinReportAck) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{67}
+	return file_agent_proto_rawDescGZIP(), []int{68}
 }
 
 type GetBackendRequest struct {
@@ -5523,7 +5846,7 @@ type GetBackendRequest struct {
 
 func (x *GetBackendRequest) Reset() {
 	*x = GetBackendRequest{}
-	mi := &file_agent_proto_msgTypes[68]
+	mi := &file_agent_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5535,7 +5858,7 @@ func (x *GetBackendRequest) String() string {
 func (*GetBackendRequest) ProtoMessage() {}
 
 func (x *GetBackendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[68]
+	mi := &file_agent_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5548,7 +5871,7 @@ func (x *GetBackendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBackendRequest.ProtoReflect.Descriptor instead.
 func (*GetBackendRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{68}
+	return file_agent_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *GetBackendRequest) GetBackendId() string {
@@ -5567,7 +5890,7 @@ type PowerOffRequest struct {
 
 func (x *PowerOffRequest) Reset() {
 	*x = PowerOffRequest{}
-	mi := &file_agent_proto_msgTypes[69]
+	mi := &file_agent_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5579,7 +5902,7 @@ func (x *PowerOffRequest) String() string {
 func (*PowerOffRequest) ProtoMessage() {}
 
 func (x *PowerOffRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[69]
+	mi := &file_agent_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5592,7 +5915,7 @@ func (x *PowerOffRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PowerOffRequest.ProtoReflect.Descriptor instead.
 func (*PowerOffRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{69}
+	return file_agent_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *PowerOffRequest) GetBackendId() string {
@@ -5610,7 +5933,7 @@ type PowerOffResponse struct {
 
 func (x *PowerOffResponse) Reset() {
 	*x = PowerOffResponse{}
-	mi := &file_agent_proto_msgTypes[70]
+	mi := &file_agent_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5622,7 +5945,7 @@ func (x *PowerOffResponse) String() string {
 func (*PowerOffResponse) ProtoMessage() {}
 
 func (x *PowerOffResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[70]
+	mi := &file_agent_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5635,7 +5958,7 @@ func (x *PowerOffResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PowerOffResponse.ProtoReflect.Descriptor instead.
 func (*PowerOffResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{70}
+	return file_agent_proto_rawDescGZIP(), []int{71}
 }
 
 type FenceRequest struct {
@@ -5648,7 +5971,7 @@ type FenceRequest struct {
 
 func (x *FenceRequest) Reset() {
 	*x = FenceRequest{}
-	mi := &file_agent_proto_msgTypes[71]
+	mi := &file_agent_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5660,7 +5983,7 @@ func (x *FenceRequest) String() string {
 func (*FenceRequest) ProtoMessage() {}
 
 func (x *FenceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[71]
+	mi := &file_agent_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5673,7 +5996,7 @@ func (x *FenceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FenceRequest.ProtoReflect.Descriptor instead.
 func (*FenceRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{71}
+	return file_agent_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *FenceRequest) GetBackendId() string {
@@ -5699,7 +6022,7 @@ type FenceResponse struct {
 
 func (x *FenceResponse) Reset() {
 	*x = FenceResponse{}
-	mi := &file_agent_proto_msgTypes[72]
+	mi := &file_agent_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5711,7 +6034,7 @@ func (x *FenceResponse) String() string {
 func (*FenceResponse) ProtoMessage() {}
 
 func (x *FenceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[72]
+	mi := &file_agent_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5724,7 +6047,7 @@ func (x *FenceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FenceResponse.ProtoReflect.Descriptor instead.
 func (*FenceResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{72}
+	return file_agent_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *FenceResponse) GetEvicted() bool {
@@ -5742,7 +6065,7 @@ type HubAck struct {
 
 func (x *HubAck) Reset() {
 	*x = HubAck{}
-	mi := &file_agent_proto_msgTypes[73]
+	mi := &file_agent_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5754,7 +6077,7 @@ func (x *HubAck) String() string {
 func (*HubAck) ProtoMessage() {}
 
 func (x *HubAck) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[73]
+	mi := &file_agent_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5767,7 +6090,7 @@ func (x *HubAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HubAck.ProtoReflect.Descriptor instead.
 func (*HubAck) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{73}
+	return file_agent_proto_rawDescGZIP(), []int{74}
 }
 
 type BackendSilence struct {
@@ -5783,7 +6106,7 @@ type BackendSilence struct {
 
 func (x *BackendSilence) Reset() {
 	*x = BackendSilence{}
-	mi := &file_agent_proto_msgTypes[74]
+	mi := &file_agent_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5795,7 +6118,7 @@ func (x *BackendSilence) String() string {
 func (*BackendSilence) ProtoMessage() {}
 
 func (x *BackendSilence) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[74]
+	mi := &file_agent_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5808,7 +6131,7 @@ func (x *BackendSilence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackendSilence.ProtoReflect.Descriptor instead.
 func (*BackendSilence) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{74}
+	return file_agent_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *BackendSilence) GetBackendId() string {
@@ -5852,7 +6175,7 @@ type PreemptionNoticeRequest struct {
 
 func (x *PreemptionNoticeRequest) Reset() {
 	*x = PreemptionNoticeRequest{}
-	mi := &file_agent_proto_msgTypes[75]
+	mi := &file_agent_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5864,7 +6187,7 @@ func (x *PreemptionNoticeRequest) String() string {
 func (*PreemptionNoticeRequest) ProtoMessage() {}
 
 func (x *PreemptionNoticeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[75]
+	mi := &file_agent_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5877,7 +6200,7 @@ func (x *PreemptionNoticeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PreemptionNoticeRequest.ProtoReflect.Descriptor instead.
 func (*PreemptionNoticeRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{75}
+	return file_agent_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *PreemptionNoticeRequest) GetBackendId() string {
@@ -5918,7 +6241,7 @@ type HubExecutionReport struct {
 
 func (x *HubExecutionReport) Reset() {
 	*x = HubExecutionReport{}
-	mi := &file_agent_proto_msgTypes[76]
+	mi := &file_agent_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5930,7 +6253,7 @@ func (x *HubExecutionReport) String() string {
 func (*HubExecutionReport) ProtoMessage() {}
 
 func (x *HubExecutionReport) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[76]
+	mi := &file_agent_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5943,7 +6266,7 @@ func (x *HubExecutionReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HubExecutionReport.ProtoReflect.Descriptor instead.
 func (*HubExecutionReport) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{76}
+	return file_agent_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *HubExecutionReport) GetBackendId() string {
@@ -5981,7 +6304,7 @@ type CheckpointCommit struct {
 
 func (x *CheckpointCommit) Reset() {
 	*x = CheckpointCommit{}
-	mi := &file_agent_proto_msgTypes[77]
+	mi := &file_agent_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5993,7 +6316,7 @@ func (x *CheckpointCommit) String() string {
 func (*CheckpointCommit) ProtoMessage() {}
 
 func (x *CheckpointCommit) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[77]
+	mi := &file_agent_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6006,7 +6329,7 @@ func (x *CheckpointCommit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointCommit.ProtoReflect.Descriptor instead.
 func (*CheckpointCommit) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{77}
+	return file_agent_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *CheckpointCommit) GetBackendId() string {
@@ -6092,7 +6415,7 @@ type CheckpointAck struct {
 
 func (x *CheckpointAck) Reset() {
 	*x = CheckpointAck{}
-	mi := &file_agent_proto_msgTypes[78]
+	mi := &file_agent_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6104,7 +6427,7 @@ func (x *CheckpointAck) String() string {
 func (*CheckpointAck) ProtoMessage() {}
 
 func (x *CheckpointAck) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[78]
+	mi := &file_agent_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6117,7 +6440,7 @@ func (x *CheckpointAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointAck.ProtoReflect.Descriptor instead.
 func (*CheckpointAck) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{78}
+	return file_agent_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *CheckpointAck) GetJobId() string {
@@ -6177,7 +6500,7 @@ type HubRegisterRequest struct {
 
 func (x *HubRegisterRequest) Reset() {
 	*x = HubRegisterRequest{}
-	mi := &file_agent_proto_msgTypes[79]
+	mi := &file_agent_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6189,7 +6512,7 @@ func (x *HubRegisterRequest) String() string {
 func (*HubRegisterRequest) ProtoMessage() {}
 
 func (x *HubRegisterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[79]
+	mi := &file_agent_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6202,7 +6525,7 @@ func (x *HubRegisterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HubRegisterRequest.ProtoReflect.Descriptor instead.
 func (*HubRegisterRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{79}
+	return file_agent_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *HubRegisterRequest) GetBackendId() string {
@@ -6241,7 +6564,7 @@ type ListDrainedRequest struct {
 
 func (x *ListDrainedRequest) Reset() {
 	*x = ListDrainedRequest{}
-	mi := &file_agent_proto_msgTypes[80]
+	mi := &file_agent_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6253,7 +6576,7 @@ func (x *ListDrainedRequest) String() string {
 func (*ListDrainedRequest) ProtoMessage() {}
 
 func (x *ListDrainedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[80]
+	mi := &file_agent_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6266,7 +6589,7 @@ func (x *ListDrainedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDrainedRequest.ProtoReflect.Descriptor instead.
 func (*ListDrainedRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{80}
+	return file_agent_proto_rawDescGZIP(), []int{81}
 }
 
 type ListDrainedResponse struct {
@@ -6278,7 +6601,7 @@ type ListDrainedResponse struct {
 
 func (x *ListDrainedResponse) Reset() {
 	*x = ListDrainedResponse{}
-	mi := &file_agent_proto_msgTypes[81]
+	mi := &file_agent_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6290,7 +6613,7 @@ func (x *ListDrainedResponse) String() string {
 func (*ListDrainedResponse) ProtoMessage() {}
 
 func (x *ListDrainedResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[81]
+	mi := &file_agent_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6303,7 +6626,7 @@ func (x *ListDrainedResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDrainedResponse.ProtoReflect.Descriptor instead.
 func (*ListDrainedResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{81}
+	return file_agent_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *ListDrainedResponse) GetBackendIds() []string {
@@ -6335,7 +6658,7 @@ type PrepareItem struct {
 
 func (x *PrepareItem) Reset() {
 	*x = PrepareItem{}
-	mi := &file_agent_proto_msgTypes[82]
+	mi := &file_agent_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6347,7 +6670,7 @@ func (x *PrepareItem) String() string {
 func (*PrepareItem) ProtoMessage() {}
 
 func (x *PrepareItem) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[82]
+	mi := &file_agent_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6360,7 +6683,7 @@ func (x *PrepareItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareItem.ProtoReflect.Descriptor instead.
 func (*PrepareItem) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{82}
+	return file_agent_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *PrepareItem) GetRef() string {
@@ -6440,7 +6763,7 @@ type PrepareRequest struct {
 
 func (x *PrepareRequest) Reset() {
 	*x = PrepareRequest{}
-	mi := &file_agent_proto_msgTypes[83]
+	mi := &file_agent_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6452,7 +6775,7 @@ func (x *PrepareRequest) String() string {
 func (*PrepareRequest) ProtoMessage() {}
 
 func (x *PrepareRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[83]
+	mi := &file_agent_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6465,7 +6788,7 @@ func (x *PrepareRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareRequest.ProtoReflect.Descriptor instead.
 func (*PrepareRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{83}
+	return file_agent_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *PrepareRequest) GetRequestId() string {
@@ -6530,7 +6853,7 @@ type PrepareKubernetes struct {
 
 func (x *PrepareKubernetes) Reset() {
 	*x = PrepareKubernetes{}
-	mi := &file_agent_proto_msgTypes[84]
+	mi := &file_agent_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6542,7 +6865,7 @@ func (x *PrepareKubernetes) String() string {
 func (*PrepareKubernetes) ProtoMessage() {}
 
 func (x *PrepareKubernetes) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[84]
+	mi := &file_agent_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6555,7 +6878,7 @@ func (x *PrepareKubernetes) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareKubernetes.ProtoReflect.Descriptor instead.
 func (*PrepareKubernetes) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{84}
+	return file_agent_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *PrepareKubernetes) GetNodeSelector() map[string]string {
@@ -6595,7 +6918,7 @@ type PrepareItemStatus struct {
 
 func (x *PrepareItemStatus) Reset() {
 	*x = PrepareItemStatus{}
-	mi := &file_agent_proto_msgTypes[85]
+	mi := &file_agent_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6607,7 +6930,7 @@ func (x *PrepareItemStatus) String() string {
 func (*PrepareItemStatus) ProtoMessage() {}
 
 func (x *PrepareItemStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[85]
+	mi := &file_agent_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6620,7 +6943,7 @@ func (x *PrepareItemStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareItemStatus.ProtoReflect.Descriptor instead.
 func (*PrepareItemStatus) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{85}
+	return file_agent_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *PrepareItemStatus) GetRef() string {
@@ -6671,7 +6994,7 @@ type PrepareResponse struct {
 
 func (x *PrepareResponse) Reset() {
 	*x = PrepareResponse{}
-	mi := &file_agent_proto_msgTypes[86]
+	mi := &file_agent_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6683,7 +7006,7 @@ func (x *PrepareResponse) String() string {
 func (*PrepareResponse) ProtoMessage() {}
 
 func (x *PrepareResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[86]
+	mi := &file_agent_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6696,7 +7019,7 @@ func (x *PrepareResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareResponse.ProtoReflect.Descriptor instead.
 func (*PrepareResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{86}
+	return file_agent_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *PrepareResponse) GetRequestId() string {
@@ -6759,7 +7082,7 @@ type ChildSpawnRequest struct {
 
 func (x *ChildSpawnRequest) Reset() {
 	*x = ChildSpawnRequest{}
-	mi := &file_agent_proto_msgTypes[87]
+	mi := &file_agent_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6771,7 +7094,7 @@ func (x *ChildSpawnRequest) String() string {
 func (*ChildSpawnRequest) ProtoMessage() {}
 
 func (x *ChildSpawnRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[87]
+	mi := &file_agent_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6784,7 +7107,7 @@ func (x *ChildSpawnRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChildSpawnRequest.ProtoReflect.Descriptor instead.
 func (*ChildSpawnRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{87}
+	return file_agent_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *ChildSpawnRequest) GetBackendId() string {
@@ -6872,7 +7195,7 @@ type ChildStatus struct {
 
 func (x *ChildStatus) Reset() {
 	*x = ChildStatus{}
-	mi := &file_agent_proto_msgTypes[88]
+	mi := &file_agent_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6884,7 +7207,7 @@ func (x *ChildStatus) String() string {
 func (*ChildStatus) ProtoMessage() {}
 
 func (x *ChildStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[88]
+	mi := &file_agent_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6897,7 +7220,7 @@ func (x *ChildStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChildStatus.ProtoReflect.Descriptor instead.
 func (*ChildStatus) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{88}
+	return file_agent_proto_rawDescGZIP(), []int{89}
 }
 
 func (x *ChildStatus) GetGroup() string {
@@ -6951,7 +7274,7 @@ type ChildSpawnAck struct {
 
 func (x *ChildSpawnAck) Reset() {
 	*x = ChildSpawnAck{}
-	mi := &file_agent_proto_msgTypes[89]
+	mi := &file_agent_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6963,7 +7286,7 @@ func (x *ChildSpawnAck) String() string {
 func (*ChildSpawnAck) ProtoMessage() {}
 
 func (x *ChildSpawnAck) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[89]
+	mi := &file_agent_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6976,7 +7299,7 @@ func (x *ChildSpawnAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChildSpawnAck.ProtoReflect.Descriptor instead.
 func (*ChildSpawnAck) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{89}
+	return file_agent_proto_rawDescGZIP(), []int{90}
 }
 
 func (x *ChildSpawnAck) GetRequestId() string {
@@ -7238,7 +7561,7 @@ const file_agent_proto_rawDesc = "" +
 	"\x1arebalance_recommended_unix\x18\x0e \x01(\x03R\x18rebalanceRecommendedUnix\x12'\n" +
 	"\x0fruntime_failure\x18\x0f \x01(\tR\x0eruntimeFailure\"5\n" +
 	"\fHeartbeatAck\x12%\n" +
-	"\x0etimestamp_unix\x18\x01 \x01(\x03R\rtimestampUnix\"\xbf\x01\n" +
+	"\x0etimestamp_unix\x18\x01 \x01(\x03R\rtimestampUnix\"\xfa\x01\n" +
 	"\x11StreamLogsRequest\x12\x1d\n" +
 	"\n" +
 	"backend_id\x18\x01 \x01(\tR\tbackendId\x12\x15\n" +
@@ -7248,12 +7571,33 @@ const file_agent_proto_rawDesc = "" +
 	"\x06follow\x18\x04 \x01(\bR\x06follow\x12\x1d\n" +
 	"\n" +
 	"tail_lines\x18\x05 \x01(\x05R\ttailLines\x12\x1c\n" +
-	"\tsummarize\x18\x06 \x01(\bR\tsummarize\"{\n" +
+	"\tsummarize\x18\x06 \x01(\bR\tsummarize\x12\x14\n" +
+	"\x05after\x18\a \x01(\tR\x05after\x12#\n" +
+	"\rhistory_bytes\x18\b \x01(\x03R\fhistoryBytes\"\xe1\x01\n" +
+	"\rPodLogRequest\x12\x1c\n" +
+	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x10\n" +
+	"\x03pod\x18\x02 \x01(\tR\x03pod\x12\x10\n" +
+	"\x03uid\x18\x03 \x01(\tR\x03uid\x12\x1c\n" +
+	"\tcontainer\x18\x04 \x01(\tR\tcontainer\x12\x16\n" +
+	"\x06follow\x18\x05 \x01(\bR\x06follow\x12\x1d\n" +
+	"\n" +
+	"tail_lines\x18\x06 \x01(\x05R\ttailLines\x12#\n" +
+	"\rhistory_bytes\x18\a \x01(\x03R\fhistoryBytes\x12\x14\n" +
+	"\x05after\x18\b \x01(\tR\x05after\"\xeb\x02\n" +
 	"\bLogChunk\x12\x16\n" +
 	"\x06stream\x18\x01 \x01(\tR\x06stream\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12%\n" +
-	"\x0etimestamp_unix\x18\x03 \x01(\x03R\rtimestampUnix\x12\x1c\n" +
-	"\ttruncated\x18\x04 \x01(\bR\ttruncated\"\xd3\x01\n" +
+	"\x0etimestamp_unix\x18\x03 \x01(\x03R\rtimestampUnix\x12\x16\n" +
+	"\x06cursor\x18\x05 \x01(\tR\x06cursor\x12\x10\n" +
+	"\x03gap\x18\x06 \x01(\x03R\x03gap\x12;\n" +
+	"\n" +
+	"gap_reason\x18\a \x01(\x0e2\x1c.zenthros.agent.v1.GapReasonR\tgapReason\x12\x18\n" +
+	"\aomitted\x18\b \x01(\x03R\aomitted\x12\x16\n" +
+	"\x06handle\x18\t \x01(\tR\x06handle\x12\x18\n" +
+	"\aattempt\x18\n" +
+	" \x01(\x05R\aattempt\x12:\n" +
+	"\bencoding\x18\v \x01(\x0e2\x1e.zenthros.agent.v1.LogEncodingR\bencoding\x12\x17\n" +
+	"\araw_len\x18\f \x01(\x03R\x06rawLenJ\x04\b\x04\x10\x05\"\xd3\x01\n" +
 	"\x13LogChannelFromAgent\x12\x1d\n" +
 	"\n" +
 	"backend_id\x18\x01 \x01(\tR\tbackendId\x12#\n" +
@@ -7267,14 +7611,17 @@ const file_agent_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x128\n" +
 	"\x04pull\x18\x02 \x01(\v2$.zenthros.agent.v1.StreamLogsRequestR\x04pull\x12\x16\n" +
-	"\x06cancel\x18\x03 \x01(\bR\x06cancel\"\x99\x01\n" +
+	"\x06cancel\x18\x03 \x01(\bR\x06cancel\"\xec\x01\n" +
 	"\rJobLogRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x16\n" +
 	"\x06follow\x18\x03 \x01(\bR\x06follow\x12\x1d\n" +
 	"\n" +
 	"tail_lines\x18\x04 \x01(\x05R\ttailLines\x12\x1c\n" +
-	"\tsummarize\x18\x05 \x01(\bR\tsummarize\"K\n" +
+	"\tsummarize\x18\x05 \x01(\bR\tsummarize\x12\x14\n" +
+	"\x05after\x18\x06 \x01(\tR\x05after\x12\x16\n" +
+	"\x06handle\x18\a \x01(\tR\x06handle\x12#\n" +
+	"\rhistory_bytes\x18\b \x01(\x03R\fhistoryBytes\"K\n" +
 	"\x14DeleteBackendRequest\x12\x1d\n" +
 	"\n" +
 	"backend_id\x18\x01 \x01(\tR\tbackendId\x12\x14\n" +
@@ -7653,7 +8000,14 @@ const file_agent_proto_rawDesc = "" +
 	"\tFORBIDDEN\x10\r\x12\v\n" +
 	"\aINVALID\x10\x0e\x12\r\n" +
 	"\tNOT_FOUND\x10\x0f\x12\x1b\n" +
-	"\x17DESTINATION_UNAVAILABLE\x10\x10*b\n" +
+	"\x17DESTINATION_UNAVAILABLE\x10\x10*(\n" +
+	"\vLogEncoding\x12\v\n" +
+	"\aLOG_RAW\x10\x00\x12\f\n" +
+	"\bLOG_ZSTD\x10\x01**\n" +
+	"\tGapReason\x12\r\n" +
+	"\tGAP_FREED\x10\x00\x12\x0e\n" +
+	"\n" +
+	"GAP_BUDGET\x10\x01*b\n" +
 	"\vSilenceKind\x12\x17\n" +
 	"\x13SILENCE_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eSILENCE_SILENT\x10\x01\x12\x10\n" +
@@ -7667,7 +8021,10 @@ const file_agent_proto_rawDesc = "" +
 	"LogChannel\x12&.zenthros.agent.v1.LogChannelFromAgent\x1a(.zenthros.agent.v1.LogChannelFromGateway(\x010\x012^\n" +
 	"\tAgentLogs\x12Q\n" +
 	"\n" +
-	"StreamLogs\x12$.zenthros.agent.v1.StreamLogsRequest\x1a\x1b.zenthros.agent.v1.LogChunk0\x012U\n" +
+	"StreamLogs\x12$.zenthros.agent.v1.StreamLogsRequest\x1a\x1b.zenthros.agent.v1.LogChunk0\x012Y\n" +
+	"\bNodeLogs\x12M\n" +
+	"\n" +
+	"ReadPodLog\x12 .zenthros.agent.v1.PodLogRequest\x1a\x1b.zenthros.agent.v1.LogChunk0\x012U\n" +
 	"\n" +
 	"LogService\x12G\n" +
 	"\x04Logs\x12 .zenthros.agent.v1.JobLogRequest\x1a\x1b.zenthros.agent.v1.LogChunk0\x012\xdd\x04\n" +
@@ -7734,253 +8091,260 @@ func file_agent_proto_rawDescGZIP() []byte {
 	return file_agent_proto_rawDescData
 }
 
-var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 93)
+var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 94)
 var file_agent_proto_goTypes = []any{
 	(ErrorClass)(0),                    // 0: zenthros.agent.v1.ErrorClass
-	(SilenceKind)(0),                   // 1: zenthros.agent.v1.SilenceKind
-	(*EnrollRequest)(nil),              // 2: zenthros.agent.v1.EnrollRequest
-	(*EnrollResponse)(nil),             // 3: zenthros.agent.v1.EnrollResponse
-	(*RenewRequest)(nil),               // 4: zenthros.agent.v1.RenewRequest
-	(*HubRenewRequest)(nil),            // 5: zenthros.agent.v1.HubRenewRequest
-	(*RegisterRequest)(nil),            // 6: zenthros.agent.v1.RegisterRequest
-	(*RegisterResponse)(nil),           // 7: zenthros.agent.v1.RegisterResponse
-	(*OpenLogChannel)(nil),             // 8: zenthros.agent.v1.OpenLogChannel
-	(*PowerOff)(nil),                   // 9: zenthros.agent.v1.PowerOff
-	(*Advertise)(nil),                  // 10: zenthros.agent.v1.Advertise
-	(*WorkloadCapability)(nil),         // 11: zenthros.agent.v1.WorkloadCapability
-	(*HostFacts)(nil),                  // 12: zenthros.agent.v1.HostFacts
-	(*NodeFacts)(nil),                  // 13: zenthros.agent.v1.NodeFacts
-	(*JobEnvelope)(nil),                // 14: zenthros.agent.v1.JobEnvelope
-	(*SubmitRequest)(nil),              // 15: zenthros.agent.v1.SubmitRequest
-	(*SubmitResponse)(nil),             // 16: zenthros.agent.v1.SubmitResponse
-	(*CancelRequest)(nil),              // 17: zenthros.agent.v1.CancelRequest
-	(*CancelResponse)(nil),             // 18: zenthros.agent.v1.CancelResponse
-	(*StatusRequest)(nil),              // 19: zenthros.agent.v1.StatusRequest
-	(*Reason)(nil),                     // 20: zenthros.agent.v1.Reason
-	(*JobStatus)(nil),                  // 21: zenthros.agent.v1.JobStatus
-	(*Endpoint)(nil),                   // 22: zenthros.agent.v1.Endpoint
-	(*JobHandle)(nil),                  // 23: zenthros.agent.v1.JobHandle
-	(*StatusResponse)(nil),             // 24: zenthros.agent.v1.StatusResponse
-	(*StatusUpdate)(nil),               // 25: zenthros.agent.v1.StatusUpdate
-	(*Heartbeat)(nil),                  // 26: zenthros.agent.v1.Heartbeat
-	(*HeartbeatAck)(nil),               // 27: zenthros.agent.v1.HeartbeatAck
-	(*StreamLogsRequest)(nil),          // 28: zenthros.agent.v1.StreamLogsRequest
-	(*LogChunk)(nil),                   // 29: zenthros.agent.v1.LogChunk
-	(*LogChannelFromAgent)(nil),        // 30: zenthros.agent.v1.LogChannelFromAgent
-	(*LogChannelFromGateway)(nil),      // 31: zenthros.agent.v1.LogChannelFromGateway
-	(*JobLogRequest)(nil),              // 32: zenthros.agent.v1.JobLogRequest
-	(*DeleteBackendRequest)(nil),       // 33: zenthros.agent.v1.DeleteBackendRequest
-	(*DeleteBackendResponse)(nil),      // 34: zenthros.agent.v1.DeleteBackendResponse
-	(*TailnetDevice)(nil),              // 35: zenthros.agent.v1.TailnetDevice
-	(*ListBackendsRequest)(nil),        // 36: zenthros.agent.v1.ListBackendsRequest
-	(*BackendInfo)(nil),                // 37: zenthros.agent.v1.BackendInfo
-	(*ListBackendsResponse)(nil),       // 38: zenthros.agent.v1.ListBackendsResponse
-	(*RefusedBackend)(nil),             // 39: zenthros.agent.v1.RefusedBackend
-	(*DrainBackendRequest)(nil),        // 40: zenthros.agent.v1.DrainBackendRequest
-	(*DrainBackendResponse)(nil),       // 41: zenthros.agent.v1.DrainBackendResponse
-	(*UndrainBackendRequest)(nil),      // 42: zenthros.agent.v1.UndrainBackendRequest
-	(*UndrainBackendResponse)(nil),     // 43: zenthros.agent.v1.UndrainBackendResponse
-	(*JoinBackendRequest)(nil),         // 44: zenthros.agent.v1.JoinBackendRequest
-	(*JoinBackendResponse)(nil),        // 45: zenthros.agent.v1.JoinBackendResponse
-	(*RetireBackendRequest)(nil),       // 46: zenthros.agent.v1.RetireBackendRequest
-	(*RetireBackendResponse)(nil),      // 47: zenthros.agent.v1.RetireBackendResponse
-	(*ArtifactRef)(nil),                // 48: zenthros.agent.v1.ArtifactRef
-	(*ExecutionReport)(nil),            // 49: zenthros.agent.v1.ExecutionReport
-	(*ExecutionReportAck)(nil),         // 50: zenthros.agent.v1.ExecutionReportAck
-	(*GetCurrentReportRequest)(nil),    // 51: zenthros.agent.v1.GetCurrentReportRequest
-	(*GetCurrentReportResponse)(nil),   // 52: zenthros.agent.v1.GetCurrentReportResponse
-	(*ListCurrentReportsRequest)(nil),  // 53: zenthros.agent.v1.ListCurrentReportsRequest
-	(*ListCurrentReportsResponse)(nil), // 54: zenthros.agent.v1.ListCurrentReportsResponse
-	(*ClusterReport)(nil),              // 55: zenthros.agent.v1.ClusterReport
-	(*ClusterReportAck)(nil),           // 56: zenthros.agent.v1.ClusterReportAck
-	(*NodeSlotsRequest)(nil),           // 57: zenthros.agent.v1.NodeSlotsRequest
-	(*NodeSlot)(nil),                   // 58: zenthros.agent.v1.NodeSlot
-	(*NodeSlotsResponse)(nil),          // 59: zenthros.agent.v1.NodeSlotsResponse
-	(*ReportDrainedRequest)(nil),       // 60: zenthros.agent.v1.ReportDrainedRequest
-	(*ReportDrainedResponse)(nil),      // 61: zenthros.agent.v1.ReportDrainedResponse
-	(*IssueJoinRequest)(nil),           // 62: zenthros.agent.v1.IssueJoinRequest
-	(*IssueJoinResponse)(nil),          // 63: zenthros.agent.v1.IssueJoinResponse
-	(*ReportRegisteredRequest)(nil),    // 64: zenthros.agent.v1.ReportRegisteredRequest
-	(*ReportRegisteredResponse)(nil),   // 65: zenthros.agent.v1.ReportRegisteredResponse
-	(*NodeJoinCredentialRequest)(nil),  // 66: zenthros.agent.v1.NodeJoinCredentialRequest
-	(*NodeJoinCredentialResponse)(nil), // 67: zenthros.agent.v1.NodeJoinCredentialResponse
-	(*NodeJoinReport)(nil),             // 68: zenthros.agent.v1.NodeJoinReport
-	(*NodeJoinReportAck)(nil),          // 69: zenthros.agent.v1.NodeJoinReportAck
-	(*GetBackendRequest)(nil),          // 70: zenthros.agent.v1.GetBackendRequest
-	(*PowerOffRequest)(nil),            // 71: zenthros.agent.v1.PowerOffRequest
-	(*PowerOffResponse)(nil),           // 72: zenthros.agent.v1.PowerOffResponse
-	(*FenceRequest)(nil),               // 73: zenthros.agent.v1.FenceRequest
-	(*FenceResponse)(nil),              // 74: zenthros.agent.v1.FenceResponse
-	(*HubAck)(nil),                     // 75: zenthros.agent.v1.HubAck
-	(*BackendSilence)(nil),             // 76: zenthros.agent.v1.BackendSilence
-	(*PreemptionNoticeRequest)(nil),    // 77: zenthros.agent.v1.PreemptionNoticeRequest
-	(*HubExecutionReport)(nil),         // 78: zenthros.agent.v1.HubExecutionReport
-	(*CheckpointCommit)(nil),           // 79: zenthros.agent.v1.CheckpointCommit
-	(*CheckpointAck)(nil),              // 80: zenthros.agent.v1.CheckpointAck
-	(*HubRegisterRequest)(nil),         // 81: zenthros.agent.v1.HubRegisterRequest
-	(*ListDrainedRequest)(nil),         // 82: zenthros.agent.v1.ListDrainedRequest
-	(*ListDrainedResponse)(nil),        // 83: zenthros.agent.v1.ListDrainedResponse
-	(*PrepareItem)(nil),                // 84: zenthros.agent.v1.PrepareItem
-	(*PrepareRequest)(nil),             // 85: zenthros.agent.v1.PrepareRequest
-	(*PrepareKubernetes)(nil),          // 86: zenthros.agent.v1.PrepareKubernetes
-	(*PrepareItemStatus)(nil),          // 87: zenthros.agent.v1.PrepareItemStatus
-	(*PrepareResponse)(nil),            // 88: zenthros.agent.v1.PrepareResponse
-	(*ChildSpawnRequest)(nil),          // 89: zenthros.agent.v1.ChildSpawnRequest
-	(*ChildStatus)(nil),                // 90: zenthros.agent.v1.ChildStatus
-	(*ChildSpawnAck)(nil),              // 91: zenthros.agent.v1.ChildSpawnAck
-	nil,                                // 92: zenthros.agent.v1.NodeJoinCredentialResponse.LabelsEntry
-	nil,                                // 93: zenthros.agent.v1.PrepareKubernetes.NodeSelectorEntry
-	nil,                                // 94: zenthros.agent.v1.ChildSpawnRequest.EnvEntry
+	(LogEncoding)(0),                   // 1: zenthros.agent.v1.LogEncoding
+	(GapReason)(0),                     // 2: zenthros.agent.v1.GapReason
+	(SilenceKind)(0),                   // 3: zenthros.agent.v1.SilenceKind
+	(*EnrollRequest)(nil),              // 4: zenthros.agent.v1.EnrollRequest
+	(*EnrollResponse)(nil),             // 5: zenthros.agent.v1.EnrollResponse
+	(*RenewRequest)(nil),               // 6: zenthros.agent.v1.RenewRequest
+	(*HubRenewRequest)(nil),            // 7: zenthros.agent.v1.HubRenewRequest
+	(*RegisterRequest)(nil),            // 8: zenthros.agent.v1.RegisterRequest
+	(*RegisterResponse)(nil),           // 9: zenthros.agent.v1.RegisterResponse
+	(*OpenLogChannel)(nil),             // 10: zenthros.agent.v1.OpenLogChannel
+	(*PowerOff)(nil),                   // 11: zenthros.agent.v1.PowerOff
+	(*Advertise)(nil),                  // 12: zenthros.agent.v1.Advertise
+	(*WorkloadCapability)(nil),         // 13: zenthros.agent.v1.WorkloadCapability
+	(*HostFacts)(nil),                  // 14: zenthros.agent.v1.HostFacts
+	(*NodeFacts)(nil),                  // 15: zenthros.agent.v1.NodeFacts
+	(*JobEnvelope)(nil),                // 16: zenthros.agent.v1.JobEnvelope
+	(*SubmitRequest)(nil),              // 17: zenthros.agent.v1.SubmitRequest
+	(*SubmitResponse)(nil),             // 18: zenthros.agent.v1.SubmitResponse
+	(*CancelRequest)(nil),              // 19: zenthros.agent.v1.CancelRequest
+	(*CancelResponse)(nil),             // 20: zenthros.agent.v1.CancelResponse
+	(*StatusRequest)(nil),              // 21: zenthros.agent.v1.StatusRequest
+	(*Reason)(nil),                     // 22: zenthros.agent.v1.Reason
+	(*JobStatus)(nil),                  // 23: zenthros.agent.v1.JobStatus
+	(*Endpoint)(nil),                   // 24: zenthros.agent.v1.Endpoint
+	(*JobHandle)(nil),                  // 25: zenthros.agent.v1.JobHandle
+	(*StatusResponse)(nil),             // 26: zenthros.agent.v1.StatusResponse
+	(*StatusUpdate)(nil),               // 27: zenthros.agent.v1.StatusUpdate
+	(*Heartbeat)(nil),                  // 28: zenthros.agent.v1.Heartbeat
+	(*HeartbeatAck)(nil),               // 29: zenthros.agent.v1.HeartbeatAck
+	(*StreamLogsRequest)(nil),          // 30: zenthros.agent.v1.StreamLogsRequest
+	(*PodLogRequest)(nil),              // 31: zenthros.agent.v1.PodLogRequest
+	(*LogChunk)(nil),                   // 32: zenthros.agent.v1.LogChunk
+	(*LogChannelFromAgent)(nil),        // 33: zenthros.agent.v1.LogChannelFromAgent
+	(*LogChannelFromGateway)(nil),      // 34: zenthros.agent.v1.LogChannelFromGateway
+	(*JobLogRequest)(nil),              // 35: zenthros.agent.v1.JobLogRequest
+	(*DeleteBackendRequest)(nil),       // 36: zenthros.agent.v1.DeleteBackendRequest
+	(*DeleteBackendResponse)(nil),      // 37: zenthros.agent.v1.DeleteBackendResponse
+	(*TailnetDevice)(nil),              // 38: zenthros.agent.v1.TailnetDevice
+	(*ListBackendsRequest)(nil),        // 39: zenthros.agent.v1.ListBackendsRequest
+	(*BackendInfo)(nil),                // 40: zenthros.agent.v1.BackendInfo
+	(*ListBackendsResponse)(nil),       // 41: zenthros.agent.v1.ListBackendsResponse
+	(*RefusedBackend)(nil),             // 42: zenthros.agent.v1.RefusedBackend
+	(*DrainBackendRequest)(nil),        // 43: zenthros.agent.v1.DrainBackendRequest
+	(*DrainBackendResponse)(nil),       // 44: zenthros.agent.v1.DrainBackendResponse
+	(*UndrainBackendRequest)(nil),      // 45: zenthros.agent.v1.UndrainBackendRequest
+	(*UndrainBackendResponse)(nil),     // 46: zenthros.agent.v1.UndrainBackendResponse
+	(*JoinBackendRequest)(nil),         // 47: zenthros.agent.v1.JoinBackendRequest
+	(*JoinBackendResponse)(nil),        // 48: zenthros.agent.v1.JoinBackendResponse
+	(*RetireBackendRequest)(nil),       // 49: zenthros.agent.v1.RetireBackendRequest
+	(*RetireBackendResponse)(nil),      // 50: zenthros.agent.v1.RetireBackendResponse
+	(*ArtifactRef)(nil),                // 51: zenthros.agent.v1.ArtifactRef
+	(*ExecutionReport)(nil),            // 52: zenthros.agent.v1.ExecutionReport
+	(*ExecutionReportAck)(nil),         // 53: zenthros.agent.v1.ExecutionReportAck
+	(*GetCurrentReportRequest)(nil),    // 54: zenthros.agent.v1.GetCurrentReportRequest
+	(*GetCurrentReportResponse)(nil),   // 55: zenthros.agent.v1.GetCurrentReportResponse
+	(*ListCurrentReportsRequest)(nil),  // 56: zenthros.agent.v1.ListCurrentReportsRequest
+	(*ListCurrentReportsResponse)(nil), // 57: zenthros.agent.v1.ListCurrentReportsResponse
+	(*ClusterReport)(nil),              // 58: zenthros.agent.v1.ClusterReport
+	(*ClusterReportAck)(nil),           // 59: zenthros.agent.v1.ClusterReportAck
+	(*NodeSlotsRequest)(nil),           // 60: zenthros.agent.v1.NodeSlotsRequest
+	(*NodeSlot)(nil),                   // 61: zenthros.agent.v1.NodeSlot
+	(*NodeSlotsResponse)(nil),          // 62: zenthros.agent.v1.NodeSlotsResponse
+	(*ReportDrainedRequest)(nil),       // 63: zenthros.agent.v1.ReportDrainedRequest
+	(*ReportDrainedResponse)(nil),      // 64: zenthros.agent.v1.ReportDrainedResponse
+	(*IssueJoinRequest)(nil),           // 65: zenthros.agent.v1.IssueJoinRequest
+	(*IssueJoinResponse)(nil),          // 66: zenthros.agent.v1.IssueJoinResponse
+	(*ReportRegisteredRequest)(nil),    // 67: zenthros.agent.v1.ReportRegisteredRequest
+	(*ReportRegisteredResponse)(nil),   // 68: zenthros.agent.v1.ReportRegisteredResponse
+	(*NodeJoinCredentialRequest)(nil),  // 69: zenthros.agent.v1.NodeJoinCredentialRequest
+	(*NodeJoinCredentialResponse)(nil), // 70: zenthros.agent.v1.NodeJoinCredentialResponse
+	(*NodeJoinReport)(nil),             // 71: zenthros.agent.v1.NodeJoinReport
+	(*NodeJoinReportAck)(nil),          // 72: zenthros.agent.v1.NodeJoinReportAck
+	(*GetBackendRequest)(nil),          // 73: zenthros.agent.v1.GetBackendRequest
+	(*PowerOffRequest)(nil),            // 74: zenthros.agent.v1.PowerOffRequest
+	(*PowerOffResponse)(nil),           // 75: zenthros.agent.v1.PowerOffResponse
+	(*FenceRequest)(nil),               // 76: zenthros.agent.v1.FenceRequest
+	(*FenceResponse)(nil),              // 77: zenthros.agent.v1.FenceResponse
+	(*HubAck)(nil),                     // 78: zenthros.agent.v1.HubAck
+	(*BackendSilence)(nil),             // 79: zenthros.agent.v1.BackendSilence
+	(*PreemptionNoticeRequest)(nil),    // 80: zenthros.agent.v1.PreemptionNoticeRequest
+	(*HubExecutionReport)(nil),         // 81: zenthros.agent.v1.HubExecutionReport
+	(*CheckpointCommit)(nil),           // 82: zenthros.agent.v1.CheckpointCommit
+	(*CheckpointAck)(nil),              // 83: zenthros.agent.v1.CheckpointAck
+	(*HubRegisterRequest)(nil),         // 84: zenthros.agent.v1.HubRegisterRequest
+	(*ListDrainedRequest)(nil),         // 85: zenthros.agent.v1.ListDrainedRequest
+	(*ListDrainedResponse)(nil),        // 86: zenthros.agent.v1.ListDrainedResponse
+	(*PrepareItem)(nil),                // 87: zenthros.agent.v1.PrepareItem
+	(*PrepareRequest)(nil),             // 88: zenthros.agent.v1.PrepareRequest
+	(*PrepareKubernetes)(nil),          // 89: zenthros.agent.v1.PrepareKubernetes
+	(*PrepareItemStatus)(nil),          // 90: zenthros.agent.v1.PrepareItemStatus
+	(*PrepareResponse)(nil),            // 91: zenthros.agent.v1.PrepareResponse
+	(*ChildSpawnRequest)(nil),          // 92: zenthros.agent.v1.ChildSpawnRequest
+	(*ChildStatus)(nil),                // 93: zenthros.agent.v1.ChildStatus
+	(*ChildSpawnAck)(nil),              // 94: zenthros.agent.v1.ChildSpawnAck
+	nil,                                // 95: zenthros.agent.v1.NodeJoinCredentialResponse.LabelsEntry
+	nil,                                // 96: zenthros.agent.v1.PrepareKubernetes.NodeSelectorEntry
+	nil,                                // 97: zenthros.agent.v1.ChildSpawnRequest.EnvEntry
 }
 var file_agent_proto_depIdxs = []int32{
-	10, // 0: zenthros.agent.v1.RegisterRequest.advertise:type_name -> zenthros.agent.v1.Advertise
-	16, // 1: zenthros.agent.v1.RegisterRequest.submit_response:type_name -> zenthros.agent.v1.SubmitResponse
-	18, // 2: zenthros.agent.v1.RegisterRequest.cancel_response:type_name -> zenthros.agent.v1.CancelResponse
-	24, // 3: zenthros.agent.v1.RegisterRequest.status_response:type_name -> zenthros.agent.v1.StatusResponse
-	25, // 4: zenthros.agent.v1.RegisterRequest.status_update:type_name -> zenthros.agent.v1.StatusUpdate
-	26, // 5: zenthros.agent.v1.RegisterRequest.heartbeat:type_name -> zenthros.agent.v1.Heartbeat
-	49, // 6: zenthros.agent.v1.RegisterRequest.execution_report:type_name -> zenthros.agent.v1.ExecutionReport
-	79, // 7: zenthros.agent.v1.RegisterRequest.checkpoint_commit:type_name -> zenthros.agent.v1.CheckpointCommit
-	88, // 8: zenthros.agent.v1.RegisterRequest.prepare_response:type_name -> zenthros.agent.v1.PrepareResponse
-	89, // 9: zenthros.agent.v1.RegisterRequest.child_spawn:type_name -> zenthros.agent.v1.ChildSpawnRequest
-	15, // 10: zenthros.agent.v1.RegisterResponse.submit:type_name -> zenthros.agent.v1.SubmitRequest
-	17, // 11: zenthros.agent.v1.RegisterResponse.cancel:type_name -> zenthros.agent.v1.CancelRequest
-	19, // 12: zenthros.agent.v1.RegisterResponse.status:type_name -> zenthros.agent.v1.StatusRequest
-	27, // 13: zenthros.agent.v1.RegisterResponse.heartbeat_ack:type_name -> zenthros.agent.v1.HeartbeatAck
-	50, // 14: zenthros.agent.v1.RegisterResponse.execution_report_ack:type_name -> zenthros.agent.v1.ExecutionReportAck
-	80, // 15: zenthros.agent.v1.RegisterResponse.checkpoint_ack:type_name -> zenthros.agent.v1.CheckpointAck
-	85, // 16: zenthros.agent.v1.RegisterResponse.prepare:type_name -> zenthros.agent.v1.PrepareRequest
-	91, // 17: zenthros.agent.v1.RegisterResponse.child_spawn_ack:type_name -> zenthros.agent.v1.ChildSpawnAck
-	8,  // 18: zenthros.agent.v1.RegisterResponse.open_log_channel:type_name -> zenthros.agent.v1.OpenLogChannel
-	9,  // 19: zenthros.agent.v1.RegisterResponse.power_off:type_name -> zenthros.agent.v1.PowerOff
-	11, // 20: zenthros.agent.v1.Advertise.capabilities:type_name -> zenthros.agent.v1.WorkloadCapability
-	12, // 21: zenthros.agent.v1.Advertise.host:type_name -> zenthros.agent.v1.HostFacts
-	13, // 22: zenthros.agent.v1.HostFacts.nodes:type_name -> zenthros.agent.v1.NodeFacts
-	14, // 23: zenthros.agent.v1.SubmitRequest.job:type_name -> zenthros.agent.v1.JobEnvelope
-	0,  // 24: zenthros.agent.v1.SubmitResponse.error_class:type_name -> zenthros.agent.v1.ErrorClass
-	0,  // 25: zenthros.agent.v1.CancelResponse.error_class:type_name -> zenthros.agent.v1.ErrorClass
-	20, // 26: zenthros.agent.v1.JobStatus.reasons:type_name -> zenthros.agent.v1.Reason
-	22, // 27: zenthros.agent.v1.JobStatus.endpoints:type_name -> zenthros.agent.v1.Endpoint
-	21, // 28: zenthros.agent.v1.StatusResponse.status:type_name -> zenthros.agent.v1.JobStatus
-	0,  // 29: zenthros.agent.v1.StatusResponse.error_class:type_name -> zenthros.agent.v1.ErrorClass
-	21, // 30: zenthros.agent.v1.StatusUpdate.status:type_name -> zenthros.agent.v1.JobStatus
-	11, // 31: zenthros.agent.v1.Heartbeat.capabilities:type_name -> zenthros.agent.v1.WorkloadCapability
-	12, // 32: zenthros.agent.v1.Heartbeat.host:type_name -> zenthros.agent.v1.HostFacts
-	29, // 33: zenthros.agent.v1.LogChannelFromAgent.chunk:type_name -> zenthros.agent.v1.LogChunk
-	28, // 34: zenthros.agent.v1.LogChannelFromGateway.pull:type_name -> zenthros.agent.v1.StreamLogsRequest
-	35, // 35: zenthros.agent.v1.DeleteBackendResponse.devices:type_name -> zenthros.agent.v1.TailnetDevice
-	11, // 36: zenthros.agent.v1.BackendInfo.capabilities:type_name -> zenthros.agent.v1.WorkloadCapability
-	12, // 37: zenthros.agent.v1.BackendInfo.host:type_name -> zenthros.agent.v1.HostFacts
-	37, // 38: zenthros.agent.v1.ListBackendsResponse.backends:type_name -> zenthros.agent.v1.BackendInfo
-	39, // 39: zenthros.agent.v1.ListBackendsResponse.refused_full:type_name -> zenthros.agent.v1.RefusedBackend
-	48, // 40: zenthros.agent.v1.ExecutionReport.artifacts:type_name -> zenthros.agent.v1.ArtifactRef
-	48, // 41: zenthros.agent.v1.GetCurrentReportResponse.artifacts:type_name -> zenthros.agent.v1.ArtifactRef
-	52, // 42: zenthros.agent.v1.ListCurrentReportsResponse.reports:type_name -> zenthros.agent.v1.GetCurrentReportResponse
-	58, // 43: zenthros.agent.v1.NodeSlotsResponse.slots:type_name -> zenthros.agent.v1.NodeSlot
-	92, // 44: zenthros.agent.v1.NodeJoinCredentialResponse.labels:type_name -> zenthros.agent.v1.NodeJoinCredentialResponse.LabelsEntry
-	1,  // 45: zenthros.agent.v1.BackendSilence.kind:type_name -> zenthros.agent.v1.SilenceKind
-	49, // 46: zenthros.agent.v1.HubExecutionReport.report:type_name -> zenthros.agent.v1.ExecutionReport
-	84, // 47: zenthros.agent.v1.PrepareRequest.items:type_name -> zenthros.agent.v1.PrepareItem
-	86, // 48: zenthros.agent.v1.PrepareRequest.kubernetes:type_name -> zenthros.agent.v1.PrepareKubernetes
-	93, // 49: zenthros.agent.v1.PrepareKubernetes.node_selector:type_name -> zenthros.agent.v1.PrepareKubernetes.NodeSelectorEntry
-	87, // 50: zenthros.agent.v1.PrepareResponse.items:type_name -> zenthros.agent.v1.PrepareItemStatus
-	0,  // 51: zenthros.agent.v1.PrepareResponse.error_class:type_name -> zenthros.agent.v1.ErrorClass
-	94, // 52: zenthros.agent.v1.ChildSpawnRequest.env:type_name -> zenthros.agent.v1.ChildSpawnRequest.EnvEntry
-	90, // 53: zenthros.agent.v1.ChildSpawnAck.children:type_name -> zenthros.agent.v1.ChildStatus
-	6,  // 54: zenthros.agent.v1.Agent.Register:input_type -> zenthros.agent.v1.RegisterRequest
-	2,  // 55: zenthros.agent.v1.Agent.Enroll:input_type -> zenthros.agent.v1.EnrollRequest
-	4,  // 56: zenthros.agent.v1.Agent.Renew:input_type -> zenthros.agent.v1.RenewRequest
-	30, // 57: zenthros.agent.v1.Agent.LogChannel:input_type -> zenthros.agent.v1.LogChannelFromAgent
-	28, // 58: zenthros.agent.v1.AgentLogs.StreamLogs:input_type -> zenthros.agent.v1.StreamLogsRequest
-	32, // 59: zenthros.agent.v1.LogService.Logs:input_type -> zenthros.agent.v1.JobLogRequest
-	33, // 60: zenthros.agent.v1.AdminService.DeleteBackend:input_type -> zenthros.agent.v1.DeleteBackendRequest
-	36, // 61: zenthros.agent.v1.AdminService.ListBackends:input_type -> zenthros.agent.v1.ListBackendsRequest
-	40, // 62: zenthros.agent.v1.AdminService.DrainBackend:input_type -> zenthros.agent.v1.DrainBackendRequest
-	42, // 63: zenthros.agent.v1.AdminService.UndrainBackend:input_type -> zenthros.agent.v1.UndrainBackendRequest
-	44, // 64: zenthros.agent.v1.AdminService.JoinBackend:input_type -> zenthros.agent.v1.JoinBackendRequest
-	46, // 65: zenthros.agent.v1.AdminService.RetireBackend:input_type -> zenthros.agent.v1.RetireBackendRequest
-	51, // 66: zenthros.agent.v1.ReportService.GetCurrent:input_type -> zenthros.agent.v1.GetCurrentReportRequest
-	53, // 67: zenthros.agent.v1.ReportService.ListCurrent:input_type -> zenthros.agent.v1.ListCurrentReportsRequest
-	57, // 68: zenthros.agent.v1.NodeSupply.NodeSlots:input_type -> zenthros.agent.v1.NodeSlotsRequest
-	60, // 69: zenthros.agent.v1.NodeSupply.ReportDrained:input_type -> zenthros.agent.v1.ReportDrainedRequest
-	62, // 70: zenthros.agent.v1.NodeSupply.IssueJoin:input_type -> zenthros.agent.v1.IssueJoinRequest
-	64, // 71: zenthros.agent.v1.NodeSupply.ReportRegistered:input_type -> zenthros.agent.v1.ReportRegisteredRequest
-	55, // 72: zenthros.agent.v1.NodeSupply.ReportCluster:input_type -> zenthros.agent.v1.ClusterReport
-	66, // 73: zenthros.agent.v1.NodeJoin.Credential:input_type -> zenthros.agent.v1.NodeJoinCredentialRequest
-	68, // 74: zenthros.agent.v1.NodeJoin.Report:input_type -> zenthros.agent.v1.NodeJoinReport
-	15, // 75: zenthros.agent.v1.Pipe.Submit:input_type -> zenthros.agent.v1.SubmitRequest
-	17, // 76: zenthros.agent.v1.Pipe.Cancel:input_type -> zenthros.agent.v1.CancelRequest
-	19, // 77: zenthros.agent.v1.Pipe.Status:input_type -> zenthros.agent.v1.StatusRequest
-	85, // 78: zenthros.agent.v1.Pipe.Prepare:input_type -> zenthros.agent.v1.PrepareRequest
-	71, // 79: zenthros.agent.v1.Pipe.PowerOff:input_type -> zenthros.agent.v1.PowerOffRequest
-	36, // 80: zenthros.agent.v1.Pipe.ListBackends:input_type -> zenthros.agent.v1.ListBackendsRequest
-	70, // 81: zenthros.agent.v1.Pipe.GetBackend:input_type -> zenthros.agent.v1.GetBackendRequest
-	73, // 82: zenthros.agent.v1.Pipe.Fence:input_type -> zenthros.agent.v1.FenceRequest
-	28, // 83: zenthros.agent.v1.Pipe.StreamLogs:input_type -> zenthros.agent.v1.StreamLogsRequest
-	2,  // 84: zenthros.agent.v1.Hub.Enroll:input_type -> zenthros.agent.v1.EnrollRequest
-	5,  // 85: zenthros.agent.v1.Hub.Renew:input_type -> zenthros.agent.v1.HubRenewRequest
-	25, // 86: zenthros.agent.v1.Hub.HandleStatusUpdate:input_type -> zenthros.agent.v1.StatusUpdate
-	78, // 87: zenthros.agent.v1.Hub.HandleExecutionReport:input_type -> zenthros.agent.v1.HubExecutionReport
-	79, // 88: zenthros.agent.v1.Hub.HandleCheckpoint:input_type -> zenthros.agent.v1.CheckpointCommit
-	89, // 89: zenthros.agent.v1.Hub.HandleChildSpawn:input_type -> zenthros.agent.v1.ChildSpawnRequest
-	81, // 90: zenthros.agent.v1.Hub.HandleRegister:input_type -> zenthros.agent.v1.HubRegisterRequest
-	40, // 91: zenthros.agent.v1.Hub.DrainBackend:input_type -> zenthros.agent.v1.DrainBackendRequest
-	42, // 92: zenthros.agent.v1.Hub.UndrainBackend:input_type -> zenthros.agent.v1.UndrainBackendRequest
-	82, // 93: zenthros.agent.v1.Hub.ListDrained:input_type -> zenthros.agent.v1.ListDrainedRequest
-	44, // 94: zenthros.agent.v1.Hub.JoinBackend:input_type -> zenthros.agent.v1.JoinBackendRequest
-	46, // 95: zenthros.agent.v1.Hub.RetireBackend:input_type -> zenthros.agent.v1.RetireBackendRequest
-	76, // 96: zenthros.agent.v1.Hub.HandleBackendSilent:input_type -> zenthros.agent.v1.BackendSilence
-	77, // 97: zenthros.agent.v1.Hub.HandlePreemptionNotice:input_type -> zenthros.agent.v1.PreemptionNoticeRequest
-	7,  // 98: zenthros.agent.v1.Agent.Register:output_type -> zenthros.agent.v1.RegisterResponse
-	3,  // 99: zenthros.agent.v1.Agent.Enroll:output_type -> zenthros.agent.v1.EnrollResponse
-	3,  // 100: zenthros.agent.v1.Agent.Renew:output_type -> zenthros.agent.v1.EnrollResponse
-	31, // 101: zenthros.agent.v1.Agent.LogChannel:output_type -> zenthros.agent.v1.LogChannelFromGateway
-	29, // 102: zenthros.agent.v1.AgentLogs.StreamLogs:output_type -> zenthros.agent.v1.LogChunk
-	29, // 103: zenthros.agent.v1.LogService.Logs:output_type -> zenthros.agent.v1.LogChunk
-	34, // 104: zenthros.agent.v1.AdminService.DeleteBackend:output_type -> zenthros.agent.v1.DeleteBackendResponse
-	38, // 105: zenthros.agent.v1.AdminService.ListBackends:output_type -> zenthros.agent.v1.ListBackendsResponse
-	41, // 106: zenthros.agent.v1.AdminService.DrainBackend:output_type -> zenthros.agent.v1.DrainBackendResponse
-	43, // 107: zenthros.agent.v1.AdminService.UndrainBackend:output_type -> zenthros.agent.v1.UndrainBackendResponse
-	45, // 108: zenthros.agent.v1.AdminService.JoinBackend:output_type -> zenthros.agent.v1.JoinBackendResponse
-	47, // 109: zenthros.agent.v1.AdminService.RetireBackend:output_type -> zenthros.agent.v1.RetireBackendResponse
-	52, // 110: zenthros.agent.v1.ReportService.GetCurrent:output_type -> zenthros.agent.v1.GetCurrentReportResponse
-	54, // 111: zenthros.agent.v1.ReportService.ListCurrent:output_type -> zenthros.agent.v1.ListCurrentReportsResponse
-	59, // 112: zenthros.agent.v1.NodeSupply.NodeSlots:output_type -> zenthros.agent.v1.NodeSlotsResponse
-	61, // 113: zenthros.agent.v1.NodeSupply.ReportDrained:output_type -> zenthros.agent.v1.ReportDrainedResponse
-	63, // 114: zenthros.agent.v1.NodeSupply.IssueJoin:output_type -> zenthros.agent.v1.IssueJoinResponse
-	65, // 115: zenthros.agent.v1.NodeSupply.ReportRegistered:output_type -> zenthros.agent.v1.ReportRegisteredResponse
-	56, // 116: zenthros.agent.v1.NodeSupply.ReportCluster:output_type -> zenthros.agent.v1.ClusterReportAck
-	67, // 117: zenthros.agent.v1.NodeJoin.Credential:output_type -> zenthros.agent.v1.NodeJoinCredentialResponse
-	69, // 118: zenthros.agent.v1.NodeJoin.Report:output_type -> zenthros.agent.v1.NodeJoinReportAck
-	16, // 119: zenthros.agent.v1.Pipe.Submit:output_type -> zenthros.agent.v1.SubmitResponse
-	18, // 120: zenthros.agent.v1.Pipe.Cancel:output_type -> zenthros.agent.v1.CancelResponse
-	24, // 121: zenthros.agent.v1.Pipe.Status:output_type -> zenthros.agent.v1.StatusResponse
-	88, // 122: zenthros.agent.v1.Pipe.Prepare:output_type -> zenthros.agent.v1.PrepareResponse
-	72, // 123: zenthros.agent.v1.Pipe.PowerOff:output_type -> zenthros.agent.v1.PowerOffResponse
-	38, // 124: zenthros.agent.v1.Pipe.ListBackends:output_type -> zenthros.agent.v1.ListBackendsResponse
-	37, // 125: zenthros.agent.v1.Pipe.GetBackend:output_type -> zenthros.agent.v1.BackendInfo
-	74, // 126: zenthros.agent.v1.Pipe.Fence:output_type -> zenthros.agent.v1.FenceResponse
-	29, // 127: zenthros.agent.v1.Pipe.StreamLogs:output_type -> zenthros.agent.v1.LogChunk
-	3,  // 128: zenthros.agent.v1.Hub.Enroll:output_type -> zenthros.agent.v1.EnrollResponse
-	3,  // 129: zenthros.agent.v1.Hub.Renew:output_type -> zenthros.agent.v1.EnrollResponse
-	75, // 130: zenthros.agent.v1.Hub.HandleStatusUpdate:output_type -> zenthros.agent.v1.HubAck
-	50, // 131: zenthros.agent.v1.Hub.HandleExecutionReport:output_type -> zenthros.agent.v1.ExecutionReportAck
-	80, // 132: zenthros.agent.v1.Hub.HandleCheckpoint:output_type -> zenthros.agent.v1.CheckpointAck
-	91, // 133: zenthros.agent.v1.Hub.HandleChildSpawn:output_type -> zenthros.agent.v1.ChildSpawnAck
-	75, // 134: zenthros.agent.v1.Hub.HandleRegister:output_type -> zenthros.agent.v1.HubAck
-	41, // 135: zenthros.agent.v1.Hub.DrainBackend:output_type -> zenthros.agent.v1.DrainBackendResponse
-	43, // 136: zenthros.agent.v1.Hub.UndrainBackend:output_type -> zenthros.agent.v1.UndrainBackendResponse
-	83, // 137: zenthros.agent.v1.Hub.ListDrained:output_type -> zenthros.agent.v1.ListDrainedResponse
-	45, // 138: zenthros.agent.v1.Hub.JoinBackend:output_type -> zenthros.agent.v1.JoinBackendResponse
-	47, // 139: zenthros.agent.v1.Hub.RetireBackend:output_type -> zenthros.agent.v1.RetireBackendResponse
-	75, // 140: zenthros.agent.v1.Hub.HandleBackendSilent:output_type -> zenthros.agent.v1.HubAck
-	75, // 141: zenthros.agent.v1.Hub.HandlePreemptionNotice:output_type -> zenthros.agent.v1.HubAck
-	98, // [98:142] is the sub-list for method output_type
-	54, // [54:98] is the sub-list for method input_type
-	54, // [54:54] is the sub-list for extension type_name
-	54, // [54:54] is the sub-list for extension extendee
-	0,  // [0:54] is the sub-list for field type_name
+	12,  // 0: zenthros.agent.v1.RegisterRequest.advertise:type_name -> zenthros.agent.v1.Advertise
+	18,  // 1: zenthros.agent.v1.RegisterRequest.submit_response:type_name -> zenthros.agent.v1.SubmitResponse
+	20,  // 2: zenthros.agent.v1.RegisterRequest.cancel_response:type_name -> zenthros.agent.v1.CancelResponse
+	26,  // 3: zenthros.agent.v1.RegisterRequest.status_response:type_name -> zenthros.agent.v1.StatusResponse
+	27,  // 4: zenthros.agent.v1.RegisterRequest.status_update:type_name -> zenthros.agent.v1.StatusUpdate
+	28,  // 5: zenthros.agent.v1.RegisterRequest.heartbeat:type_name -> zenthros.agent.v1.Heartbeat
+	52,  // 6: zenthros.agent.v1.RegisterRequest.execution_report:type_name -> zenthros.agent.v1.ExecutionReport
+	82,  // 7: zenthros.agent.v1.RegisterRequest.checkpoint_commit:type_name -> zenthros.agent.v1.CheckpointCommit
+	91,  // 8: zenthros.agent.v1.RegisterRequest.prepare_response:type_name -> zenthros.agent.v1.PrepareResponse
+	92,  // 9: zenthros.agent.v1.RegisterRequest.child_spawn:type_name -> zenthros.agent.v1.ChildSpawnRequest
+	17,  // 10: zenthros.agent.v1.RegisterResponse.submit:type_name -> zenthros.agent.v1.SubmitRequest
+	19,  // 11: zenthros.agent.v1.RegisterResponse.cancel:type_name -> zenthros.agent.v1.CancelRequest
+	21,  // 12: zenthros.agent.v1.RegisterResponse.status:type_name -> zenthros.agent.v1.StatusRequest
+	29,  // 13: zenthros.agent.v1.RegisterResponse.heartbeat_ack:type_name -> zenthros.agent.v1.HeartbeatAck
+	53,  // 14: zenthros.agent.v1.RegisterResponse.execution_report_ack:type_name -> zenthros.agent.v1.ExecutionReportAck
+	83,  // 15: zenthros.agent.v1.RegisterResponse.checkpoint_ack:type_name -> zenthros.agent.v1.CheckpointAck
+	88,  // 16: zenthros.agent.v1.RegisterResponse.prepare:type_name -> zenthros.agent.v1.PrepareRequest
+	94,  // 17: zenthros.agent.v1.RegisterResponse.child_spawn_ack:type_name -> zenthros.agent.v1.ChildSpawnAck
+	10,  // 18: zenthros.agent.v1.RegisterResponse.open_log_channel:type_name -> zenthros.agent.v1.OpenLogChannel
+	11,  // 19: zenthros.agent.v1.RegisterResponse.power_off:type_name -> zenthros.agent.v1.PowerOff
+	13,  // 20: zenthros.agent.v1.Advertise.capabilities:type_name -> zenthros.agent.v1.WorkloadCapability
+	14,  // 21: zenthros.agent.v1.Advertise.host:type_name -> zenthros.agent.v1.HostFacts
+	15,  // 22: zenthros.agent.v1.HostFacts.nodes:type_name -> zenthros.agent.v1.NodeFacts
+	16,  // 23: zenthros.agent.v1.SubmitRequest.job:type_name -> zenthros.agent.v1.JobEnvelope
+	0,   // 24: zenthros.agent.v1.SubmitResponse.error_class:type_name -> zenthros.agent.v1.ErrorClass
+	0,   // 25: zenthros.agent.v1.CancelResponse.error_class:type_name -> zenthros.agent.v1.ErrorClass
+	22,  // 26: zenthros.agent.v1.JobStatus.reasons:type_name -> zenthros.agent.v1.Reason
+	24,  // 27: zenthros.agent.v1.JobStatus.endpoints:type_name -> zenthros.agent.v1.Endpoint
+	23,  // 28: zenthros.agent.v1.StatusResponse.status:type_name -> zenthros.agent.v1.JobStatus
+	0,   // 29: zenthros.agent.v1.StatusResponse.error_class:type_name -> zenthros.agent.v1.ErrorClass
+	23,  // 30: zenthros.agent.v1.StatusUpdate.status:type_name -> zenthros.agent.v1.JobStatus
+	13,  // 31: zenthros.agent.v1.Heartbeat.capabilities:type_name -> zenthros.agent.v1.WorkloadCapability
+	14,  // 32: zenthros.agent.v1.Heartbeat.host:type_name -> zenthros.agent.v1.HostFacts
+	2,   // 33: zenthros.agent.v1.LogChunk.gap_reason:type_name -> zenthros.agent.v1.GapReason
+	1,   // 34: zenthros.agent.v1.LogChunk.encoding:type_name -> zenthros.agent.v1.LogEncoding
+	32,  // 35: zenthros.agent.v1.LogChannelFromAgent.chunk:type_name -> zenthros.agent.v1.LogChunk
+	30,  // 36: zenthros.agent.v1.LogChannelFromGateway.pull:type_name -> zenthros.agent.v1.StreamLogsRequest
+	38,  // 37: zenthros.agent.v1.DeleteBackendResponse.devices:type_name -> zenthros.agent.v1.TailnetDevice
+	13,  // 38: zenthros.agent.v1.BackendInfo.capabilities:type_name -> zenthros.agent.v1.WorkloadCapability
+	14,  // 39: zenthros.agent.v1.BackendInfo.host:type_name -> zenthros.agent.v1.HostFacts
+	40,  // 40: zenthros.agent.v1.ListBackendsResponse.backends:type_name -> zenthros.agent.v1.BackendInfo
+	42,  // 41: zenthros.agent.v1.ListBackendsResponse.refused_full:type_name -> zenthros.agent.v1.RefusedBackend
+	51,  // 42: zenthros.agent.v1.ExecutionReport.artifacts:type_name -> zenthros.agent.v1.ArtifactRef
+	51,  // 43: zenthros.agent.v1.GetCurrentReportResponse.artifacts:type_name -> zenthros.agent.v1.ArtifactRef
+	55,  // 44: zenthros.agent.v1.ListCurrentReportsResponse.reports:type_name -> zenthros.agent.v1.GetCurrentReportResponse
+	61,  // 45: zenthros.agent.v1.NodeSlotsResponse.slots:type_name -> zenthros.agent.v1.NodeSlot
+	95,  // 46: zenthros.agent.v1.NodeJoinCredentialResponse.labels:type_name -> zenthros.agent.v1.NodeJoinCredentialResponse.LabelsEntry
+	3,   // 47: zenthros.agent.v1.BackendSilence.kind:type_name -> zenthros.agent.v1.SilenceKind
+	52,  // 48: zenthros.agent.v1.HubExecutionReport.report:type_name -> zenthros.agent.v1.ExecutionReport
+	87,  // 49: zenthros.agent.v1.PrepareRequest.items:type_name -> zenthros.agent.v1.PrepareItem
+	89,  // 50: zenthros.agent.v1.PrepareRequest.kubernetes:type_name -> zenthros.agent.v1.PrepareKubernetes
+	96,  // 51: zenthros.agent.v1.PrepareKubernetes.node_selector:type_name -> zenthros.agent.v1.PrepareKubernetes.NodeSelectorEntry
+	90,  // 52: zenthros.agent.v1.PrepareResponse.items:type_name -> zenthros.agent.v1.PrepareItemStatus
+	0,   // 53: zenthros.agent.v1.PrepareResponse.error_class:type_name -> zenthros.agent.v1.ErrorClass
+	97,  // 54: zenthros.agent.v1.ChildSpawnRequest.env:type_name -> zenthros.agent.v1.ChildSpawnRequest.EnvEntry
+	93,  // 55: zenthros.agent.v1.ChildSpawnAck.children:type_name -> zenthros.agent.v1.ChildStatus
+	8,   // 56: zenthros.agent.v1.Agent.Register:input_type -> zenthros.agent.v1.RegisterRequest
+	4,   // 57: zenthros.agent.v1.Agent.Enroll:input_type -> zenthros.agent.v1.EnrollRequest
+	6,   // 58: zenthros.agent.v1.Agent.Renew:input_type -> zenthros.agent.v1.RenewRequest
+	33,  // 59: zenthros.agent.v1.Agent.LogChannel:input_type -> zenthros.agent.v1.LogChannelFromAgent
+	30,  // 60: zenthros.agent.v1.AgentLogs.StreamLogs:input_type -> zenthros.agent.v1.StreamLogsRequest
+	31,  // 61: zenthros.agent.v1.NodeLogs.ReadPodLog:input_type -> zenthros.agent.v1.PodLogRequest
+	35,  // 62: zenthros.agent.v1.LogService.Logs:input_type -> zenthros.agent.v1.JobLogRequest
+	36,  // 63: zenthros.agent.v1.AdminService.DeleteBackend:input_type -> zenthros.agent.v1.DeleteBackendRequest
+	39,  // 64: zenthros.agent.v1.AdminService.ListBackends:input_type -> zenthros.agent.v1.ListBackendsRequest
+	43,  // 65: zenthros.agent.v1.AdminService.DrainBackend:input_type -> zenthros.agent.v1.DrainBackendRequest
+	45,  // 66: zenthros.agent.v1.AdminService.UndrainBackend:input_type -> zenthros.agent.v1.UndrainBackendRequest
+	47,  // 67: zenthros.agent.v1.AdminService.JoinBackend:input_type -> zenthros.agent.v1.JoinBackendRequest
+	49,  // 68: zenthros.agent.v1.AdminService.RetireBackend:input_type -> zenthros.agent.v1.RetireBackendRequest
+	54,  // 69: zenthros.agent.v1.ReportService.GetCurrent:input_type -> zenthros.agent.v1.GetCurrentReportRequest
+	56,  // 70: zenthros.agent.v1.ReportService.ListCurrent:input_type -> zenthros.agent.v1.ListCurrentReportsRequest
+	60,  // 71: zenthros.agent.v1.NodeSupply.NodeSlots:input_type -> zenthros.agent.v1.NodeSlotsRequest
+	63,  // 72: zenthros.agent.v1.NodeSupply.ReportDrained:input_type -> zenthros.agent.v1.ReportDrainedRequest
+	65,  // 73: zenthros.agent.v1.NodeSupply.IssueJoin:input_type -> zenthros.agent.v1.IssueJoinRequest
+	67,  // 74: zenthros.agent.v1.NodeSupply.ReportRegistered:input_type -> zenthros.agent.v1.ReportRegisteredRequest
+	58,  // 75: zenthros.agent.v1.NodeSupply.ReportCluster:input_type -> zenthros.agent.v1.ClusterReport
+	69,  // 76: zenthros.agent.v1.NodeJoin.Credential:input_type -> zenthros.agent.v1.NodeJoinCredentialRequest
+	71,  // 77: zenthros.agent.v1.NodeJoin.Report:input_type -> zenthros.agent.v1.NodeJoinReport
+	17,  // 78: zenthros.agent.v1.Pipe.Submit:input_type -> zenthros.agent.v1.SubmitRequest
+	19,  // 79: zenthros.agent.v1.Pipe.Cancel:input_type -> zenthros.agent.v1.CancelRequest
+	21,  // 80: zenthros.agent.v1.Pipe.Status:input_type -> zenthros.agent.v1.StatusRequest
+	88,  // 81: zenthros.agent.v1.Pipe.Prepare:input_type -> zenthros.agent.v1.PrepareRequest
+	74,  // 82: zenthros.agent.v1.Pipe.PowerOff:input_type -> zenthros.agent.v1.PowerOffRequest
+	39,  // 83: zenthros.agent.v1.Pipe.ListBackends:input_type -> zenthros.agent.v1.ListBackendsRequest
+	73,  // 84: zenthros.agent.v1.Pipe.GetBackend:input_type -> zenthros.agent.v1.GetBackendRequest
+	76,  // 85: zenthros.agent.v1.Pipe.Fence:input_type -> zenthros.agent.v1.FenceRequest
+	30,  // 86: zenthros.agent.v1.Pipe.StreamLogs:input_type -> zenthros.agent.v1.StreamLogsRequest
+	4,   // 87: zenthros.agent.v1.Hub.Enroll:input_type -> zenthros.agent.v1.EnrollRequest
+	7,   // 88: zenthros.agent.v1.Hub.Renew:input_type -> zenthros.agent.v1.HubRenewRequest
+	27,  // 89: zenthros.agent.v1.Hub.HandleStatusUpdate:input_type -> zenthros.agent.v1.StatusUpdate
+	81,  // 90: zenthros.agent.v1.Hub.HandleExecutionReport:input_type -> zenthros.agent.v1.HubExecutionReport
+	82,  // 91: zenthros.agent.v1.Hub.HandleCheckpoint:input_type -> zenthros.agent.v1.CheckpointCommit
+	92,  // 92: zenthros.agent.v1.Hub.HandleChildSpawn:input_type -> zenthros.agent.v1.ChildSpawnRequest
+	84,  // 93: zenthros.agent.v1.Hub.HandleRegister:input_type -> zenthros.agent.v1.HubRegisterRequest
+	43,  // 94: zenthros.agent.v1.Hub.DrainBackend:input_type -> zenthros.agent.v1.DrainBackendRequest
+	45,  // 95: zenthros.agent.v1.Hub.UndrainBackend:input_type -> zenthros.agent.v1.UndrainBackendRequest
+	85,  // 96: zenthros.agent.v1.Hub.ListDrained:input_type -> zenthros.agent.v1.ListDrainedRequest
+	47,  // 97: zenthros.agent.v1.Hub.JoinBackend:input_type -> zenthros.agent.v1.JoinBackendRequest
+	49,  // 98: zenthros.agent.v1.Hub.RetireBackend:input_type -> zenthros.agent.v1.RetireBackendRequest
+	79,  // 99: zenthros.agent.v1.Hub.HandleBackendSilent:input_type -> zenthros.agent.v1.BackendSilence
+	80,  // 100: zenthros.agent.v1.Hub.HandlePreemptionNotice:input_type -> zenthros.agent.v1.PreemptionNoticeRequest
+	9,   // 101: zenthros.agent.v1.Agent.Register:output_type -> zenthros.agent.v1.RegisterResponse
+	5,   // 102: zenthros.agent.v1.Agent.Enroll:output_type -> zenthros.agent.v1.EnrollResponse
+	5,   // 103: zenthros.agent.v1.Agent.Renew:output_type -> zenthros.agent.v1.EnrollResponse
+	34,  // 104: zenthros.agent.v1.Agent.LogChannel:output_type -> zenthros.agent.v1.LogChannelFromGateway
+	32,  // 105: zenthros.agent.v1.AgentLogs.StreamLogs:output_type -> zenthros.agent.v1.LogChunk
+	32,  // 106: zenthros.agent.v1.NodeLogs.ReadPodLog:output_type -> zenthros.agent.v1.LogChunk
+	32,  // 107: zenthros.agent.v1.LogService.Logs:output_type -> zenthros.agent.v1.LogChunk
+	37,  // 108: zenthros.agent.v1.AdminService.DeleteBackend:output_type -> zenthros.agent.v1.DeleteBackendResponse
+	41,  // 109: zenthros.agent.v1.AdminService.ListBackends:output_type -> zenthros.agent.v1.ListBackendsResponse
+	44,  // 110: zenthros.agent.v1.AdminService.DrainBackend:output_type -> zenthros.agent.v1.DrainBackendResponse
+	46,  // 111: zenthros.agent.v1.AdminService.UndrainBackend:output_type -> zenthros.agent.v1.UndrainBackendResponse
+	48,  // 112: zenthros.agent.v1.AdminService.JoinBackend:output_type -> zenthros.agent.v1.JoinBackendResponse
+	50,  // 113: zenthros.agent.v1.AdminService.RetireBackend:output_type -> zenthros.agent.v1.RetireBackendResponse
+	55,  // 114: zenthros.agent.v1.ReportService.GetCurrent:output_type -> zenthros.agent.v1.GetCurrentReportResponse
+	57,  // 115: zenthros.agent.v1.ReportService.ListCurrent:output_type -> zenthros.agent.v1.ListCurrentReportsResponse
+	62,  // 116: zenthros.agent.v1.NodeSupply.NodeSlots:output_type -> zenthros.agent.v1.NodeSlotsResponse
+	64,  // 117: zenthros.agent.v1.NodeSupply.ReportDrained:output_type -> zenthros.agent.v1.ReportDrainedResponse
+	66,  // 118: zenthros.agent.v1.NodeSupply.IssueJoin:output_type -> zenthros.agent.v1.IssueJoinResponse
+	68,  // 119: zenthros.agent.v1.NodeSupply.ReportRegistered:output_type -> zenthros.agent.v1.ReportRegisteredResponse
+	59,  // 120: zenthros.agent.v1.NodeSupply.ReportCluster:output_type -> zenthros.agent.v1.ClusterReportAck
+	70,  // 121: zenthros.agent.v1.NodeJoin.Credential:output_type -> zenthros.agent.v1.NodeJoinCredentialResponse
+	72,  // 122: zenthros.agent.v1.NodeJoin.Report:output_type -> zenthros.agent.v1.NodeJoinReportAck
+	18,  // 123: zenthros.agent.v1.Pipe.Submit:output_type -> zenthros.agent.v1.SubmitResponse
+	20,  // 124: zenthros.agent.v1.Pipe.Cancel:output_type -> zenthros.agent.v1.CancelResponse
+	26,  // 125: zenthros.agent.v1.Pipe.Status:output_type -> zenthros.agent.v1.StatusResponse
+	91,  // 126: zenthros.agent.v1.Pipe.Prepare:output_type -> zenthros.agent.v1.PrepareResponse
+	75,  // 127: zenthros.agent.v1.Pipe.PowerOff:output_type -> zenthros.agent.v1.PowerOffResponse
+	41,  // 128: zenthros.agent.v1.Pipe.ListBackends:output_type -> zenthros.agent.v1.ListBackendsResponse
+	40,  // 129: zenthros.agent.v1.Pipe.GetBackend:output_type -> zenthros.agent.v1.BackendInfo
+	77,  // 130: zenthros.agent.v1.Pipe.Fence:output_type -> zenthros.agent.v1.FenceResponse
+	32,  // 131: zenthros.agent.v1.Pipe.StreamLogs:output_type -> zenthros.agent.v1.LogChunk
+	5,   // 132: zenthros.agent.v1.Hub.Enroll:output_type -> zenthros.agent.v1.EnrollResponse
+	5,   // 133: zenthros.agent.v1.Hub.Renew:output_type -> zenthros.agent.v1.EnrollResponse
+	78,  // 134: zenthros.agent.v1.Hub.HandleStatusUpdate:output_type -> zenthros.agent.v1.HubAck
+	53,  // 135: zenthros.agent.v1.Hub.HandleExecutionReport:output_type -> zenthros.agent.v1.ExecutionReportAck
+	83,  // 136: zenthros.agent.v1.Hub.HandleCheckpoint:output_type -> zenthros.agent.v1.CheckpointAck
+	94,  // 137: zenthros.agent.v1.Hub.HandleChildSpawn:output_type -> zenthros.agent.v1.ChildSpawnAck
+	78,  // 138: zenthros.agent.v1.Hub.HandleRegister:output_type -> zenthros.agent.v1.HubAck
+	44,  // 139: zenthros.agent.v1.Hub.DrainBackend:output_type -> zenthros.agent.v1.DrainBackendResponse
+	46,  // 140: zenthros.agent.v1.Hub.UndrainBackend:output_type -> zenthros.agent.v1.UndrainBackendResponse
+	86,  // 141: zenthros.agent.v1.Hub.ListDrained:output_type -> zenthros.agent.v1.ListDrainedResponse
+	48,  // 142: zenthros.agent.v1.Hub.JoinBackend:output_type -> zenthros.agent.v1.JoinBackendResponse
+	50,  // 143: zenthros.agent.v1.Hub.RetireBackend:output_type -> zenthros.agent.v1.RetireBackendResponse
+	78,  // 144: zenthros.agent.v1.Hub.HandleBackendSilent:output_type -> zenthros.agent.v1.HubAck
+	78,  // 145: zenthros.agent.v1.Hub.HandlePreemptionNotice:output_type -> zenthros.agent.v1.HubAck
+	101, // [101:146] is the sub-list for method output_type
+	56,  // [56:101] is the sub-list for method input_type
+	56,  // [56:56] is the sub-list for extension type_name
+	56,  // [56:56] is the sub-list for extension extendee
+	0,   // [0:56] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -7994,10 +8358,10 @@ func file_agent_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   93,
+			NumEnums:      4,
+			NumMessages:   94,
 			NumExtensions: 0,
-			NumServices:   9,
+			NumServices:   10,
 		},
 		GoTypes:           file_agent_proto_goTypes,
 		DependencyIndexes: file_agent_proto_depIdxs,

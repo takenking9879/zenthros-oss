@@ -90,6 +90,7 @@ func (a *Agent) Submit(ctx context.Context, req *agentpb.SubmitRequest) *agentpb
 	}
 	a.tracker.Add(spec.ID, name)
 	a.slotsChanged()
+	a.saveLog(spec, name)
 	if spec.Service != nil {
 		if err := a.services.Put(name, spec.Service); err != nil {
 			// It runs and publishes now; a restarted agent would not.
@@ -162,6 +163,10 @@ func (a *Agent) Cancel(ctx context.Context, req *agentpb.CancelRequest) *agentpb
 		a.slotsChanged()
 	}
 	a.services.Delete(req.GetHandleName())
+	if a.logs != nil {
+		// A log still being saved goes on to its end.
+		a.logs.Forget(req.GetHandleName())
+	}
 	if a.cfg.PreemptDir != "" && req.GetId() != "" {
 		_ = os.Remove(preemptFile(a.cfg.PreemptDir, req.GetId()))
 	}
@@ -177,7 +182,7 @@ func (a *Agent) Cancel(ctx context.Context, req *agentpb.CancelRequest) *agentpb
 }
 
 // handleStatus asks the executor for the job's observed state and wraps it for the
-// wire. Failure enrichment (e.g. the systemd journal) is the executor's responsibility.
+// wire. Failure enrichment (e.g. the end of a unit's log) is the executor's responsibility.
 func (a *Agent) Status(ctx context.Context, req *agentpb.StatusRequest) *agentpb.StatusResponse {
 	cancels := a.tracker.Cancels()
 	state, err := a.executor.Status(ctx, req.GetHandleName())
@@ -189,7 +194,7 @@ func (a *Agent) Status(ctx context.Context, req *agentpb.StatusRequest) *agentpb
 		// is running: watch and count it again.
 		a.tracker.Retrack(req.GetId(), req.GetHandleName(), cancels)
 	}
-	state = a.withEndpoints(ctx, req.GetHandleName(), state)
+	state = a.decorate(ctx, req.GetHandleName(), state)
 	a.tracker.Answered(req.GetHandleName(), statusKey(state))
 	return &agentpb.StatusResponse{RequestId: req.GetRequestId(), Status: toProtoStatus(state)}
 }

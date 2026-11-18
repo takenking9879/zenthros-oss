@@ -29,7 +29,7 @@ from zenthros.jobs.http import HTTPJobClient, PresignedBlobStore
 from zenthros.remote import options
 from zenthros.remote.call import _LogFollower
 
-from support import FakeAPI, status
+from support import FakeAPI, record, status
 
 
 def read(path):
@@ -52,7 +52,7 @@ class HTTPJobClientTest(unittest.TestCase):
         self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = (201, {"metadata": {"name": "j"}})
         self.api.routes[("POST", "/v1/workspaces/risk/jobs/j/cancel")] = (200, {"metadata": {"name": "j"}})
         self.api.routes[("DELETE", "/v1/workspaces/risk/jobs/j")] = (200, {"kind": "Status"})
-        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j/logs")] = (200, b"hello\n")
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j/logs")] = (200, record(b"hello\n", cursor="6"))
         self.api.routes[("GET", "/v1/workspaces/risk/jobs/j/reports")] = (200, [])
         with mock.patch.dict(os.environ, {"ZENTHROS_NAMESPACE": "tenant-other"}):
             handle = self.client.submit(job())
@@ -234,7 +234,7 @@ class HTTPJobClientTest(unittest.TestCase):
         self.assertEqual([r["auth"] for r in self.api.requests], ["Bearer first", "Bearer second"])
 
     def test_followed_logs_drive_the_log_follower(self):
-        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j/logs")] = (200, b"line 1\nline 2\n")
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j/logs")] = (200, record(b"line 1\nline 2\n", cursor="14", handle="h", attempt=1))
         out = io.StringIO()
         follower = _LogFollower(self.client, "j", poll_seconds=0.01, out=out)
         follower.start()
@@ -556,16 +556,17 @@ class LogStreamCloseTest(unittest.TestCase):
     was reading it, and http.client raised AttributeError in that thread."""
 
     class Response:
-        """Yields a line, then reads as http.client does once closed."""
+        """Sends a line, then reads as http.client does once closed."""
 
         def __init__(self):
             self.closed = False
+            self._pieces = iter([record(b"first\n", cursor="6"), record(b"second\n", cursor="13")])
 
-        def __iter__(self):
-            yield b"first\n"
-            if self.closed:
+        def read1(self, n):
+            piece = next(self._pieces, b"")
+            if self.closed and piece:
                 raise AttributeError("'NoneType' object has no attribute 'readline'")
-            yield b"second\n"
+            return piece
 
         def close(self):
             self.closed = True
@@ -594,14 +595,18 @@ class LogStreamCloseTest(unittest.TestCase):
 
 
 class LogStreamBreaksOffTest(unittest.TestCase):
-    """A followed log cut mid-chunk, or with a piece that does not
-    decompress, ends: the follower thread died of it (code review
-    2026-11-08)."""
+    """A followed log cut mid-chunk, or with a piece that is not a record,
+    ends: the follower thread died of it (code review 2026-11-08)."""
 
     class Cut:
-        def __iter__(self):
-            yield b"first\n"
-            raise IncompleteRead(b"")
+        def __init__(self):
+            self._pieces = iter([record(b"first\n", cursor="6", handle="h", attempt=1)])
+
+        def read1(self, n):
+            piece = next(self._pieces, None)
+            if piece is None:
+                raise IncompleteRead(b"")
+            return piece
 
         def close(self):
             pass
@@ -611,15 +616,15 @@ class LogStreamBreaksOffTest(unittest.TestCase):
 
     class Corrupt(Cut):
         def read1(self, n):
-            return b"not gzip at all"
-
-        def getheader(self, name, default=None):
-            return "gzip" if name == "Content-Encoding" else default
+            return b"not a record at all\n"
 
     def test_a_stream_that_breaks_off_ends_with_what_came(self):
         from zenthros.jobs.http import _LogStream
 
-        self.assertEqual(list(_LogStream(self.Cut()).stdout), ["first\n"])
+        stream = _LogStream(self.Cut())
+        self.assertEqual(list(stream.stdout), ["first\n"])
+        # The next stream goes on right after it.
+        self.assertEqual((stream.position.handle, stream.position.cursor), ("h", "6"))
         stream = _LogStream(self.Corrupt())
         self.assertEqual(list(stream.stdout), [])
         self.assertEqual(stream.poll(), 0)
@@ -668,9 +673,9 @@ class HangingLog(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Type", "application/vnd.zenthros.log-records")
         self.end_headers()
-        self.wfile.write(b"first\n")
+        self.wfile.write(record(b"first\n", cursor="6"))
         self.wfile.flush()
         self.release.wait(30)
 

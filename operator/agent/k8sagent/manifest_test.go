@@ -310,7 +310,8 @@ func TestManifestLogsFollowOwnerChain(t *testing.T) {
 	chained := pod("train-worker-abc", owned("Job", "batch/v1", "train-worker", "uid-job"), 0)
 	neighbour := pod("other-0", owned("Job", "batch/v1", "other", "uid-other"), 0)
 	e := manifestExecutor(t, nil, root, middle, direct, chained, neighbour)
-	e.clientset = kubefake.NewSimpleClientset(direct, chained, neighbour)
+	at := apiLine(time.Unix(1, 0), "fake logs")
+	e.clientset = (&apiStreams{answers: []string{at, at}}).clientset()
 
 	pods, err := e.manifestPods(context.Background(), root, manifestContract{})
 	if err != nil {
@@ -329,7 +330,7 @@ func TestManifestLogsFollowOwnerChain(t *testing.T) {
 		t.Fatalf("logSelector matched %v, %v", selected, err)
 	}
 
-	ch, err := e.Logs(context.Background(), manifestHandle(widgetGVK, "tenant-a", "train"), false, -1)
+	ch, err := e.Logs(context.Background(), manifestHandle(widgetGVK, "tenant-a", "train"), backend.LogRequest{TailLines: -1})
 	if err != nil {
 		t.Fatal(err)
 	}

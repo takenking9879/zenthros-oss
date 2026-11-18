@@ -20,6 +20,8 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	restclient "k8s.io/client-go/rest"
+
+	"github.com/zenthros/operator/pkg/backend"
 	restfake "k8s.io/client-go/rest/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -48,7 +50,7 @@ func TestManifestLogsOpenEveryContainerAtOnce(t *testing.T) {
 	e.clientset = slowLogs{Interface: kubefake.NewSimpleClientset(objects...), open: 300 * time.Millisecond}
 
 	start := time.Now()
-	ch, err := e.Logs(context.Background(), manifestHandle(widgetGVK, "tenant-a", "train"), false, -1)
+	ch, err := e.Logs(context.Background(), manifestHandle(widgetGVK, "tenant-a", "train"), backend.LogRequest{TailLines: -1})
 	if err != nil {
 		t.Fatal(err)
 	}

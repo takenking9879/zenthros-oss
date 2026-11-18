@@ -439,7 +439,7 @@ func prepareRuntime(ctx context.Context, raw string, steps runtimeSteps, holder 
 			err = steps.markReady()
 		}
 		if err == nil {
-			logger.Info("ready for work", "took", time.Since(started).Round(time.Millisecond))
+			logger.Info(runtimegate.ReadyMessage, "took", time.Since(started).Round(time.Millisecond))
 		} else if failed := steps.markFailed(err); failed != nil {
 			logger.Error(failed, "could not record why the container cannot run its jobs")
 		}

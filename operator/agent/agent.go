@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
+	"github.com/zenthros/operator/agent/logpersist"
 	infrav1alpha1 "github.com/zenthros/operator/api/infrastructure/v1alpha1"
 	"github.com/zenthros/operator/internal/grpc/envelope"
 	agentpb "github.com/zenthros/operator/internal/grpc/gen"
@@ -210,13 +211,14 @@ type Config struct {
 	// It must clear the largest inline source the controller may ship, once base64
 	// and JSON overhead are added. 0 uses the production default (16 MiB).
 	MaxMessageBytes int
-	// MaxLogBytes is the per-request StreamLogs byte cap at this Agent. When a
-	// request would exceed it, the stream ends with a truncated signal and leftover
-	// stays on the pod/unit. 0 uses the production default (8 MiB).
-	MaxLogBytes int
-	// MaxLogBytesHourly is the Agent-wide StreamLogs budget per hour, distinct
-	// from MaxLogBytes. 0 uses the production default (50 MiB).
+	// MaxLogBytesHourly is the Agent-wide StreamLogs budget per hour. Past
+	// it a read goes on from where the log is when the budget comes back, and
+	// says what it skipped. 0 uses the production default (50 MiB).
 	MaxLogBytesHourly int
+	// LogHistoryBytes is the history a log read starts with when it names
+	// none: the end of the log, from the start of a line. 0 uses
+	// backend.DefaultHistoryBytes.
+	LogHistoryBytes int64
 	// LogBatchWindow is how long the log lines that follow a sent message
 	// wait to travel together (logbatch.go). Zero uses the window the hub
 	// names when it accepts the session, or the production default (1s)
@@ -235,6 +237,11 @@ type Config struct {
 	// (<dir>/<jobID>.json, ZENTHROS_PREEMPT_FILE). Empty disables it: a
 	// Kubernetes agent does not act on its node's notice.
 	PreemptDir string
+
+	// LogQueueDir is where the logs saved to the users' buckets wait to be
+	// sent, a directory per job (agent/logpersist): on the machine's disk,
+	// on a Kubernetes agent its volume. Empty saves none.
+	LogQueueDir string
 
 	// ServiceDir is where the agent keeps each Service job's ports, so a
 	// restarted agent publishes their endpoints again. Empty keeps them in
@@ -265,22 +272,11 @@ type Config struct {
 // Mirrors controller.DefaultLimits().MaxMessageBytes so both ends agree.
 const defaultMaxMessageBytes = 16 << 20
 
-// defaultMaxLogBytes is the per-request StreamLogs cap when Config.MaxLogBytes is
-// unset. Generous for a peek via zctl; leftover stays on the pod/unit (Q-13).
-const defaultMaxLogBytes = 8 << 20
-
 func (c Config) maxMessageBytes() int {
 	if c.MaxMessageBytes > 0 {
 		return c.MaxMessageBytes
 	}
 	return defaultMaxMessageBytes
-}
-
-func (c Config) maxLogBytes() int {
-	if c.MaxLogBytes > 0 {
-		return c.MaxLogBytes
-	}
-	return defaultMaxLogBytes
 }
 
 func (c Config) maxLogBytesHourly() int {
@@ -362,16 +358,20 @@ func (c Config) ValidateForRun() error {
 // Agent executes jobs received over a control stream via an Executor. The executor
 // selects the local backend (systemd units on a VM, native resources in a cluster).
 type Agent struct {
-	cfg          Config
-	executor     Executor
-	tracker      *jobTracker
-	health       *healthState
-	logger       Logger
-	spool        *reportspool.Spool
-	forwarder    *reportForwarder
-	checkpoints  *checkpointWaiter
-	children     *childWaiter
-	hourlyLogs   *hourlyBudget
+	cfg         Config
+	executor    Executor
+	tracker     *jobTracker
+	health      *healthState
+	logger      Logger
+	spool       *reportspool.Spool
+	forwarder   *reportForwarder
+	checkpoints *checkpointWaiter
+	children    *childWaiter
+	hourlyLogs  *hourlyBudget
+	logReaders  *logReaders
+	// logs saves the logs of jobs with spec.workload.template.logs; nil
+	// without Config.LogQueueDir.
+	logs         *logpersist.Saver
 	sessionEpoch atomic.Int64
 	// The LogChannel opens only when the gateway asks for it (logAsked)
 	// and stays closed while nobody reads logs. logAcceptedEpoch is the
@@ -431,12 +431,14 @@ func NewWithExecutor(cfg Config, executor Executor, logger Logger) *Agent {
 		health:            &healthState{},
 		logger:            logger.WithName("agent"),
 		hourlyLogs:        newHourlyBudget(cfg.maxLogBytesHourly()),
+		logReaders:        newLogReaders(),
 		interruptCh:       make(chan struct{}),
 		logAsked:          make(chan struct{}, 1),
 		logSessionChanged: make(chan struct{}, 1),
 		services:          newServices(cfg.ServiceDir),
 		endpoints:         newEndpointResolver(),
 	}
+	a.logs = newLogSaver(cfg, executor, a.logger)
 	a.children = newChildWaiter()
 	if cfg.ReportSpoolPath != "" {
 		spool, err := reportspool.Open(context.Background(), reportspool.Config{Path: cfg.ReportSpoolPath, TokenKey: cfg.ReportTokenKey})
@@ -458,6 +460,12 @@ func (a *Agent) Run(ctx context.Context) error {
 	// First, before any connection: the first heartbeat must count the work
 	// that outlived the previous agent process.
 	a.rebuildTracker(ctx)
+	// The logs a previous agent was saving go on, before any of their
+	// files may be pruned; what waits is sent as this one stops.
+	if a.logs != nil {
+		a.logs.Resume()
+	}
+	defer a.drainLogs()
 	// A renewal the previous process died in the middle of is finished (or
 	// dropped) before the pair is read.
 	if a.cfg.TLS.CertFile != "" && a.cfg.TLS.KeyFile != "" {
@@ -702,7 +710,7 @@ func (a *Agent) ServeStream(ctx context.Context, stream controlStream) error {
 		defer a.children.setSender(nil)
 	}
 	watcher := newStatusWatcher(a.executor, a.tracker, sender, a.cfg.BackendID, a.logger)
-	watcher.decorate = a.withEndpoints
+	watcher.decorate = a.decorate
 	if a.checkpoints != nil {
 		watcher.heldCommits = a.checkpoints.holds
 	}
@@ -731,6 +739,10 @@ func (a *Agent) ServeStream(ctx context.Context, stream controlStream) error {
 	// that ends its lease and starts the replacement.
 	notices.deliver = func(notice preemptionNotice) {
 		a.deliverNotice(streamCtx, notice)
+		// What a job's log holds goes to its bucket now, then every 2 s.
+		if a.logs != nil {
+			a.logs.Hurry()
+		}
 		if a.forwarder != nil {
 			a.forwarder.Wake()
 		}

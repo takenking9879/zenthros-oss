@@ -62,7 +62,7 @@ func (e *localRecorder) Status(context.Context, string) (backend.JobState, error
 	return e.state, nil
 }
 
-func (e *localRecorder) Logs(context.Context, string, bool, int) (<-chan backend.LogChunk, error) {
+func (e *localRecorder) Logs(context.Context, string, backend.LogRequest) (<-chan backend.LogChunk, error) {
 	out := make(chan backend.LogChunk, 1)
 	out <- backend.LogChunk{Data: []byte(e.logs)}
 	close(out)

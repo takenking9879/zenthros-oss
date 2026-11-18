@@ -3,17 +3,21 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/klauspost/compress/zstd"
 
 	agentpb "github.com/zenthros/operator/internal/grpc/gen"
+	"github.com/zenthros/operator/pkg/backend"
 )
 
 // sentLogs is a LogChannel that keeps what the agent sent on it.
@@ -40,20 +44,34 @@ func (s *sentLogs) sent() []*agentpb.LogChannelFromAgent {
 	return append([]*agentpb.LogChannelFromAgent(nil), s.msgs...)
 }
 
-// data is every byte sent, in order: what a reader writes.
+// data is every byte of log sent, in order: what a reader writes.
 func (s *sentLogs) data() string {
 	var b strings.Builder
 	for _, msg := range s.sent() {
-		b.Write(msg.GetChunk().GetData())
+		b.Write(unpacked(msg.GetChunk()))
 	}
 	return b.String()
+}
+
+var testDecoder, _ = zstd.NewReader(nil)
+
+// unpacked is chunk's bytes of log, as a reader unpacks them.
+func unpacked(chunk *agentpb.LogChunk) []byte {
+	if chunk.GetEncoding() != agentpb.LogEncoding_LOG_ZSTD {
+		return chunk.GetData()
+	}
+	out, err := testDecoder.DecodeAll(chunk.GetData(), nil)
+	if err != nil || int64(len(out)) != chunk.GetRawLen() {
+		panic(fmt.Sprintf("a chunk that unpacks to %d bytes of %d: %v", len(out), chunk.GetRawLen(), err))
+	}
+	return out
 }
 
 // batchSender is a sender over a kept LogChannel. A window of an hour never
 // ends by itself within a test.
 func batchSender(window time.Duration) (*channelLogSender, *sentLogs) {
 	stream := &sentLogs{}
-	return newChannelLogSender(context.Background(), &logChannelClient{stream: stream}, "pull-1", window), stream
+	return newChannelLogSender(context.Background(), &logChannelClient{stream: stream}, "pull-1", window, newHourlyBudget(0)), stream
 }
 
 func line(stream string, i int) *agentpb.LogChunk {
@@ -133,8 +151,8 @@ func TestWaitingLogLinesGoWhenTheWindowEnds(t *testing.T) {
 // window, and no message is much larger than the cut.
 func TestLogBatchIsCutAtItsSize(t *testing.T) {
 	sender, stream := batchSender(time.Hour)
-	heavy := &agentpb.LogChunk{Stream: "stdout", Data: []byte(strings.Repeat("x", 5<<10-1) + "\n")}
 	for range 9 {
+		heavy := &agentpb.LogChunk{Stream: "stdout", Data: []byte(strings.Repeat("x", 5<<10-1) + "\n")}
 		if err := sender.Send(heavy); err != nil {
 			t.Fatal(err)
 		}
@@ -144,32 +162,88 @@ func TestLogBatchIsCutAtItsSize(t *testing.T) {
 		t.Fatalf("%d messages for 9 lines of 5 KiB before any flush, want 3", n)
 	}
 	for _, msg := range stream.sent() {
-		if n := len(msg.GetChunk().GetData()); n > logBatchBytes+5<<10 {
+		if n := len(unpacked(msg.GetChunk())); n > logBatchBytes+5<<10 {
 			t.Fatalf("a message of %d bytes, want at most the cut plus one line", n)
 		}
 	}
 }
 
-// stderr is not joined to stdout, and the truncation notice goes alone,
-// after everything that was waiting: order is kept across all of them.
-func TestLogStreamsAndTheTruncationNoticeAreNotJoined(t *testing.T) {
+// A read that fills a batch alone leaves as it came. The window was made
+// for lines (scale lab, 2026-10-11) and copied a batch's first chunk into
+// room for four; since a chunk is a whole read of the job's file (W2), a
+// read of up to 128 KiB was copied into 512 KiB and sent at once all the
+// same: the agent spent 9 % more CPU at 1,000 lines a second and 29 % more
+// at 10,000 with the window than without (agent lab, 2026-11-15).
+func TestAReadThatFillsABatchLeavesUncopied(t *testing.T) {
+	read := []byte(strings.Repeat("a line of a busy log, 1,000 a second\n", 1000)) // ~36 KiB
+	allocs := func(window time.Duration) float64 {
+		sender, _ := batchSender(window)
+		send := func() {
+			if err := sender.Send(&agentpb.LogChunk{Stream: "stdout", Data: bytes.Clone(read)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		send() // the first, after a quiet moment, goes at once with any window
+		return testing.AllocsPerRun(50, send)
+	}
+	if with, without := allocs(time.Hour), allocs(0); with > without {
+		t.Fatalf("a read of %d bytes takes %.0f allocations with a window and %.0f without: the window copied it", len(read), with, without)
+	}
+}
+
+// A batch's first chunk is not copied, and its bytes may share an array
+// with a later chunk's: the pieces of a line past backend.MaxLogLine are
+// slices of the line (k8sagent's pod log). Joining what follows must not
+// write over them.
+func TestABatchNeverWritesOverAChunkThatFollows(t *testing.T) {
 	sender, stream := batchSender(time.Hour)
-	notice := &agentpb.LogChunk{Stream: "stdout", Data: []byte("[truncated]\n"), Truncated: true}
-	for _, chunk := range []*agentpb.LogChunk{line("stdout", 0), line("stdout", 1), line("stdout", 2), line("stderr", 3), line("stderr", 4), notice} {
+	if err := sender.Send(line("stdout", 0)); err != nil { // the window is open from here
+		t.Fatal(err)
+	}
+	whole := []byte(strings.Repeat("a", 100) + strings.Repeat("c", 100))
+	for _, data := range [][]byte{whole[:100], []byte(strings.Repeat("b", 100)), whole[100:]} {
+		if err := sender.Send(&agentpb.LogChunk{Stream: "stdout", Data: data}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sender.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	want := "line 000\n" + strings.Repeat("a", 100) + strings.Repeat("b", 100) + strings.Repeat("c", 100)
+	if got := stream.data(); got != want {
+		t.Fatalf("the reader gets %q, want %q", got, want)
+	}
+}
+
+// stderr is not joined to stdout, and a chunk after a gap goes alone, after
+// everything that was waiting: order is kept across all of them. A batch
+// carries the cursor of its last chunk, so a reader that goes on from it
+// gets the next byte.
+func TestLogStreamsAndAGapAreNotJoined(t *testing.T) {
+	sender, stream := batchSender(time.Hour)
+	chunks := []*agentpb.LogChunk{line("stdout", 0), line("stdout", 1), line("stdout", 2), line("stderr", 3), line("stderr", 4), line("stderr", 5)}
+	for i, c := range chunks {
+		c.Cursor = fmt.Sprint(i + 1)
+	}
+	chunks[5].Gap = 100
+	for _, chunk := range chunks {
 		if err := sender.Send(chunk); err != nil {
 			t.Fatal(err)
 		}
 	}
+	if err := sender.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	var got []string
 	for _, msg := range stream.sent() {
 		c := msg.GetChunk()
-		got = append(got, fmt.Sprintf("%s truncated=%v %q", c.GetStream(), c.GetTruncated(), c.GetData()))
+		got = append(got, fmt.Sprintf("%s cursor=%s gap=%d %q", c.GetStream(), c.GetCursor(), c.GetGap(), unpacked(c)))
 	}
 	want := []string{
-		`stdout truncated=false "line 000\n"`,
-		`stdout truncated=false "line 001\nline 002\n"`,
-		`stderr truncated=false "line 003\nline 004\n"`,
-		`stdout truncated=true "[truncated]\n"`,
+		`stdout cursor=1 gap=0 "line 000\n"`,
+		`stdout cursor=3 gap=0 "line 001\nline 002\n"`,
+		`stderr cursor=5 gap=0 "line 003\nline 004\n"`,
+		`stderr cursor=6 gap=100 "line 005\n"`,
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("sent:\n  %s\nwant:\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
@@ -208,10 +282,10 @@ func TestWaitingLogLinesLeaveBeforeThePullEnds(t *testing.T) {
 		want.WriteString(data)
 		lines = append(lines, []byte(data))
 	}
-	logs := NewLogServer(&scriptedLogExecutor{chunks: lines}, newJobTracker(), logr.Discard())
+	logs := testLogServer(&scriptedLogExecutor{chunks: lines})
 	stream := &sentLogs{}
 	client := &logChannelClient{stream: stream}
-	(&Agent{}).handleLogPull(context.Background(), client, logs, "pull-1", streamReq())
+	(&Agent{hourlyLogs: newHourlyBudget(0)}).handleLogPull(context.Background(), client, logs, "pull-1", streamReq())
 
 	sent := stream.sent()
 	if len(sent) == 0 || !sent[len(sent)-1].GetEof() {
@@ -244,7 +318,7 @@ func TestLogLinesAreNotJoinedWithoutAWindow(t *testing.T) {
 		t.Fatalf("200 lines went in %d messages before any flush, want one each", len(sent))
 	}
 	for i, msg := range sent {
-		if got, want := string(msg.GetChunk().GetData()), fmt.Sprintf("line %03d\n", i); got != want {
+		if got, want := string(unpacked(msg.GetChunk())), fmt.Sprintf("line %03d\n", i); got != want {
 			t.Fatalf("message %d carries %q, want %q", i, got, want)
 		}
 	}
@@ -272,9 +346,9 @@ func TestLogBatchWindowIsTheAgentsOption(t *testing.T) {
 		for i := range 50 {
 			lines = append(lines, []byte(fmt.Sprintf("line %03d\n", i)))
 		}
-		logs := NewLogServer(&scriptedLogExecutor{chunks: lines}, newJobTracker(), logr.Discard())
+		logs := testLogServer(&scriptedLogExecutor{chunks: lines})
 		stream := &sentLogs{}
-		a := &Agent{cfg: Config{LogBatchWindow: window}}
+		a := &Agent{cfg: Config{LogBatchWindow: window}, hourlyLogs: newHourlyBudget(0)}
 		a.handleLogPull(context.Background(), &logChannelClient{stream: stream}, logs, "pull-1", streamReq())
 		chunks := 0
 		for _, msg := range stream.sent() {
@@ -331,5 +405,196 @@ func TestRegisterTakesTheHubsLogWindow(t *testing.T) {
 	register(t, a, 0)
 	if got := a.logBatchWindow(); got != defaultLogBatchWindow {
 		t.Fatalf("after a session whose hub named no window the agent batches with %s, want its default %s", got, defaultLogBatchWindow)
+	}
+}
+
+// A batch never grows past what the Gateway takes: the lines waiting go
+// first when the next one would not fit with them. Lines waiting plus a long
+// line's piece were past it, and the Gateway ended the read.
+func TestABatchNeverPassesTheGatewaysChunk(t *testing.T) {
+	sender, stream := batchSender(time.Hour)
+	var want strings.Builder
+	send := func(data string) {
+		want.WriteString(data)
+		if err := sender.Send(&agentpb.LogChunk{Stream: "stdout", Data: []byte(data)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send("first\n")
+	send(strings.Repeat("a", 10<<10) + "\n")
+	send(strings.Repeat("b", backend.MaxLogLine) + "\n")
+	send("last\n")
+	if err := sender.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range stream.sent() {
+		if n, raw := len(msg.GetChunk().GetData()), len(unpacked(msg.GetChunk())); n > backend.MaxLogChunk || raw > backend.MaxLogChunk {
+			t.Errorf("a message of %d bytes (%d unpacked), past the %d the Gateway takes", n, raw, backend.MaxLogChunk)
+		}
+	}
+	if stream.data() != want.String() {
+		t.Fatal("the reader did not get the same bytes in the same order")
+	}
+}
+
+// Each chunk leaves packed, in a zstd frame of its own that unpacks to the
+// bytes it carried (raw_len); one that packs no smaller, a short line,
+// leaves as it is.
+func TestALogChunkLeavesPacked(t *testing.T) {
+	sender, stream := batchSender(0)
+	block := []byte(strings.Repeat("epoch 3 step 120 loss=0.4312 lr=3e-4\n", 3000))
+	for _, data := range [][]byte{block, []byte("x\n")} {
+		if err := sender.Send(&agentpb.LogChunk{Stream: "stdout", Data: data}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sent := stream.sent()
+	if len(sent) != 2 {
+		t.Fatalf("%d messages", len(sent))
+	}
+	big, small := sent[0].GetChunk(), sent[1].GetChunk()
+	if big.GetEncoding() != agentpb.LogEncoding_LOG_ZSTD || big.GetRawLen() != int64(len(block)) || len(big.GetData()) > len(block)/5 {
+		t.Errorf("a %d-byte block left as %v of %d bytes, raw_len %d", len(block), big.GetEncoding(), len(big.GetData()), big.GetRawLen())
+	}
+	if small.GetEncoding() != agentpb.LogEncoding_LOG_RAW || string(small.GetData()) != "x\n" {
+		t.Errorf("a short line left as %v %q", small.GetEncoding(), small.GetData())
+	}
+	if stream.data() != string(block)+"x\n" {
+		t.Error("the reader did not get the same bytes")
+	}
+}
+
+// The hourly budget counts what leaves the machine: the packed bytes. Past
+// it a read does not end: it skips what it cannot send, and the first chunk
+// after it says how many bytes of log, and why.
+func TestTheHourlyBudgetCountsWhatLeaves(t *testing.T) {
+	budget := newHourlyBudget(4 << 10)
+	asked := 0
+	budget.now = func() time.Time {
+		// The budget comes back before the third chunk.
+		if asked++; asked == 3 {
+			return time.Unix(0, 0).Add(time.Hour)
+		}
+		return time.Unix(0, 0)
+	}
+	stream := &sentLogs{}
+	sender := newChannelLogSender(context.Background(), &logChannelClient{stream: stream}, "pull-1", 0, budget)
+	// 64 KiB of training output packs well under the 4 KiB budget; 6 KiB
+	// of noise do not pack, and are past what is left.
+	packs := []byte(strings.Repeat("epoch 3 step 120 loss=0.4312 lr=3e-4\n", 1800))
+	noise := make([]byte, 6<<10)
+	rng := rand.New(rand.NewPCG(1, 2))
+	for i := range noise {
+		noise[i] = byte(rng.Uint32())
+	}
+	for _, data := range [][]byte{packs, noise, []byte("three\n")} {
+		if err := sender.Send(&agentpb.LogChunk{Stream: "stdout", Data: data}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sent := stream.sent()
+	if len(sent) != 2 || string(unpacked(sent[0].GetChunk())) != string(packs) || string(unpacked(sent[1].GetChunk())) != "three\n" {
+		t.Fatalf("sent %d chunks", len(sent))
+	}
+	last := sent[1].GetChunk()
+	if last.GetGap() != int64(len(noise)) || last.GetGapReason() != agentpb.GapReason_GAP_BUDGET {
+		t.Fatalf("the chunk after the budget says gap %d (%v), want the %d bytes of log skipped", last.GetGap(), last.GetGapReason(), len(noise))
+	}
+}
+
+// A gap or a history no one can count (-1) is said like any other: its chunk
+// is never joined to the lines waiting, and a gap of it skipped past the
+// budget is said as one no one can count.
+func TestAnUncountedGapIsSaid(t *testing.T) {
+	sender, stream := batchSender(time.Hour)
+	for _, chunk := range []*agentpb.LogChunk{
+		line("stdout", 0), line("stdout", 1),
+		{Stream: "stdout", Data: []byte("after a file the cluster removed\n"), Gap: backend.Uncounted},
+	} {
+		if err := sender.Send(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sender.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	sent := stream.sent()
+	if len(sent) != 3 || sent[2].GetChunk().GetGap() != backend.Uncounted || string(unpacked(sent[2].GetChunk())) != "after a file the cluster removed\n" {
+		t.Fatalf("sent %v", sent)
+	}
+
+	budget := newHourlyBudget(6)
+	asked := 0
+	budget.now = func() time.Time {
+		if asked++; asked == 3 {
+			return time.Unix(0, 0).Add(time.Hour)
+		}
+		return time.Unix(0, 0)
+	}
+	stream = &sentLogs{}
+	sender = newChannelLogSender(context.Background(), &logChannelClient{stream: stream}, "pull-1", 0, budget)
+	for _, chunk := range []*agentpb.LogChunk{
+		{Data: []byte("one\n")}, {Data: []byte("two\n"), Gap: backend.Uncounted}, {Data: []byte("three\n")},
+	} {
+		if err := sender.Send(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sent = stream.sent()
+	if len(sent) != 2 || sent[1].GetChunk().GetGap() != backend.Uncounted || sent[1].GetChunk().GetGapReason() != agentpb.GapReason_GAP_BUDGET {
+		t.Fatalf("sent %v", sent)
+	}
+}
+
+// What the budget skipped at a read's end is said too: a chunk of no bytes
+// before the read ends, with the gap and the place after it, so a reader
+// that comes back goes on after what was dropped.
+func TestWhatTheBudgetSkippedAtTheEndIsSaid(t *testing.T) {
+	budget := newHourlyBudget(6)
+	budget.now = func() time.Time { return time.Unix(0, 0) }
+	stream := &sentLogs{}
+	sender := newChannelLogSender(context.Background(), &logChannelClient{stream: stream}, "pull-1", 0, budget)
+	for _, chunk := range []*agentpb.LogChunk{
+		{Data: []byte("one\n"), Cursor: "c1"},
+		{Data: []byte("two two two\n"), Cursor: "c2"},
+		{Data: []byte("three three\n"), Cursor: "c3"},
+	} {
+		if err := sender.Send(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sender.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	sent := stream.sent()
+	if len(sent) != 2 {
+		t.Fatalf("sent %v", sent)
+	}
+	last := sent[1].GetChunk()
+	if len(last.GetData()) != 0 || last.GetGap() != int64(len("two two two\nthree three\n")) ||
+		last.GetGapReason() != agentpb.GapReason_GAP_BUDGET || last.GetCursor() != "c3" {
+		t.Fatalf("the read's last chunk %+v, want the bytes skipped and the place after them", last)
+	}
+}
+
+// A piece of a long line has no place of its own: joined to a batch, the
+// batch keeps the place of the last chunk that had one.
+func TestABatchKeepsItsPlaceThroughAPieceOfALine(t *testing.T) {
+	sender, stream := batchSender(time.Hour)
+	for _, chunk := range []*agentpb.LogChunk{
+		{Stream: "stdout", Data: []byte("first\n"), Cursor: "c1"},
+		{Stream: "stdout", Data: []byte("second\n"), Cursor: "c2"},
+		{Stream: "stdout", Data: []byte("a long line's first piece")},
+	} {
+		if err := sender.Send(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sender.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	sent := stream.sent()
+	if got := sent[len(sent)-1].GetChunk().GetCursor(); got != "c2" {
+		t.Fatalf("the batch's place is %q, want c2", got)
 	}
 }

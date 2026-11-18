@@ -309,7 +309,11 @@ func (a *Agent) serveLocalLogs(ctx context.Context, conn net.Conn, req localLogs
 		_, _ = conn.Read(make([]byte, 1))
 	}()
 	encoder := json.NewEncoder(conn)
-	chunks, err := a.executor.Logs(ctx, req.Handle, req.Follow, req.Tail)
+	logReq := backend.LogRequest{Follow: req.Follow, TailLines: req.Tail}
+	if req.Tail < 0 {
+		logReq.HistoryBytes = backend.AllHistory
+	}
+	chunks, err := a.executor.Logs(ctx, req.Handle, logReq)
 	if err != nil {
 		if errors.Is(err, backend.ErrNotFound) {
 			return // no log: nothing to read, as a job that wrote none

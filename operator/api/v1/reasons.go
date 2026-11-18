@@ -80,6 +80,17 @@ const (
 	// it checkpointed never acked its COMPLETE: its work may be unfinished.
 	ReasonCheckpointIncomplete = "CHECKPOINT_INCOMPLETE"
 
+	// ReasonLogsNotSaved reports a job whose log its agent saves no more to
+	// spec.workload.template.logs, for good: the bucket or its credentials
+	// refused it, and no END.json will come. The job runs on.
+	ReasonLogsNotSaved = "LOGS_NOT_SAVED"
+
+	// ReasonLogsIncomplete reports a job whose log's copy in its bucket
+	// misses a part: lost before it was saved (a queue that stayed full, a
+	// machine's file that freed it), or past logs.maxBytes. Its END.json
+	// says so. The job runs on.
+	ReasonLogsIncomplete = "LOGS_INCOMPLETE"
+
 	// ReasonProcessRestarting reports a failed process the controller re-runs
 	// on a machine, within restartPolicy.backoffLimit; the detail is how the
 	// failed attempt ended.

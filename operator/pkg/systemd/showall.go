@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-logr/logr"
 )
 
 // showBatch is how many units one `systemctl show` reads: a sweep over many
@@ -24,7 +26,10 @@ func (m *Manager) StatusAll(ctx context.Context, names []string) ([]map[string]s
 // TerminalWatch returns the Manager's watch over the units its follow
 // streams read: one for every stream, so their sweeps are one command.
 func (m *Manager) TerminalWatch() *TerminalWatch {
-	m.watchOnce.Do(func() { m.watch = NewTerminalWatch(m.cfg, m.runner) })
+	m.watchOnce.Do(func() {
+		m.watch = NewTerminalWatch(m.cfg, m.runner)
+		m.watch.logger = m.logger
+	})
 	return m.watch
 }
 
@@ -59,14 +64,35 @@ func unitEnded(props map[string]string) bool {
 	return MapState(props).Phase.Terminal()
 }
 
-// TerminalWatch tells follow streams when their units end. journalctl -f has
-// no "stop when the unit stops", so something must ask systemd; one sweep
-// asks for every followed unit in one `systemctl show`. A poll per stream
-// cost two commands a second each, about 40 mCPU a follow.
+// followPollInterval is how often a TerminalWatch asks whether its units
+// ended while it cannot hear systemd.
+const followPollInterval = 500 * time.Millisecond
+
+// followFallbackInterval is how often it asks while it hears systemd, for a
+// change it did not hear.
+const followFallbackInterval = 10 * time.Second
+
+// TerminalWatch tells follow streams when their units end: the end of a job
+// comes from systemd, never from its log (P13). It hears from the manager's
+// own socket which units changed (unitChanges) and reads every followed unit
+// in one `systemctl show` when systemd says one of them changed, when a
+// stream starts (its unit may have ended already), and every
+// followFallbackInterval. Asking every followPollInterval instead cost ~30
+// mCPU of a VM agent's ~46 with one reader (a bash and a systemctl each
+// time; E10, 2026-11-14), and a job with logs= is followed its whole life;
+// hearing systemd, the agent spends ~16 (E10, 2026-11-16). Without the socket (an agent that is not root)
+// the watch asks every followPollInterval, and dials again each time.
 type TerminalWatch struct {
-	cfg      Config
-	runner   Runner
-	interval time.Duration
+	cfg    Config
+	runner Runner
+	logger logr.Logger
+	// subscribe hears the units systemd says changed; interval is how
+	// often the watch asks without it, fallback how often with it.
+	subscribe func(context.Context) (<-chan string, error)
+	interval  time.Duration
+	fallback  time.Duration
+	// started wakes the sweep for a stream that starts.
+	started chan struct{}
 
 	mu      sync.Mutex
 	waiters map[string][]*unitWaiter
@@ -78,10 +104,14 @@ type unitWaiter struct {
 	ended chan struct{}
 }
 
-// NewTerminalWatch builds a watch that asks through runner. A nil runner
-// never reports an end.
+// NewTerminalWatch builds a watch that hears the manager cfg names and asks
+// through runner. A nil runner never reports an end.
 func NewTerminalWatch(cfg Config, runner Runner) *TerminalWatch {
-	return &TerminalWatch{cfg: cfg, runner: runner, interval: followPollInterval, waiters: map[string][]*unitWaiter{}}
+	return &TerminalWatch{
+		cfg: cfg, runner: runner, logger: logr.Discard(),
+		subscribe: unitChanges(cfg.privateSocket()), interval: followPollInterval, fallback: followFallbackInterval,
+		started: make(chan struct{}, 1), waiters: map[string][]*unitWaiter{},
+	}
 }
 
 // Ended returns a channel closed once the unit reaches a terminal phase. It
@@ -95,6 +125,10 @@ func (w *TerminalWatch) Ended(ctx context.Context, unit string) <-chan struct{} 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.waiters[unit] = append(w.waiters[unit], waiter)
+	select {
+	case w.started <- struct{}{}:
+	default:
+	}
 	if !w.running {
 		w.running = true
 		go w.sweep()
@@ -102,25 +136,83 @@ func (w *TerminalWatch) Ended(ctx context.Context, unit string) <-chan struct{} 
 	return waiter.ended
 }
 
-// sweep runs while any stream waits: each tick it reads every waited unit
-// at once and closes the waits of those that ended.
+// sweep runs while any stream waits: it reads every waited unit at once
+// and closes the waits of those that ended, then waits for the next read.
 func (w *TerminalWatch) sweep() {
-	ticker := time.NewTicker(w.interval)
-	defer ticker.Stop()
-	for range ticker.C {
+	// Its end closes the connection to systemd.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var changes <-chan string
+	told := false
+	next := time.NewTimer(w.interval)
+	defer next.Stop()
+	for {
+		if changes == nil {
+			// Before the read: a unit that ends after it is said.
+			var err error
+			if changes, err = w.subscribe(ctx); err != nil && !told {
+				w.logger.Info("cannot hear systemd: follow streams ask whether their jobs ended every "+w.interval.String(), "error", err.Error())
+				told = true
+			}
+		}
+		// Every stream that started until here is in this read.
+		select {
+		case <-w.started:
+		default:
+		}
 		units := w.waitedUnits()
 		if len(units) == 0 {
 			return
 		}
-		ended := w.ended(units)
-		w.mu.Lock()
-		for _, unit := range ended {
-			for _, waiter := range w.waiters[unit] {
-				close(waiter.ended)
-			}
-			delete(w.waiters, unit)
+		w.close(w.ended(units))
+		if changes == nil {
+			next.Reset(w.interval)
+		} else {
+			next.Reset(w.fallback)
 		}
-		w.mu.Unlock()
+		w.await(next, &changes)
+	}
+}
+
+// await returns when the next read is due: at the timer, when a stream
+// starts, when systemd says a followed unit changed, or when the connection
+// drops (*changes is then nil: what changed meanwhile was not said).
+func (w *TerminalWatch) await(next *time.Timer, changes *<-chan string) {
+	for {
+		select {
+		case <-next.C:
+			return
+		case <-w.started:
+			return
+		case unit, ok := <-*changes:
+			if !ok {
+				*changes = nil
+				return
+			}
+			if w.follows(unit) {
+				return
+			}
+		}
+	}
+}
+
+// follows reports whether a stream waits on unit.
+func (w *TerminalWatch) follows(unit string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_, ok := w.waiters[unit]
+	return ok
+}
+
+// close tells the streams of the units that ended.
+func (w *TerminalWatch) close(ended []string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, unit := range ended {
+		for _, waiter := range w.waiters[unit] {
+			close(waiter.ended)
+		}
+		delete(w.waiters, unit)
 	}
 }
 

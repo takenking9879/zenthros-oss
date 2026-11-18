@@ -398,6 +398,123 @@ var AgentLogs_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	NodeLogs_ReadPodLog_FullMethodName = "/zenthros.agent.v1.NodeLogs/ReadPodLog"
+)
+
+// NodeLogsClient is the client API for NodeLogs service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// NodeLogs is served by a node's log reader (zenthros-agent node-log-reader,
+// the agent chart's DaemonSet) to the cluster's agent alone: the log files of
+// the pods on its node, over mTLS with a CA of the chart's own.
+type NodeLogsClient interface {
+	// ReadPodLog reads one container's log files as StreamLogs reads a job's:
+	// its history, then with follow what it writes next, until the call ends.
+	ReadPodLog(ctx context.Context, in *PodLogRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogChunk], error)
+}
+
+type nodeLogsClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewNodeLogsClient(cc grpc.ClientConnInterface) NodeLogsClient {
+	return &nodeLogsClient{cc}
+}
+
+func (c *nodeLogsClient) ReadPodLog(ctx context.Context, in *PodLogRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &NodeLogs_ServiceDesc.Streams[0], NodeLogs_ReadPodLog_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PodLogRequest, LogChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type NodeLogs_ReadPodLogClient = grpc.ServerStreamingClient[LogChunk]
+
+// NodeLogsServer is the server API for NodeLogs service.
+// All implementations must embed UnimplementedNodeLogsServer
+// for forward compatibility.
+//
+// NodeLogs is served by a node's log reader (zenthros-agent node-log-reader,
+// the agent chart's DaemonSet) to the cluster's agent alone: the log files of
+// the pods on its node, over mTLS with a CA of the chart's own.
+type NodeLogsServer interface {
+	// ReadPodLog reads one container's log files as StreamLogs reads a job's:
+	// its history, then with follow what it writes next, until the call ends.
+	ReadPodLog(*PodLogRequest, grpc.ServerStreamingServer[LogChunk]) error
+	mustEmbedUnimplementedNodeLogsServer()
+}
+
+// UnimplementedNodeLogsServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedNodeLogsServer struct{}
+
+func (UnimplementedNodeLogsServer) ReadPodLog(*PodLogRequest, grpc.ServerStreamingServer[LogChunk]) error {
+	return status.Error(codes.Unimplemented, "method ReadPodLog not implemented")
+}
+func (UnimplementedNodeLogsServer) mustEmbedUnimplementedNodeLogsServer() {}
+func (UnimplementedNodeLogsServer) testEmbeddedByValue()                  {}
+
+// UnsafeNodeLogsServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to NodeLogsServer will
+// result in compilation errors.
+type UnsafeNodeLogsServer interface {
+	mustEmbedUnimplementedNodeLogsServer()
+}
+
+func RegisterNodeLogsServer(s grpc.ServiceRegistrar, srv NodeLogsServer) {
+	// If the following call panics, it indicates UnimplementedNodeLogsServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&NodeLogs_ServiceDesc, srv)
+}
+
+func _NodeLogs_ReadPodLog_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(PodLogRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(NodeLogsServer).ReadPodLog(m, &grpc.GenericServerStream[PodLogRequest, LogChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type NodeLogs_ReadPodLogServer = grpc.ServerStreamingServer[LogChunk]
+
+// NodeLogs_ServiceDesc is the grpc.ServiceDesc for NodeLogs service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var NodeLogs_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "zenthros.agent.v1.NodeLogs",
+	HandlerType: (*NodeLogsServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "ReadPodLog",
+			Handler:       _NodeLogs_ReadPodLog_Handler,
+			ServerStreams: true,
+		},
+	},
+	Metadata: "agent.proto",
+}
+
+const (
 	LogService_Logs_FullMethodName = "/zenthros.agent.v1.LogService/Logs"
 )
 

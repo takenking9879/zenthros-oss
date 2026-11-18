@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from zenthros import errors
+
 # Lifecycle phases as returned by public zctl get (and the fake).
 QUEUED = "Queued"
 PENDING = "Pending"
@@ -30,9 +32,6 @@ WORKER_LOST = "WORKER_LOST"
 PREEMPTED = "PREEMPTED"
 MACHINE_LIFETIME = "MACHINE_LIFETIME"
 RESCHEDULE_REASONS = frozenset({WORKER_LOST, PREEMPTED, MACHINE_LIFETIME})
-
-# Public log API is byte-capped (same order as report payload).
-MAX_LOG_BYTES = 256 * 1024
 
 
 @dataclass
@@ -167,10 +166,35 @@ class JobHandle:
         """Remove the job; its workload is cancelled first."""
         return self._client.delete(self.job_id)
 
-    def logs(self, tail=None):
-        if tail is None:
-            return self._client.logs(self.job_id)
-        return self._client.logs(self.job_id, tail=tail)
+    def logs(self, tail=None, follow=False, to=None):
+        """The end of the job's log as text: its last 512 KiB from the start
+        of a line, or its last tail lines; what it leaves out said on a line.
+        follow=True: that, then each line as it is written until the job
+        ends, to iterate (close() or a with block stops it). to="x.log": the
+        whole log into that file, its path returned: with logs=, from its
+        bucket and the machine; without, all the machine keeps (50 MiB).
+        Once the machine is gone, a job with logs= is read from its bucket."""
+        from zenthros.remote import savedlogs
+
+        if to is not None:
+            if follow or tail is not None:
+                raise ValueError("logs(to=) writes the whole log: no tail= or follow= with it")
+            return savedlogs.save(self._client, self.job_id, to)
+        if follow:
+            from zenthros.jobs.follow import FollowedLog, job_ended
+
+            return FollowedLog(self._client, self.job_id, lambda: job_ended(self._client, self.job_id), tail=tail)
+        try:
+            return self._client.logs(self.job_id) if tail is None else self._client.logs(self.job_id, tail=tail)
+        except errors.ZenthrosError as gone:
+            # The machine is gone, or its log with it: the bucket's, if any.
+            try:
+                saved = savedlogs.tail(self._client, self.job_id, tail)
+            except Exception:  # noqa: BLE001 - the machine's error is the one to say
+                saved = None
+            if saved is None:
+                raise gone from None
+            return saved
 
     def reports(self):
         """ExecutionReport snapshots. This is the metric read path."""

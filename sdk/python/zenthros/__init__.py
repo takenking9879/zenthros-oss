@@ -74,6 +74,14 @@ def __getattr__(name):
         from zenthros import installing
 
         return installing.install
+    if name == "Logs":
+        from zenthros.remote import savedlogs
+
+        return savedlogs.Logs
+    if name == "transcript":
+        from zenthros import console
+
+        return console.transcript
     if name == "set_store":
         from zenthros import userstore
 
@@ -94,8 +102,9 @@ def __getattr__(name):
 
 
 __all__ = [
-    "CheckpointPolicy", "Checkpointer", "CloudFunction", "JobEnv", "JobFailed", "LocalBackend", "Machine", "RemoteCall",
+    "CheckpointPolicy", "Checkpointer", "CloudFunction", "JobEnv", "JobFailed", "LocalBackend", "Logs", "Machine", "RemoteCall",
     "Artifact", "Pipeline", "RemoteError", "Reporter", "Secret", "Task", "ZenthrosError", "attach", "cache", "parquet", "children", "cloud", "configure", "create", "delete", "files", "gather", "get", "grid", "install",
     "last_failure", "login", "logout", "map",
-    "phase", "preemption", "progress", "report", "run", "serve", "services", "session", "set_store", "spawn", "targets", "workspace",
+    "phase", "preemption", "progress", "report", "run", "serve", "services", "session", "set_store", "spawn", "targets",
+    "transcript", "workspace",
 ]

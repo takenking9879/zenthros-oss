@@ -3,6 +3,7 @@
 package k8sagent
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -92,9 +93,16 @@ func (o ownerChain) reaches(refs []metav1.OwnerReference, depth int) bool {
 	return false
 }
 
+// manifestLinePrefix names the pod and container a manifest's log line
+// comes from.
+func manifestLinePrefix(pod, container string) string {
+	return "[" + pod + "/" + container + "] "
+}
+
 // manifestLogs streams every container of the object's pods, each line
-// prefixed [pod/container] so a multi-replica job reads as one log.
-func (e *Executor) manifestLogs(ctx context.Context, r ref, follow bool, tailLines int) (<-chan backend.LogChunk, error) {
+// prefixed [pod/container] so a multi-replica job reads as one log. The
+// history is shared out among them; the merged log has no cursor.
+func (e *Executor) manifestLogs(ctx context.Context, r ref, req backend.LogRequest) (<-chan backend.LogChunk, error) {
 	obj, err := e.getManifest(ctx, r)
 	if err != nil {
 		return nil, err
@@ -106,38 +114,33 @@ func (e *Executor) manifestLogs(ctx context.Context, r ref, follow bool, tailLin
 	if len(pods) == 0 {
 		return nil, fmt.Errorf("%s has no pods yet", r)
 	}
+	containers := 0
+	for _, pod := range pods {
+		containers += len(pod.Spec.Containers)
+	}
+	each := backend.LogRequest{Follow: req.Follow, TailLines: req.TailLines, HistoryBytes: req.HistoryBytes}
+	if req.TailLines < 0 && req.History() != backend.AllHistory {
+		each.HistoryBytes = max(req.History()/int64(containers), 16<<10)
+	}
 	out := make(chan backend.LogChunk, 64)
 	var wg sync.WaitGroup
-	for _, pod := range pods {
+	for i := range pods {
+		pod := &pods[i]
 		for _, container := range pod.Spec.Containers {
-			opts := &corev1.PodLogOptions{Follow: follow, Container: container.Name}
-			if tailLines >= 0 {
-				tl := int64(tailLines)
-				opts.TailLines = &tl
-			}
-			prefix := "[" + pod.Name + "/" + container.Name + "] "
+			prefix := manifestLinePrefix(pod.Name, container.Name)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				// Each open waits for its own container to start: opened one
 				// after another, eight pods still creating held every line
 				// back for eight graces (06#7).
-				stream, err := e.openLogStream(ctx, pod.Namespace, pod.Name, opts)
+				chunks, err := e.podLogs(ctx, pod, container.Name, each)
 				if err != nil {
 					// One container that has not started does not hide the others.
 					e.logger.V(1).Info("skipping container log", "pod", pod.Name, "container", container.Name, "error", err.Error())
 					return
 				}
-				defer stream.Close()
-				scanner := backend.LogLines(stream)
-				for scanner.Scan() {
-					chunk := backend.LogChunk{Stream: "stdout", Data: []byte(prefix + scanner.Text() + "\n"), Timestamp: time.Now()}
-					select {
-					case out <- chunk:
-					case <-ctx.Done():
-						return
-					}
-				}
+				prefixLines(ctx, chunks, prefix, out)
 			}()
 		}
 	}
@@ -146,4 +149,48 @@ func (e *Executor) manifestLogs(ctx context.Context, r ref, follow bool, tailLin
 		close(out)
 	}()
 	return out, nil
+}
+
+// prefixLines sends each line of chunks with prefix before it. A line
+// longer than backend.MaxLogLine comes in pieces, each a line of its own.
+func prefixLines(ctx context.Context, chunks <-chan backend.LogChunk, prefix string, out chan<- backend.LogChunk) {
+	var partial []byte
+	send := func(line []byte) bool {
+		select {
+		case out <- backend.LogChunk{Stream: "stdout", Data: append([]byte(prefix), line...), Timestamp: time.Now()}:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	for chunk := range chunks {
+		data := chunk.Data
+		for len(data) > 0 {
+			i := bytes.IndexByte(data, '\n')
+			if i < 0 {
+				partial = append(partial, data...)
+				for len(partial) >= backend.MaxLogLine {
+					if !send(append(partial[:backend.MaxLogLine:backend.MaxLogLine], '\n')) {
+						return
+					}
+					partial = partial[backend.MaxLogLine:]
+				}
+				break
+			}
+			line := append(partial, data[:i+1]...)
+			partial, data = nil, data[i+1:]
+			for len(line) > backend.MaxLogLine+1 {
+				if !send(append(line[:backend.MaxLogLine:backend.MaxLogLine], '\n')) {
+					return
+				}
+				line = line[backend.MaxLogLine:]
+			}
+			if !send(line) {
+				return
+			}
+		}
+	}
+	if len(partial) > 0 {
+		send(append(partial, '\n'))
+	}
 }

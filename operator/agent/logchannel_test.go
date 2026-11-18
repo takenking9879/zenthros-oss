@@ -57,7 +57,7 @@ func (g *pullGateway) LogChannel(stream agentpb.Agent_LogChannelServer) error {
 
 func TestLogChannelOpensAgainstBufconn(t *testing.T) {
 	exec := &scriptedLogExecutor{chunks: [][]byte{[]byte("hello\n")}}
-	a := NewWithExecutor(Config{BackendID: "vm-1", BackendType: "vm", MaxLogBytes: 64}, exec, logr.Discard())
+	a := NewWithExecutor(Config{BackendID: "vm-1", BackendType: "vm"}, exec, logr.Discard())
 
 	gw := &pullGateway{done: make(chan struct{})}
 	lis := bufconn.Listen(1 << 20)

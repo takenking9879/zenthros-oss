@@ -31,13 +31,15 @@ import cloudpickle
 import zenthros
 from zenthros import errors, remote
 from zenthros.core.storage import MemoryBlobStore
+from zenthros.jobs import logrecords
 from zenthros.jobs.fake import FakeJobClient
+from zenthros.jobs.follow import FollowedLog
 from zenthros.jobs.handle import FAILED, SUCCEEDED
 from zenthros.jobs.http import HTTPJobClient
 from zenthros.remote.call import runner_packages
 from zenthros.view import Backend
 
-from support import FakeAPI, ReportAgent, execute, machine_side, reporting
+from support import FakeAPI, ReportAgent, execute, machine_side, record, reporting
 
 STORE = "s3://zr-test/calls"
 
@@ -569,8 +571,9 @@ class RunTest(unittest.TestCase):
 
 
 class FakeProc:
-    def __init__(self, lines):
+    def __init__(self, lines, position=None):
         self.stdout = iter(lines)
+        self.position = position
 
     def wait(self, timeout=None):
         return 0
@@ -579,35 +582,74 @@ class FakeProc:
         return 0
 
 
+class RecordStreams:
+    """A client whose followed log is the next stream of records, read from
+    where the last one left off, as HTTPJobClient reads zenthros-api's."""
+
+    def __init__(self, streams):
+        self.streams, self.afters = list(streams), []
+
+    def follow_logs(self, name, after=None, tail=None):
+        self.afters.append(after)
+        text = logrecords.Text(after)
+        pieces = self.streams.pop(0) if self.streams else []
+        return FakeProc(logrecords.follow_lines(pieces, text), text.position)
+
+
 class LogFollowerTest(unittest.TestCase):
-    def test_reconnects_skip_printed_lines_and_a_new_attempt_prints_whole(self):
-        streams = [
-            ["a1\n", "a2\n"],                 # first attempt, zctl ends early
-            ["a1\n", "a2\n", "a3\n"],          # same attempt again: only a3 is new
-            ["b1\n", "b2\n"],                 # the call moved machines: all of it
-        ]
-
-        class Client:
-            def follow_logs(self, name):
-                return FakeProc(streams.pop(0)) if streams else FakeProc([])
-
+    def follow(self, client):
         out = io.StringIO()
-        follower = remote._LogFollower(Client(), "zr-x", poll_seconds=0.01, out=out)
+        follower = remote._LogFollower(client, "zr-x", poll_seconds=0.01, out=out)
         follower.start()
         deadline = time.time() + 5
-        while streams and time.time() < deadline:
+        while client.streams and time.time() < deadline:
             time.sleep(0.01)
         follower.stop(grace=0.2)
-        self.assertEqual(out.getvalue(), "a1\na2\na3\nb1\nb2\n")
+        return out.getvalue()
+
+    def test_each_stream_goes_on_right_after_the_last_and_a_new_attempt_says_so(self):
+        # A Gateway restart breaks the first stream; the attempt ends after
+        # the second; the call moved machines for the third. A stream had
+        # replayed the log from where zctl started it, and lines repeated or
+        # went missing where they were matched by their text.
+        client = RecordStreams([
+            [record(b"a1\na2\npart", cursor="10", handle="h1", attempt=0), record(b"", error="the gateway restarted")],
+            [record(b"ial\na3\n", cursor="17", handle="h1", attempt=0)],
+            [record(b"a1\nb1\n", cursor="6", handle="h2", attempt=1)],
+        ])
+        # The first attempt is 0: its handle, not its number, says the next
+        # is another.
+        self.assertEqual(self.follow(client), "a1\na2\npartial\na3\n[zenthros: attempt 1]\na1\nb1\n")
+        self.assertEqual(client.afters[0], None)
+        self.assertEqual((client.afters[1].handle, client.afters[1].cursor, client.afters[1].partial), ("h1", "10", "part"))
+        self.assertEqual((client.afters[2].handle, client.afters[2].cursor, client.afters[2].partial), ("h1", "17", ""))
+
+    def test_a_stream_that_gave_nothing_is_opened_again_from_the_same_place(self):
+        client = RecordStreams([
+            [record(b"a1\n", cursor="3", handle="h1", attempt=1)],
+            [],
+            [record(b"a2\n", cursor="6")],
+        ])
+        self.assertEqual(self.follow(client), "a1\na2\n")
+        self.assertEqual([a.cursor for a in client.afters[1:3]], ["3", "3"])
+
+    def test_what_a_stream_never_got_is_said(self):
+        client = RecordStreams([
+            [record(b"a1\n", cursor="2000003", handle="h1", attempt=1, omitted=2_000_000)],
+            [record(b"a9\n", cursor="9000003", gap=6_999_997, gap_reason="freed")],
+        ])
+        self.assertEqual(self.follow(client), "[zenthros: the first 2.0 MB of this log are not shown]\na1\n"
+                                              "[zenthros: 7.0 MB of this log are no longer on the machine]\na9\n")
 
     def test_stop_waits_for_the_running_stream_not_a_fixed_second(self):
-        # The last lines come while zctl still streams: stop() waits for
-        # it, and with nothing streaming it has nothing to wait for.
+        # The last lines come while the stream is still open: stop() waits
+        # for it, and with nothing streaming it has nothing to wait for.
         release, done = threading.Event(), threading.Event()
 
         class Streaming:
             def __init__(self):
                 self.stdout = self._lines()
+                self.position = None
 
             def _lines(self):
                 yield "a\n"
@@ -626,7 +668,7 @@ class LogFollowerTest(unittest.TestCase):
         procs = [Streaming()]
 
         class Client:
-            def follow_logs(self, name):
+            def follow_logs(self, name, after=None, tail=None):
                 return procs.pop(0) if procs else FakeProc([])
 
         out = io.StringIO()
@@ -642,41 +684,40 @@ class LogFollowerTest(unittest.TestCase):
         follower.stop(grace=2)
         self.assertLess(time.monotonic() - started, 0.5)
 
-    def follow(self, streams):
+
+class FollowedLogTest(unittest.TestCase):
+    """call.logs(follow=True): the same streams, until the job ends."""
+
+    def test_it_ends_with_the_job_and_closes_with_its_block(self):
+        client = RecordStreams([[record(b"a1\n", cursor="3", handle="h1", attempt=1)], [record(b"a2\n", cursor="6")]])
+        ended = iter([False, True])
+        with FollowedLog(client, "j", ended=lambda: next(ended), poll=0.01, tail=5) as lines:
+            self.assertEqual(list(lines), ["a1\n", "a2\n"])
+
+        streaming = threading.Event()
+
+        class Forever:
+            stdout = iter(["x\n"])
+            position = None
+            terminated = False
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                Forever.terminated = True
+
+            def wait(self, timeout=None):
+                return 0
+
         class Client:
-            def follow_logs(self, name):
-                return FakeProc(streams.pop(0)) if streams else FakeProc([])
+            def follow_logs(self, name, after=None, tail=None):
+                streaming.set()
+                return Forever()
 
-        out = io.StringIO()
-        follower = remote._LogFollower(Client(), "zr-x", poll_seconds=0.01, out=out)
-        follower.start()
-        deadline = time.time() + 5
-        while streams and time.time() < deadline:
-            time.sleep(0.01)
-        follower.stop(grace=0.2)
-        return out.getvalue()
-
-    def test_a_replay_that_starts_past_the_first_line_prints_nothing_twice(self):
-        # After the unit stops, zctl replays the journal without systemd's
-        # "Started" line: the same attempt, not a new one.
-        self.assertEqual(
-            self.follow([["Started\n", "tick 0\n", "tick 1\n"], ["tick 0\n", "tick 1\n", "tick 2\n"]]),
-            "Started\ntick 0\ntick 1\ntick 2\n",
-        )
-
-    def test_a_replay_from_a_line_that_repeats_earlier_prints_nothing_twice(self):
-        # The replay starts on the second blank line; matching it against the
-        # first one printed "y" again (and teed it to logs.txt twice).
-        self.assertEqual(
-            self.follow([["\n", "x\n", "\n", "y\n"], ["\n", "y\n", "z\n"]]),
-            "\nx\n\ny\nz\n",
-        )
-
-    def test_a_new_attempt_prints_its_lines_even_where_they_repeat(self):
-        self.assertEqual(
-            self.follow([["on a\n", "tick 0\n"], ["on b\n", "tick 0\n", "tick 1\n"]]),
-            "on a\ntick 0\non b\ntick 0\ntick 1\n",
-        )
+        with FollowedLog(Client(), "j", ended=lambda: False) as lines:
+            self.assertEqual(next(iter(lines)), "x\n")
+        self.assertTrue(Forever.terminated, "the block's end left the stream open")
 
 
 class PackTest(unittest.TestCase):
@@ -813,13 +854,15 @@ class LogTailTest(unittest.TestCase):
     def test_failed_command_shows_the_end_of_a_long_log(self):
         # The log was cut to 256 KiB from its start and then its "last 30
         # lines" taken: the real error, at the end, never showed (SDK-10).
+        # The API takes the last lines now.
         api = FakeAPI()
         self.addCleanup(api.close)
-        log = ("noise " * 20 + "\n") * 3000 + "THE REAL ERROR\n"
-        api.routes[("GET", "/v1/workspaces/risk/jobs/j/logs")] = (200, log.encode())
+        log = ("noise " * 20 + "\n") * 29 + "THE REAL ERROR\n"
+        api.routes[("GET", "/v1/workspaces/risk/jobs/j/logs")] = (200, record(log.encode(), cursor="9", omitted=900_000))
         client = HTTPJobClient(api.url, "risk", "t")
         tail = client.logs("j", tail=30)
-        self.assertIn("THE REAL ERROR", tail)
+        self.assertTrue(tail.endswith("THE REAL ERROR\n"), tail[-100:])
+        self.assertTrue(tail.startswith("[zenthros: the first 900.0 KB of this log are not shown]\n"), tail[:100])
         query = api.requests[-1]["path"].split("?", 1)[-1]
         self.assertIn("tail=30", query)
 

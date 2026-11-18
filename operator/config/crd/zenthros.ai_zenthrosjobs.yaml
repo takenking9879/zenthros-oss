@@ -785,6 +785,253 @@ spec:
                         maxLength: 512
                         pattern: ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$
                         type: string
+                      logs:
+                        description: |-
+                          Logs saves the job's whole log to a bucket of the user's as the job
+                          writes it. Without it a log is read from its machine while the
+                          machine lasts, and only its last 50 MiB are kept there.
+                        properties:
+                          caData:
+                            description: |-
+                              CAData is PEM certificates the agent trusts for Endpoint besides its
+                              system's: a server of the user's own, with a private CA.
+                            maxLength: 16384
+                            type: string
+                          credentials:
+                            description: |-
+                              Credentials are what the agent writes with, each a secret source
+                              materialized as env: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (and
+                              AWS_SESSION_TOKEN for temporary keys), or GOOGLE_STORE_KEY, a service
+                              account's key, for gs://. They reach the agent, never the job. Empty:
+                              the machine's own identity (its role, its service account).
+                            items:
+                              description: |-
+                                SecretSourceRef identifies secret material that is resolved only in the
+                                destination environment. It never contains a secret value.
+                              properties:
+                                awsSecretsManager:
+                                  description: |-
+                                    AWSSecretsManager identifies an AWS Secrets Manager secret resolved by the
+                                    destination worker identity. Required when type is aws-secrets-manager.
+                                  properties:
+                                    jsonKey:
+                                      description: |-
+                                        JSONKey extracts one field from a JSON secret string. When omitted the
+                                        agent materializes the raw secret string.
+                                      maxLength: 253
+                                      minLength: 1
+                                      pattern: ^[-._a-zA-Z0-9]+$
+                                      type: string
+                                    region:
+                                      description: |-
+                                        Region is the AWS region that hosts the secret. The destination agent
+                                        uses this region and does not inherit controller or provisioner region.
+                                      maxLength: 32
+                                      minLength: 1
+                                      pattern: ^[a-z]{2}-[a-z0-9-]+-\d+$
+                                      type: string
+                                    secretId:
+                                      description: SecretID is a secret name or full
+                                        ARN.
+                                      maxLength: 512
+                                      minLength: 1
+                                      pattern: ^(arn:aws:secretsmanager:[a-z0-9-]+:\d{12}:secret:.+|[A-Za-z0-9/_+=.@-]+)$
+                                      type: string
+                                    versionId:
+                                      description: VersionID pins a specific secret
+                                        version. Mutually exclusive with VersionStage.
+                                      pattern: ^[A-Za-z0-9-]+$
+                                      type: string
+                                    versionStage:
+                                      description: |-
+                                        VersionStage selects a staging label such as AWSCURRENT. When omitted
+                                        together with VersionID, the agent reads AWSCURRENT at resolve time.
+                                      pattern: ^[A-Za-z0-9/_+=.@-]+$
+                                      type: string
+                                  required:
+                                  - region
+                                  - secretId
+                                  type: object
+                                  x-kubernetes-validations:
+                                  - message: versionId and versionStage are mutually
+                                      exclusive
+                                    rule: '!has(self.versionId) || !has(self.versionStage)'
+                                encryptedPayload:
+                                  description: |-
+                                    EncryptedPayload is age ciphertext sealed to destination recipients.
+                                    Required when type is encrypted-payload. It never contains plaintext.
+                                  properties:
+                                    ciphertext:
+                                      description: Ciphertext is ASCII-armored age
+                                        ciphertext.
+                                      maxLength: 65536
+                                      minLength: 64
+                                      type: string
+                                    keyId:
+                                      description: KeyID is an optional short fingerprint
+                                        of the primary recipient.
+                                      maxLength: 32
+                                      pattern: ^[A-Za-z0-9]+$
+                                      type: string
+                                    recipients:
+                                      description: Recipients are the age1 X25519
+                                        public keys this ciphertext was sealed to.
+                                      items:
+                                        type: string
+                                      maxItems: 8
+                                      minItems: 1
+                                      type: array
+                                    workspaceSecret:
+                                      description: |-
+                                        WorkspaceSecret is the Workspace secret the controller sealed this
+                                        from, never set in a ZenthrosJob. age seals with fresh randomness, so
+                                        a resent job is known by this name rather than by its ciphertext.
+                                      type: string
+                                  required:
+                                  - ciphertext
+                                  - recipients
+                                  type: object
+                                  x-kubernetes-validations:
+                                  - message: 'workspaceSecret is set by the controller
+                                      when it seals a Workspace secret: name it with
+                                      type workspace-secret'
+                                    rule: '!has(self.workspaceSecret)'
+                                key:
+                                  description: Key selects one entry in the destination
+                                    Kubernetes Secret.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[-._a-zA-Z0-9]+$
+                                  type: string
+                                materialization:
+                                  description: Materialization controls how the destination
+                                    workload receives the value.
+                                  properties:
+                                    envName:
+                                      description: |-
+                                        EnvName overrides the environment variable name. When omitted, the Secret
+                                        key (or AWS JSON key / secret name) is normalized to upper snake case.
+                                        Required for encrypted-payload env materialization.
+                                      pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                      type: string
+                                    mode:
+                                      description: Mode selects an environment variable
+                                        or a read-only 0600 file.
+                                      enum:
+                                      - env
+                                      - file
+                                      type: string
+                                    path:
+                                      description: |-
+                                        Path overrides the absolute file path. When omitted, the value is mounted
+                                        below /var/run/zenthros/secrets/<secret-name>/<key>.
+                                      pattern: ^/[^\n\r]*$
+                                      type: string
+                                  required:
+                                  - mode
+                                  type: object
+                                name:
+                                  description: |-
+                                    Name is the destination Kubernetes Secret name; for workspace-secret,
+                                    the Workspace secret's name.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                                  type: string
+                                namespace:
+                                  description: |-
+                                    Namespace is the destination Kubernetes namespace containing the Secret.
+                                    It must equal the namespace selected for the workload.
+                                  maxLength: 63
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
+                                type:
+                                  description: Type selects the destination-side resolver.
+                                  enum:
+                                  - k8s-secret
+                                  - aws-secrets-manager
+                                  - encrypted-payload
+                                  - workspace-secret
+                                  type: string
+                              required:
+                              - materialization
+                              - type
+                              type: object
+                              x-kubernetes-validations:
+                              - message: unsupported secret source type
+                                rule: self.type == 'k8s-secret' || self.type == 'aws-secrets-manager'
+                                  || self.type == 'encrypted-payload' || self.type
+                                  == 'workspace-secret'
+                              - message: workspace-secret requires name and forbids
+                                  other source coordinates
+                                rule: self.type != 'workspace-secret' || (has(self.name)
+                                  && !has(self.namespace) && !has(self.key) && !has(self.awsSecretsManager)
+                                  && !has(self.encryptedPayload))
+                              - message: k8s-secret requires namespace, name, and
+                                  key
+                                rule: self.type != 'k8s-secret' || (has(self.namespace)
+                                  && has(self.name) && has(self.key) && !has(self.awsSecretsManager)
+                                  && !has(self.encryptedPayload))
+                              - message: aws-secrets-manager requires awsSecretsManager
+                                  and forbids Kubernetes coordinates
+                                rule: self.type != 'aws-secrets-manager' || (has(self.awsSecretsManager)
+                                  && !has(self.namespace) && !has(self.name) && !has(self.key)
+                                  && !has(self.encryptedPayload))
+                              - message: encrypted-payload requires encryptedPayload
+                                  and forbids other source coordinates
+                                rule: self.type != 'encrypted-payload' || (has(self.encryptedPayload)
+                                  && !has(self.namespace) && !has(self.name) && !has(self.key)
+                                  && !has(self.awsSecretsManager))
+                              - message: encrypted-payload env materialization requires
+                                  envName
+                                rule: self.type != 'encrypted-payload' || self.materialization.mode
+                                  != 'env' || has(self.materialization.envName)
+                              - message: key cannot be . or ..
+                                rule: self.type != 'k8s-secret' || (self.key != '.'
+                                  && self.key != '..')
+                              - message: path is only valid for file materialization
+                                rule: self.materialization.mode != 'env' || !has(self.materialization.path)
+                              - message: envName is only valid for env materialization
+                                rule: self.materialization.mode != 'file' || !has(self.materialization.envName)
+                            maxItems: 4
+                            type: array
+                            x-kubernetes-validations:
+                            - message: each credential is env AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+                                AWS_SESSION_TOKEN or GOOGLE_STORE_KEY
+                              rule: self.all(c, c.materialization.mode == 'env' &&
+                                has(c.materialization.envName) && c.materialization.envName
+                                in ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
+                                'AWS_SESSION_TOKEN', 'GOOGLE_STORE_KEY'])
+                          destination:
+                            description: Destination is s3://bucket/prefix or gs://bucket/prefix.
+                            maxLength: 1024
+                            pattern: ^(s3|gs)://[a-z0-9][a-z0-9._-]{1,221}(/[^\x00-\x1f\x7f?#]*)?$
+                            type: string
+                          endpoint:
+                            description: |-
+                              Endpoint is an S3-compatible server, https://host[:port]. Empty is
+                              Amazon S3 in Region for s3://, Cloud Storage for gs://.
+                            maxLength: 512
+                            pattern: ^https://[^/?#@\s]+/?$
+                            type: string
+                          maxBytes:
+                            description: |-
+                              MaxBytes is the most of the log saved; past it the rest is not, and
+                              END.json says truncated. DefaultLogsMaxBytes (1 GiB) when unset.
+                            format: int64
+                            minimum: 1048576
+                            type: integer
+                          region:
+                            description: |-
+                              Region is the region an s3:// destination is signed for; us-east-1
+                              when empty.
+                            maxLength: 64
+                            pattern: ^[a-z0-9-]+$
+                            type: string
+                        required:
+                        - destination
+                        type: object
                       manifest:
                         description: |-
                           Manifest is the Kubernetes object a Manifest workload applies and how
@@ -1484,6 +1731,9 @@ spec:
                 - message: a Service is one replica; distribution does not apply
                   rule: '!has(self.template.service) || !has(self.template.distribution)
                     || self.template.distribution.count <= 1'
+                - message: a RayCluster runs no command and has no log of its own
+                    to save; set logs on the RayJobs submitted to it
+                  rule: '!has(self.template.logs) || self.kind != ''RayCluster'''
               workspace:
                 description: |-
                   Workspace is an optional assertion checked against the identity derived

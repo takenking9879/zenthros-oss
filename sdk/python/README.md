@@ -292,6 +292,10 @@ train.remote("gs://your-bucket/feats/", on="runpod-cpu", requirements="requireme
 - **Leave and come back:** a job on a machine that is not this computer goes on without it.
   `zenthros jobs`, `zenthros logs` and `zenthros.get(name).result()` read it from any
   computer of yours, for 7 days (`keep_for=`).
+- **The whole log:** `call.logs()` is its last 0.5 MB, and `follow=True` goes on live.
+  With `logs=True` (your store) or `logs="s3://bucket/prefix"`, the machine also saves
+  all of it as it is written, and `call.logs(to="x.log")` reads it back whole, after
+  the machine is gone too.
 - **No bucket:** a small call and its result ride with the job, up to about 190 KiB of
   result, and past that it says what to do. `zenthros.get(name)` reads it back while the
   job exists.

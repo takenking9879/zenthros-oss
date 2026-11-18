@@ -60,6 +60,9 @@ type Executor struct {
 	SecretAccess SecretAccess
 	// Local is set on the agent of no hub, on a person's own cluster.
 	Local *LocalCluster
+	// NodeLogs, when set, are the node log readers pods' logs are read
+	// through; nil reads every pod through the API (logs.nodeReader false).
+	NodeLogs *NodeLogReaders
 	// StatusCache, when set, holds the objects and pods the agent made
 	// (StatusCacheLabel): status reads come from it (statusReads).
 	StatusCache client.Reader

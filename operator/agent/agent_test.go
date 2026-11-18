@@ -183,7 +183,7 @@ func (blockingExecutor) Cancel(context.Context, string, owner.Ref) error { retur
 func (blockingExecutor) Status(context.Context, string) (backend.JobState, error) {
 	return backend.JobState{}, nil
 }
-func (blockingExecutor) Logs(context.Context, string, bool, int) (<-chan backend.LogChunk, error) {
+func (blockingExecutor) Logs(context.Context, string, backend.LogRequest) (<-chan backend.LogChunk, error) {
 	ch := make(chan backend.LogChunk)
 	close(ch)
 	return ch, nil

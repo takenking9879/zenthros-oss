@@ -8,10 +8,10 @@ import tempfile
 import time
 
 from zenthros import errors, zctl
+from zenthros.jobs import logrecords
 from zenthros.jobs.handle import (
     CANCELLED,
     FAILED,
-    MAX_LOG_BYTES,
     SUCCEEDED,
     TERMINAL_PHASES,
     JobHandle,
@@ -39,17 +39,6 @@ TRANSIENT_WARN_EVERY = 300.0
 # The longest one ask of a client that waits for a change holds: zenthros-api
 # answers a wait after 25 s at most (pkg/api wait.go).
 WAIT_FOR_CHANGE = 25.0
-
-
-def clip_log(raw, tail=None):
-    """raw (bytes) as text, at most MAX_LOG_BYTES: its start for a whole log,
-    its end for a tail (audit 2026-10-03 SDK-10)."""
-    if len(raw) > MAX_LOG_BYTES:
-        raw = raw[-MAX_LOG_BYTES:] if tail is not None else raw[:MAX_LOG_BYTES]
-    text = raw.decode("utf-8", "replace")
-    if tail is not None:
-        text = "\n".join(text.splitlines()[-int(tail):]) if int(tail) > 0 else ""
-    return text
 
 
 def require_job(job):
@@ -229,8 +218,8 @@ class JobClient:
         raise NotImplementedError
 
     def logs(self, job_id, tail=None):
-        """The job's log; tail=N, its last N lines (the end of a log too long
-        to read whole, where the error is)."""
+        """The end of the job's log: its last 512 KiB from the start of a
+        line, or tail=N its last N lines; what it leaves out said on a line."""
         raise NotImplementedError
 
     def reports(self, job_id):
@@ -315,12 +304,36 @@ class ZctlJobClient(JobClient):
         if tail is not None:
             args.extend(["--tail", str(int(tail))])
         args.append(job_id)
-        return clip_log(self._run(args).encode("utf-8"), tail)
+        return self._run(args)
 
-    def follow_logs(self, job_id):
-        """zctl logs --watch as a running process: iterate .stdout for lines.
-        It exits when the log ends; the caller stops it with terminate()."""
-        return self._run_zctl.popen("logs", *self._ns(), *self._controller_flags(), "--watch", job_id)
+    def whole_log(self, job_id, after=None):
+        """All of the job's log its machine keeps (zctl logs --history all),
+        or all of it from right after a Position."""
+        args = ["logs", *self._ns(), *self._controller_flags(), "--records"]
+        args.extend(["--after", after.cursor, "--handle", after.handle] if after is not None and after.cursor
+                    else ["--history", "all"])
+        proc = self._run_zctl.popen(*args, job_id, binary=True)
+        try:
+            return logrecords.read_text(proc.stdout)
+        except logrecords.Broken as err:
+            raise errors.TransientError(f"the log of {job_id} broke off: {err}") from err
+        finally:
+            proc.wait()
+
+    def follow_logs(self, job_id, after=None, tail=None):
+        """zctl logs --watch as a running process: iterate .stdout for lines,
+        from the end of the log (or its last tail lines), or right after the
+        Position after a stream before it left in its .position. It exits
+        when the log ends; the caller stops it with terminate()."""
+        args = ["logs", *self._ns(), *self._controller_flags(), "--watch", "--records"]
+        if after is not None and after.cursor:
+            args.extend(["--after", after.cursor, "--handle", after.handle])
+        elif tail is not None:
+            args.extend(["--tail", str(int(tail))])
+        proc = self._run_zctl.popen(*args, job_id, binary=True)
+        text = logrecords.Text(after)
+        proc.stdout, proc.position = logrecords.follow_lines(proc.stdout, text), text.position
+        return proc
 
     def reports(self, job_id):
         args = ["get", "report", *self._ns()]

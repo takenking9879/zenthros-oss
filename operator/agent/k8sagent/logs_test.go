@@ -91,9 +91,9 @@ func TestFindSparkDriverPodAndMissingDriverError(t *testing.T) {
 		},
 	}
 	executorClient := newTestExecutor(t, executor, driver)
-	name, err := executorClient.findSparkDriverPod(context.Background(), "tenant-default", "spark-pi")
-	if err != nil || name != driver.Name {
-		t.Fatalf("findSparkDriverPod = %q, %v", name, err)
+	pod, err := executorClient.findSparkDriverPod(context.Background(), "tenant-default", "spark-pi")
+	if err != nil || pod.Name != driver.Name {
+		t.Fatalf("findSparkDriverPod = %v, %v", pod, err)
 	}
 	_, err = executorClient.findSparkDriverPod(context.Background(), "tenant-default", "missing")
 	if err == nil || !strings.Contains(err.Error(), "driver pod not found") {
@@ -153,7 +153,7 @@ func TestHTTPModeLogsUseRayJobsAPI(t *testing.T) {
 		}
 		return "driver line 1\ndriver line 2\n", nil
 	}
-	ch, err := e.Logs(context.Background(), "tenant-default/zj-http", false, -1)
+	ch, err := e.Logs(context.Background(), "tenant-default/zj-http", backend.LogRequest{TailLines: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestMissingSubmitterFallsBackToRayJobsAPI(t *testing.T) {
 	e.rayLogs = func(_ context.Context, dashboard, id string) (string, error) {
 		return "head-driver\n", nil
 	}
-	ch, err := e.Logs(context.Background(), "tenant-default/zj-k8s", false, -1)
+	ch, err := e.Logs(context.Background(), "tenant-default/zj-k8s", backend.LogRequest{TailLines: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestPipeToChannelFlushesFinalUnterminatedLine(t *testing.T) {
 // unclassified string the hub retries (c2-F1#11).
 func TestALogErrorIsClassified(t *testing.T) {
 	e := newTestExecutor(t)
-	_, err := e.Logs(context.Background(), "tenant-default/gone", false, -1)
+	_, err := e.Logs(context.Background(), "tenant-default/gone", backend.LogRequest{TailLines: -1})
 	if !errors.Is(err, backend.ErrNotFound) {
 		t.Fatalf("Logs of a missing RayJob = %v, want ErrNotFound", err)
 	}
@@ -225,5 +225,34 @@ func TestTheSubmitterPodIsTheRayJobsOwn(t *testing.T) {
 	e := newTestExecutor(t, rayJob, submitter, pod("zj-former", "former-job-uid"), pod("zj-own", "job-uid"))
 	if got, err := e.findSubmitterPod(context.Background(), rayJob); err != nil || got != "zj-own" {
 		t.Fatalf("submitter pod = %q, %v; want zj-own", got, err)
+	}
+}
+
+// A line longer than the scanner's piece reaches the Gateway in pieces it
+// takes: a piece of MaxLogChunk and its newline was one byte past the
+// Gateway's limit, and the read ended there.
+func TestALongPodLogLineFitsTheGatewaysChunk(t *testing.T) {
+	long := strings.Repeat("x", 300<<10)
+	chunks := make(chan backend.LogChunk, 16)
+	pipeToChannel(context.Background(), strings.NewReader(long+"\nafter\n"), chunks)
+	close(chunks)
+	var out strings.Builder
+	for chunk := range chunks {
+		if len(chunk.Data) > backend.MaxLogChunk {
+			t.Errorf("a chunk of %d bytes, past the %d the Gateway takes", len(chunk.Data), backend.MaxLogChunk)
+		}
+		out.Write(chunk.Data)
+	}
+	if strings.Count(out.String(), "x") != len(long) || !strings.HasSuffix(out.String(), "after\n") {
+		t.Fatalf("got %d bytes ending %q", out.Len(), out.String()[max(0, out.Len()-20):])
+	}
+}
+
+// A manifest's line carries its pod and container: with the longest names
+// Kubernetes allows, a piece of a long line still fits one chunk.
+func TestALongManifestLogLineFitsTheGatewaysChunk(t *testing.T) {
+	prefix := manifestLinePrefix(strings.Repeat("p", 253), strings.Repeat("c", 63))
+	if n := len(prefix) + backend.MaxLogLine + len("\n"); n > backend.MaxLogChunk {
+		t.Fatalf("a manifest's piece is %d bytes, past the %d the Gateway takes", n, backend.MaxLogChunk)
 	}
 }

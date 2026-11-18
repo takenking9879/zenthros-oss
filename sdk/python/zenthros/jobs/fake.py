@@ -176,6 +176,9 @@ class FakeJobClient(JobClient):
         self._require(job_id)
         del self._jobs[job_id]
 
+    def whole_log(self, job_id, after=None):  # noqa: ARG002 - the fake keeps its log whole
+        return self._require(job_id)["logs"]
+
     def logs(self, job_id, tail=None):
         text = self._require(job_id)["logs"]
         return text if tail is None else "\n".join(text.splitlines()[-int(tail):])
@@ -205,6 +208,8 @@ class FakeJobClient(JobClient):
             status["results"] = [dict(r) for r in job["results"]]
         if job.get("progress"):
             status["progress"] = dict(job["progress"])
+        if job.get("handle"):
+            status["backendJobName"] = job["handle"]
         manifest = job["job"].to_manifest()
         manifest["metadata"]["uid"] = f"uid-{job_id}"
         return {**manifest, "status": status}
@@ -216,6 +221,11 @@ class FakeJobClient(JobClient):
         job["endpoints"] = [dict(e) for e in endpoints]
         job["conditions"] = [{"type": SERVICE_READY, "status": "True" if ready else "False",
                               "reason": reason, "message": message}]
+
+    def place(self, job_id, handle):
+        """Test helper: the run the job is on, as the controller names it
+        (status.backendJobName)."""
+        self._require(job_id)["handle"] = handle
 
     def submitted(self, job_id):
         """Test helper: the Job submitted as job_id."""
