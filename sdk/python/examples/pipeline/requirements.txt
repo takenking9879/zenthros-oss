@@ -1,6 +1,8 @@
 # What the pipeline imports, pinned: the notebook and the machine must agree
 # on cloudpickle, and both engines are tested with exactly these. boto3 is
-# the runner's: a job reads its call from the Workspace's s3:// store.
+# the runner's: a job reads its call from the Workspace's s3:// store, and
+# backports.zstd reads its log frames before Python 3.14.
+backports.zstd==1.8.0; python_version < '3.14'
 boto3==1.43.113
 cloudpickle==3.1.2
 numpy==2.4.4

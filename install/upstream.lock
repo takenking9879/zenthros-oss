@@ -9,8 +9,8 @@ uv@0.13.7                        amd64  287491da03f2a785c70fa75b13e1f849918c2f2b
 uv@0.13.7                        arm64  2d3ec076a0c4c0e8250bb6418c44080828b544f1a3be0b6e46adf9fb6923de45 https://github.com/astral-sh/uv/releases/download/0.13.7/uv-aarch64-unknown-linux-musl.tar.gz
 node@24.21.0                     amd64  6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.gz
 node@24.21.0                     arm64  724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5 https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-arm64.tar.gz
-go@1.27.1                        amd64  63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 https://go.dev/dl/go1.27.1.linux-amd64.tar.gz
-go@1.27.1                        arm64  3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec https://go.dev/dl/go1.27.1.linux-arm64.tar.gz
+go@1.27.4                        amd64  7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 https://go.dev/dl/go1.27.4.linux-amd64.tar.gz
+go@1.27.4                        arm64  3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92 https://go.dev/dl/go1.27.4.linux-arm64.tar.gz
 java@25.0.4.1+1                  amd64  dbb698396d478e7fa2b1e50f4103324b2a99b90569ee27c33f2261f9215cf41e https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jdk_x64_linux_hotspot_25.0.4.1_1.tar.gz
 java@25.0.4.1+1                  arm64  69df11a02cfa3ef7d7ca645e03edce6778ec090e100f6ae2b42097865730ac52 https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.4.1_1.tar.gz
 containerd@2.4.1                 amd64  d65eda6a188aac1006848d8060099be88ba9c4bcddbfd9a23a961194710d0dd4 https://github.com/containerd/containerd/releases/download/v2.4.1/containerd-2.4.1-linux-amd64.tar.gz

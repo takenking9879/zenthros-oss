@@ -5,6 +5,7 @@ read back, checked and completed from the machine, and the wait for its
 END.json before the machine goes."""
 
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -347,6 +348,9 @@ class TranscriptTest(unittest.TestCase):
         self.assertIn("not kept", shown.getvalue())
         self.assertNotIn("not kept", Path(path).read_text())
 
+    # A Jupyter kernel is a dev package (requirements-dev.txt, which
+    # test_dev_env makes import in make test): the SDK alone has none.
+    @unittest.skipUnless(importlib.util.find_spec("jupyter_client"), "a Jupyter kernel: make -C sdk/python env")
     def test_in_jupyter_a_threads_lines_reach_its_cell_and_the_file(self):
         # H3: in a notebook, a call's log is followed on a thread of its own
         # and written to the kernel's stdout, which the transcript wraps.

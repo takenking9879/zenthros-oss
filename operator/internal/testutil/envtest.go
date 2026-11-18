@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -38,25 +39,7 @@ func RequireEnvtest(t testing.TB, suite string) {
 // ends only after they stop.
 func StartEnvtest(t testing.TB, env *envtest.Environment) *rest.Config {
 	t.Helper()
-	setpriv, err := exec.LookPath("setpriv")
-	if err != nil {
-		t.Fatalf("envtest needs setpriv (util-linux) to end with the tests: %v", err)
-	}
-	dir := t.TempDir()
-	wrap := func(name string) string {
-		path := filepath.Join(dir, name)
-		script := "#!/bin/sh\nexec " + shellQuote(setpriv) + " --pdeathsig KILL -- " +
-			shellQuote(filepath.Join(os.Getenv("KUBEBUILDER_ASSETS"), name)) + " \"$@\"\n"
-		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-	if env.ControlPlane.Etcd == nil {
-		env.ControlPlane.Etcd = &envtest.Etcd{}
-	}
-	env.ControlPlane.Etcd.Path = wrap("etcd")
-	env.ControlPlane.GetAPIServer().Path = wrap("kube-apiserver")
+	prepare(t, env)
 
 	type started struct {
 		cfg *rest.Config
@@ -90,6 +73,39 @@ func StartEnvtest(t testing.TB, env *envtest.Environment) *rest.Config {
 		close(release)
 	})
 	return s.cfg
+}
+
+// crdWait is how long env.Start waits for its CRDs to be served. Envtest's
+// 10 s is less than eight apiservers starting at once take on a 4-CPU runner
+// (make test-integration's -parallel 8): three tests failed on GitHub with
+// "waiting for CRDs to appear as API resources: context deadline exceeded",
+// 2026-11-17.
+const crdWait = 2 * time.Minute
+
+// prepare makes env's etcd and kube-apiserver end with the test binary
+// (setpriv) and gives its CRDs crdWait to be served.
+func prepare(t testing.TB, env *envtest.Environment) {
+	t.Helper()
+	setpriv, err := exec.LookPath("setpriv")
+	if err != nil {
+		t.Fatalf("envtest needs setpriv (util-linux) to end with the tests: %v", err)
+	}
+	dir := t.TempDir()
+	wrap := func(name string) string {
+		path := filepath.Join(dir, name)
+		script := "#!/bin/sh\nexec " + shellQuote(setpriv) + " --pdeathsig KILL -- " +
+			shellQuote(filepath.Join(os.Getenv("KUBEBUILDER_ASSETS"), name)) + " \"$@\"\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	if env.ControlPlane.Etcd == nil {
+		env.ControlPlane.Etcd = &envtest.Etcd{}
+	}
+	env.ControlPlane.Etcd.Path = wrap("etcd")
+	env.ControlPlane.GetAPIServer().Path = wrap("kube-apiserver")
+	env.CRDInstallOptions.MaxTime = crdWait
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
