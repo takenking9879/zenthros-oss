@@ -166,8 +166,14 @@ func TestFollowStreamsShareOneSweep(t *testing.T) {
 			ended[name] = append(ended[name], watch.Ended(ctx, name))
 		}
 	}
-	testutil.Eventually(t, "len(runner.seen()) >= 5", func() bool { return len(runner.seen()) >= 5 })
-	for _, cmd := range runner.seen() {
+	// The sweep starts with the first stream, so a read made while the
+	// others were still subscribing names only those so far (6 of 10 under
+	// -race on a GitHub runner, 2026-11-17). One sweep runs at a time: the
+	// one that may have begun before the last stream is left out, and each
+	// after it names every unit.
+	subscribed := len(runner.seen())
+	testutil.Eventually(t, "five sweeps after every stream", func() bool { return len(runner.seen()) >= subscribed+6 })
+	for _, cmd := range runner.seen()[subscribed+1:] {
 		for _, name := range names {
 			if !strings.Contains(cmd, name) {
 				t.Fatalf("sweep %q left out %s", cmd, name)
