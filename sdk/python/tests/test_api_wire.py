@@ -21,14 +21,17 @@ from wireread import wrap as _wrap
 
 from zenthros import errors, machines, signin, view
 from zenthros.attaching import AttachCommand
-from zenthros.jobs import logrecords
+from zenthros.jobs import http, logrecords
 from zenthros.jobs import spec as S
 from zenthros.jobs.http import HTTPJobClient, PresignedBlobStore
 from zenthros.remote.call import Cost
 from zenthros.targetlist import Target
 
+from support import FakeAPI
+
 FIXTURE = Path(__file__).resolve().parents[3] / "operator" / "pkg" / "api" / "testdata" / "wire" / "routes.json"
 WIRE = json.loads(FIXTURE.read_text())
+REFUSALS = FIXTURE.parent / "refusals.json"
 _loads = json.loads
 
 
@@ -218,6 +221,25 @@ class APIWireTest(unittest.TestCase):
                 for answered, read in seen.items():
                     missing = sorted(p for p in read if p not in _paths(_answer_of(answered)))
                     self.assertFalse(missing, f"{answered} (driving {route}): the SDK reads keys the API never answers: {missing}")
+
+    def test_a_calls_code_goes_as_job_source_says(self):
+        """routes.json's job_source: a call's core by its digest beside its
+        own files, then, the hub said it does not hold it, the core whole
+        (base) beside them. Go's TestTheJobSourceSamplesAreWhatTheAPITakes
+        holds zenthros-api to the same samples."""
+        api = FakeAPI()
+        self.addCleanup(api.close)
+        core = b"print('zenthros')\n" * 1024
+        absent = next(r for r in json.loads(REFUSALS.read_text())["refusals"] if r["means"] == "code-absent")
+        said = json.loads(absent["body"])["details"]["name"]
+        answers = [(404, absent["body"].replace(said, http.bundle_name(core)).encode()), (201, {"metadata": {"name": "j"}})]
+        api.routes[("POST", "/v1/workspaces/risk/jobs")] = lambda _body: answers.pop(0)
+        sent = S.Job(name="j", spec=S.Spec(workload=S.Workload(kind="Job", template=S.Template(
+            entrypoint="echo hi", image="python:3.13", source=S.Source(inline="eA==")))))
+        sent.code = S.Code(base=core, overlay=b"own")
+        HTTPJobClient(api.url, "risk", "t", poll_seconds=0.01).submit(sent)
+        sources = [json.loads(r["body"])["spec"]["workload"]["template"]["source"] for r in api.requests if r["method"] == "POST"]
+        self.assertEqual([sorted(s) for s in sources], [sorted(WIRE["job_source"]["by_digest"]), sorted(WIRE["job_source"]["with_base"])])
 
 
 if __name__ == "__main__":

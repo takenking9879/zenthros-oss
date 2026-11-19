@@ -462,8 +462,9 @@ type Artifacts struct {
 	Output string `json:"output,omitempty"`
 }
 
-// Source declares the origin of user code. Exactly one mode field should be set.
-// +kubebuilder:validation:XValidation:rule="(has(self.hostPath) ? 1 : 0) + (has(self.git) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.inline) ? 1 : 0) + (has(self.ref) ? 1 : 0) <= 1",message="hostPath, git, s3, inline, and ref are mutually exclusive"
+// Source declares the origin of user code: one place, or a ref with inline
+// code unpacked after it.
+// +kubebuilder:validation:XValidation:rule="(has(self.hostPath) ? 1 : 0) + (has(self.git) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.inline) || has(self.ref) ? 1 : 0) <= 1",message="hostPath, git, s3, and inline or ref are mutually exclusive (inline beside a ref is unpacked after it)"
 type Source struct {
 	// HostPath mounts a node directory (dev/local, single-node only).
 	HostPath string `json:"hostPath,omitempty"`
@@ -486,7 +487,9 @@ type Source struct {
 	// "source.tar.gz" is a gzipped tarball of user code. It keeps the code out
 	// of the ZenthrosJob, which etcd rewrites on every status write. The
 	// Controller reads it at each Submit, so it must outlive the job's run;
-	// `zctl run` creates it content-addressed and owned by the job.
+	// `zctl run` creates it content-addressed and owned by the job. With an
+	// inline source beside it, the inline tarball is unpacked after the
+	// ConfigMap's (the SDK's core by its digest, a call's own files inline).
 	// +kubebuilder:validation:MaxLength=253
 	Ref string `json:"ref,omitempty"`
 

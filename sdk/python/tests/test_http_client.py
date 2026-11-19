@@ -181,37 +181,52 @@ class HTTPJobClientTest(unittest.TestCase):
         self.assertTrue(posts[0]["metadata"]["annotations"][http.SUBMISSION])
         slept.assert_called_once_with(http.SUBMIT_BACKOFF)
 
-    def test_a_large_code_goes_by_its_digest_and_inline_only_when_the_hub_lacks_it(self):
+    def code_job(self, name, core, own=b""):
+        """A call's job: its source holds the core and its own files (any
+        client), and its code says which is which (the hub's)."""
+        sent = job(name)
+        sent.spec.workload.template.source = S.Source(inline=base64.b64encode(core + own).decode())
+        sent.code = S.Code(base=core, overlay=own)
+        return sent
+
+    def test_the_core_goes_by_its_digest_beside_a_calls_own_files_and_whole_once(self):
         # The SDK's core rode inline in every job: 290 KB uploaded on every
-        # call to a hub across the internet, 0.25-2.5 s of a POST whose hub
-        # work took 0.07 s (2026-11-18). The hub keeps it by its digest: it
-        # goes by name, and inline once when the hub does not hold it.
-        code = b"print('zenthros')\n" * 1024
-        name = http.bundle_name(code)
+        # call to a hub across the internet (2026-11-18). With no bucket a
+        # call's own files rode in the same tarball, of a new digest on every
+        # call: the hub never held it, and each call sent the whole after a
+        # refused POST (GCP, 2026-11-19). The core goes by its name with the
+        # call's own files beside it, and whole (base) once, when the hub does
+        # not hold it.
+        core, own = b"print('zenthros')\n" * 1024, b"the call"
+        name = http.bundle_name(core)
         absent = next(r for r in json.loads(REFUSALS.read_text())["refusals"] if r["means"] == "code-absent")
         said = json.loads(absent["body"])["details"]["name"]
         answers = [(404, absent["body"].replace(said, name).encode()), (201, {"metadata": {"name": "j"}}),
-                   (201, {"metadata": {"name": "k"}})]
+                   (201, {"metadata": {"name": "k"}}), (201, {"metadata": {"name": "l"}})]
         self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = lambda _body: answers.pop(0)
-        inline = base64.b64encode(code).decode()
         for name_of in ("j", "k"):
-            sent = job(name_of)
-            sent.spec.workload.template.source = S.Source(inline=inline)
-            self.client.submit(sent)
+            self.client.submit(self.code_job(name_of, core, own))
+        self.client.submit(self.code_job("l", core))
         posts = [r["body"] for r in self.api.requests if r["method"] == "POST"]
         sources = [json.loads(p)["spec"]["workload"]["template"]["source"] for p in posts]
-        self.assertEqual(sources, [{"ref": name}, {"inline": inline}, {"ref": name}])
+        mine = base64.b64encode(own).decode()
+        self.assertEqual(sources, [{"ref": name, "inline": mine}, {"base": base64.b64encode(core).decode(), "inline": mine},
+                                   {"ref": name, "inline": mine}, {"ref": name}])
         self.assertLess(len(posts[0]), 10_000)
         self.assertEqual(json.loads(posts[0])["metadata"]["annotations"], json.loads(posts[1])["metadata"]["annotations"],
-                         "sent again inline, the same submission")
+                         "sent again with its core, the same submission")
 
-    def test_a_small_code_and_one_named_by_the_hub_go_as_they_are(self):
+    def test_a_small_core_and_code_with_no_core_go_as_they_are(self):
         self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = (201, {"metadata": {"name": "j"}})
-        small = job()
-        small.spec.workload.template.source = S.Source(inline=base64.b64encode(b"print(1)").decode())
-        self.client.submit(small)
-        source = json.loads(self.api.requests[-1]["body"])["spec"]["workload"]["template"]["source"]
-        self.assertEqual(source, {"inline": base64.b64encode(b"print(1)").decode()})
+        small = self.code_job("j", b"print(1)", b"the call")
+        large = job("k")
+        large.spec.workload.template.source = S.Source(inline=base64.b64encode(b"x" * 20_000).decode())
+        for sent in (small, large):
+            self.client.submit(sent)
+        sources = [json.loads(r["body"])["spec"]["workload"]["template"]["source"] for r in self.api.requests if r["method"] == "POST"]
+        self.assertEqual(sources, [{"inline": base64.b64encode(b"print(1)the call").decode()},
+                                   {"inline": base64.b64encode(b"x" * 20_000).decode()}],
+                         "the hub keeps a large one by its digest itself")
 
     def test_a_bundle_is_named_as_the_hub_names_it(self):
         vector = json.loads(NAME_VECTOR.read_text())

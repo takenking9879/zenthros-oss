@@ -239,6 +239,28 @@ class Carried(unittest.TestCase):
         rows = [json.loads(line) for line in (Path(call.runlog.dir) / "reports.jsonl").read_text().splitlines()]
         self.assertIn({"loss": 21}, [r["payload"] for r in rows])
 
+    def test_two_calls_name_the_same_core_and_carry_only_their_own_files(self):
+        """With no bucket, the SDK's core and a call's own files were one
+        tarball, of a new digest on every call: the hub never held it, and
+        every call sent its 290 KB after a refused POST (GCP, 2026-11-19).
+        The core is a part of its own, the same on every call, and a call's
+        own files go after it; the job's code, for any client, is both."""
+        first, second = self.run_call(double, 1), self.run_call(double, 2)
+        a, b = self.client.submitted(first.name), self.client.submitted(second.name)
+        self.assertEqual(a.code.base, b.code.base)
+        self.assertNotEqual(a.code.overlay, b.code.overlay)
+
+        def names(data):
+            with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+                return tar.getnames()
+
+        own = names(a.code.overlay)
+        self.assertTrue(own and all(n.startswith(f"{carried.FOLDER}/job/") for n in own), own)
+        self.assertTrue(all(n.startswith("zenthros/") for n in names(a.code.base)), "the core is the SDK's alone")
+        whole, _ = self.inline_tar(first)
+        self.assertEqual(whole, names(a.code.base) + own)
+        self.assertEqual(first.result(stream_logs=False), 2)
+
     def test_a_command_needs_none_of_it(self):
         call = remote.run(["echo", "hello"], code_dir=None)
         template = self.client.submitted(call.name).spec.workload.template

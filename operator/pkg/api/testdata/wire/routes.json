@@ -1,5 +1,5 @@
 {
-  "_about": "One sample of every route of zenthros-api, shared by pkg/api (TestTheWireSamplesFitTheRoutes: each sample fits the Go type the route decodes or encodes, and an answer whose type the API owns sets every key, \"full\") and sdk/python/tests/test_api_wire.py (the SDK sends exactly the request's keys and reads only keys the answer has). {ws} is risk; {name} any. \"sdk\": the SDK calls the route. \"log_record\" is the header of each record the logs route answers the SDK and zctl (pkg/logstream Header): a JSON line, then its n bytes, packed as encoding says (zstd: one frame of raw_len bytes of log); TestTheLogRecordSampleIsTheHeader holds it to the Go type.",
+  "_about": "One sample of every route of zenthros-api, shared by pkg/api (TestTheWireSamplesFitTheRoutes: each sample fits the Go type the route decodes or encodes, and an answer whose type the API owns sets every key, \"full\") and sdk/python/tests/test_api_wire.py (the SDK sends exactly the request's keys and reads only keys the answer has). {ws} is risk; {name} any. \"sdk\": the SDK calls the route. \"log_record\" is the header of each record the logs route answers the SDK and zctl (pkg/logstream Header): a JSON line, then its n bytes, packed as encoding says (zstd: one frame of raw_len bytes of log); TestTheLogRecordSampleIsTheHeader holds it to the Go type. \"job_source\" is what spec.workload.template.source of a POST /jobs holds when the SDK names its code: by_digest, the SDK's core by its bundle's name (a sourcebundle.Name) and a call's own files inline; with_base, the core the hub did not hold (a 404 of the ConfigMap), sent once beside them (TestTheJobSourceSamplesAreWhatTheAPITakes, and the SDK's test_api_wire.py).",
   "routes": {
     "GET /v1/signup": {
       "sdk": true,
@@ -1185,5 +1185,15 @@
     "handle": "x",
     "attempt": 1,
     "error": "x"
+  },
+  "job_source": {
+    "by_digest": {
+      "ref": "zenthros-src-0123456789abcdef",
+      "inline": "x"
+    },
+    "with_base": {
+      "base": "x",
+      "inline": "x"
+    }
   }
 }

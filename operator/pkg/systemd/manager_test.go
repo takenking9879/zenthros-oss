@@ -120,7 +120,7 @@ func TestInstallRunsExpectedSequence(t *testing.T) {
 	if name != "zenthros-uid-123.service" {
 		t.Errorf("unit name = %q", name)
 	}
-	for _, want := range []string{"mkdir -p", "base64 -d", "daemon-reload", "reset-failed zenthros-uid-123.service", "enable --now zenthros-uid-123.service"} {
+	for _, want := range []string{"mkdir -p", "base64 -d", "daemon-reload", "reset-failed zenthros-uid-123.service", "enable --now --no-reload zenthros-uid-123.service"} {
 		if !runner.ran(want) {
 			t.Errorf("expected a command containing %q; ran %v", want, runner.commands)
 		}
@@ -446,5 +446,47 @@ func TestPreemptSignalRecordedInUnit(t *testing.T) {
 	quiet := &fakeRunner{unitContent: RenderUnit(jobspec.JobSpec{ID: "uid-2", Entrypoint: "x"}, nil, Config{}, "")}
 	if sent, _ := NewManager(Config{}, quiet, logr.Discard()).SignalPreempt(context.Background(), "zenthros-uid-2.service"); sent || quiet.ran("kill") {
 		t.Fatal("a job that asked for no signal got one")
+	}
+}
+
+// reloads is how many times the commands ran make systemd reload its whole
+// configuration: daemon-reload, and an enable or disable without
+// --no-reload, which reloads on its own.
+func reloads(commands []string) int {
+	n := 0
+	for _, cmd := range commands {
+		for _, field := range strings.Fields(cmd) {
+			if field == "daemon-reload" || (field == "enable" || field == "disable") && !strings.Contains(cmd, "--no-reload") {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// A job's install reloads systemd once, and its uninstall once: each reload
+// reparses every unit, ~0.5 s on an e2-small, and a job waited for two
+// before it started (daemon-reload, then enable --now's own; GCP,
+// 2026-11-19). The job's units are wanted only by zenthros-job.target,
+// which nothing starts: enable writes a link, which the one reload reads.
+func TestAJobsInstallAndUninstallReloadSystemdOnce(t *testing.T) {
+	runner := &fakeRunner{}
+	m := NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
+	if _, err := m.Install(context.Background(), testSpec(), map[string]string{"A": "1"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := reloads(runner.commands); got != 1 {
+		t.Fatalf("an install reloads systemd %d times, want 1: %v", got, runner.commands)
+	}
+	if reload, start := runner.indexOf("daemon-reload"), runner.indexOf("enable --now"); reload < 0 || start < reload {
+		t.Fatalf("the unit starts (%d) before systemd reads it (%d)", start, reload)
+	}
+	runner = &fakeRunner{}
+	m = NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
+	if err := m.Uninstall(context.Background(), "zenthros-uid-123.service"); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if got := reloads(runner.commands); got != 1 {
+		t.Fatalf("an uninstall reloads systemd %d times, want 1: %v", got, runner.commands)
 	}
 }

@@ -1548,7 +1548,9 @@ spec:
                               "source.tar.gz" is a gzipped tarball of user code. It keeps the code out
                               of the ZenthrosJob, which etcd rewrites on every status write. The
                               Controller reads it at each Submit, so it must outlive the job's run;
-                              `zctl run` creates it content-addressed and owned by the job.
+                              `zctl run` creates it content-addressed and owned by the job. With an
+                              inline source beside it, the inline tarball is unpacked after the
+                              ConfigMap's (the SDK's core by its digest, a call's own files inline).
                             maxLength: 253
                             type: string
                           s3:
@@ -1557,11 +1559,11 @@ spec:
                             type: string
                         type: object
                         x-kubernetes-validations:
-                        - message: hostPath, git, s3, inline, and ref are mutually
-                            exclusive
+                        - message: hostPath, git, s3, and inline or ref are mutually
+                            exclusive (inline beside a ref is unpacked after it)
                           rule: '(has(self.hostPath) ? 1 : 0) + (has(self.git) ? 1
-                            : 0) + (has(self.s3) ? 1 : 0) + (has(self.inline) ? 1
-                            : 0) + (has(self.ref) ? 1 : 0) <= 1'
+                            : 0) + (has(self.s3) ? 1 : 0) + (has(self.inline) || has(self.ref)
+                            ? 1 : 0) <= 1'
                       spark:
                         description: |-
                           Spark contains Spark-native intent. It is valid only when workload.kind is

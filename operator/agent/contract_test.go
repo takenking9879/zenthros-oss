@@ -37,7 +37,12 @@ func (s *fakeSystemd) Run(_ context.Context, cmd string) (string, error) {
 	defer s.mu.Unlock()
 	unit := func(verb string) string {
 		_, rest, _ := strings.Cut(cmd, verb+" ")
-		return strings.Fields(rest)[0]
+		for _, field := range strings.Fields(rest) {
+			if !strings.HasPrefix(field, "--") {
+				return field
+			}
+		}
+		return ""
 	}
 	switch {
 	case unitWrite.MatchString(cmd):

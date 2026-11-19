@@ -202,7 +202,10 @@ func (m *Manager) InstallWithWrapper(ctx context.Context, spec jobspec.JobSpec, 
 	if err := m.prepareLog(ctx, name); err != nil {
 		return "", err
 	}
-	if _, err := m.runner.Run(ctx, m.cfg.Systemctl("enable --now "+name)); err != nil {
+	// The daemon-reload above is the job's one: enable would reload again on
+	// its own, ~0.5 s on an e2-small before the job starts, for a link
+	// (zenthros-job.target, which nothing starts) nothing reads until then.
+	if _, err := m.runner.Run(ctx, m.cfg.Systemctl("enable --now --no-reload "+name)); err != nil {
 		return "", fmt.Errorf("start unit %s: %w", name, err)
 	}
 	m.logger.Info("installed unit", "unit", name)
@@ -238,7 +241,8 @@ func (m *Manager) writeEnvFile(ctx context.Context, name string, env map[string]
 // Uninstall stops, disables and removes a unit, then reloads systemd. Idempotent:
 // a missing unit is not an error.
 func (m *Manager) Uninstall(ctx context.Context, name string) error {
-	if _, err := m.runner.Run(ctx, m.cfg.Systemctl("disable --now "+name)); err != nil {
+	// One reload, the daemon-reload below, once the unit's file is gone.
+	if _, err := m.runner.Run(ctx, m.cfg.Systemctl("disable --now --no-reload "+name)); err != nil {
 		m.logger.Info("disable reported (unit may be absent)", "unit", name, "error", err.Error())
 	}
 	removeCmd := fmt.Sprintf(`rm -f "%s"`, m.cfg.UnitPath(name))

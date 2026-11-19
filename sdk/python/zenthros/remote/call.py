@@ -987,8 +987,14 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
         from zenthros import userstore
 
         access_env, access_secrets = userstore.machine_access(current.store, backend, current.workspace)
+    # The core apart from the call's own files: the same on every call, a hub
+    # keeps it by its digest (S.Code), and only the call's files travel.
+    parts = S.Code(base=code) if code else None
     if no_bucket:
-        code = carried.pack(code, {**store.files, **({call_uri: stored} if call_uri else {})}, bundle.MAX_CODE_BYTES)
+        files = {**store.files, **({call_uri: stored} if call_uri else {})}
+        if code and files:
+            parts = S.Code(base=code, overlay=carried.pack(None, files, bundle.MAX_CODE_BYTES))
+        code = carried.pack(code, files, bundle.MAX_CODE_BYTES)
     # The whole log, saved by the machine's agent (savedlogs); a local
     # call's stays whole on this computer.
     wanted = savedlogs.chosen(current.logs if logs is None else logs)
@@ -1048,6 +1054,7 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
             gc_policy=gc_policy,
             workload=S.Workload(kind="Job", template=template),
         ),
+        code=parts,
     )
     if call_uri:
         # The call is stored before the job exists: a job never starts without it.

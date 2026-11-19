@@ -90,19 +90,28 @@ def bundle_name(data):
     return BUNDLE_PREFIX + hashlib.sha256(data).hexdigest()[:16]
 
 
-def _by_digest(manifest):
-    """manifest naming its large inline code by its digest, or None: the
-    SDK's core rode inline in every job, 290 KB uploaded on every call to a
-    hub across the internet (2026-11-18), and the hub keeps it by name."""
-    source = manifest.get("spec", {}).get("workload", {}).get("template", {}).get("source") or {}
-    inline = source.get("inline") or ""
-    if len(inline) < MIN_INLINE_BYTES:
+def _by_digest(job, manifest):
+    """The two bodies of a call's job whose core is large (Code): one naming
+    the core by its digest, the call's own files inline beside it, and one
+    carrying the core whole (base) beside them, for a hub that does not hold
+    it. None for other code, which goes as it is. The SDK's core rode inline
+    in every job, 290 KB uploaded on every call to a hub across the internet
+    (2026-11-18), and with no bucket in one tarball with the call's own files,
+    of a new digest on every call (2026-11-19)."""
+    code = job.code
+    if code is None or len(code.base) < MIN_INLINE_BYTES * 3 // 4:
         return None
-    named = copy.deepcopy(manifest)
-    by_name = named["spec"]["workload"]["template"]["source"]
-    del by_name["inline"]
-    by_name["ref"] = bundle_name(base64.b64decode(inline))
-    return named
+
+    def sent(**parts):
+        out = copy.deepcopy(manifest)
+        source = out["spec"]["workload"]["template"]["source"]
+        source.pop("inline", None)
+        source.update({key: value for key, value in parts.items() if value})
+        return out
+
+    own = base64.b64encode(code.overlay).decode() if code.overlay else ""
+    return (lambda: sent(ref=bundle_name(code.base), inline=own),
+            lambda: sent(base=base64.b64encode(code.base).decode(), inline=own))
 
 
 def _refusal(code, message, details):
@@ -274,13 +283,15 @@ class HTTPJobClient(JobClient):
         # the error did not name the first (audit 2026-10-16 AUD-075).
         nonce = uuid.uuid4().hex
         manifest["metadata"].setdefault("annotations", {})[SUBMISSION] = nonce
-        named = _by_digest(manifest)
-        if named is not None:
+        forms = _by_digest(job, manifest)
+        if forms is not None:
+            named, whole = forms
             try:
-                self._create(job.name, named, nonce)
+                self._create(job.name, named(), nonce)
                 return JobHandle(job.name, self)
             except errors.CodeAbsent:
-                logger.info(f"Job {job.name}: the hub does not hold its code; sending it inline")
+                logger.info(f"Job {job.name}: the hub does not hold the SDK's core; sending it once")
+            manifest = whole()
         self._create(job.name, manifest, nonce)
         return JobHandle(job.name, self)
 

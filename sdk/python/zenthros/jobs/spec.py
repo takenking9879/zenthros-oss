@@ -391,14 +391,27 @@ class Spec:
 
 
 @dataclass
+class Code:
+    """A call's code in two parts, both gzipped tarballs: base, the same on
+    every call (the SDK's core), and overlay, the call's own files, unpacked
+    after it. A hub keeps base by its digest (zenthros-api); every other
+    client takes source.inline, which holds both."""
+
+    base: bytes
+    overlay: bytes = b""
+
+
+@dataclass
 class Job:
-    """A ZenthrosJob to create: metadata plus the whole spec."""
+    """A ZenthrosJob to create: metadata plus the whole spec. code is not
+    sent: it says which part of the source is the call's own (Code)."""
 
     name: str
     spec: Spec = field(default_factory=Spec)
     namespace: str = ""
     labels: dict = field(default_factory=dict)
     annotations: dict = field(default_factory=dict)
+    code: Optional[Code] = field(default=None, repr=False, compare=False)
 
     def to_manifest(self, namespace=None):
         meta = {"name": self.name}
