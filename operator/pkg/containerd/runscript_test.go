@@ -15,7 +15,7 @@ import (
 )
 
 func TestRunOptsFromSpecMatchesSystemdPaths(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	spec := jobspec.JobSpec{
 		ID:         "uid-123",
 		Image:      "python:3.13.14-slim-bookworm",
@@ -200,7 +200,7 @@ func TestRunScriptCreatesThePreemptDirItBinds(t *testing.T) {
 // gpu= of the SDK is spec.compute. The container read only workers and ran
 // without the GPU the job asked for: the same rule as a Job's pod (v1.SizesOf).
 func TestAContainerHasTheGPUsSpecComputeAsked(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	base := jobspec.JobSpec{ID: "u", Image: "python:3.13"}
 	asked := base
 	asked.Compute = &v1.ComputeConstraints{GPUCount: 2}

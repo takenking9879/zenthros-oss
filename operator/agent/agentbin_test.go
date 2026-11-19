@@ -19,7 +19,7 @@ import (
 // host's path as a process, the bound path in a container (read-only, so a
 // job cannot replace the agent). E2E TestShellJobCheckpointsWithAgentCLI.
 func TestJobSeesAgentBin(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 
 	runner := &recordingRunner{}
 	exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard()), AgentBin: "/opt/z/agent"}
@@ -53,7 +53,7 @@ func TestAgentBinOutsideSpecHash(t *testing.T) {
 	if !jobspec.ControllerDerivedEnv(jobspec.EnvAgentBin) {
 		t.Fatal("ZENTHROS_AGENT_BIN is part of the spec hash")
 	}
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	spec := vmTestSpec()
 	spec.Runtime = "systemd"
 	before := systemd.RenderUnit(spec, nil, cfg, "")
@@ -69,7 +69,7 @@ func TestAgentBinOutsideSpecHash(t *testing.T) {
 // job built the runner's venv again (lab, 2026-10-18: 36 s against 6 s on
 // systemd). Another Workspace's job gets another directory.
 func TestContainerdJobsKeepTheirEnvironments(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	for ws, host := range map[string]string{"risk": "/var/lib/zenthros/envs/risk", "other": "/var/lib/zenthros/envs/other", "": "/var/lib/zenthros/envs/_"} {
 		runner := &recordingRunner{}
 		exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard())}
@@ -112,7 +112,7 @@ func TestContainerdJobsKeepTheirEnvironments(t *testing.T) {
 // Workspace's installers' cache, as a host job's. A machine without uv binds
 // none. E2E test_attach_flow (containerd: slim-bookworm and alpine).
 func TestContainerJobsHaveTheMachinesUV(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	for _, uv := range []string{HostUV, ""} {
 		runner := &recordingRunner{}
 		exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard()), UV: uv}

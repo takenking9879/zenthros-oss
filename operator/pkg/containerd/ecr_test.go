@@ -73,7 +73,7 @@ func TestECRHostUsesInstanceRoleToken(t *testing.T) {
 	}
 	ref := "123456789012.dkr.ecr.us-east-2.amazonaws.com/team/train:1.4"
 	runner := &pullRunner{}
-	pulled, err := EnsureImageWith(context.Background(), runner, "sudo ", ref, auth)
+	pulled, err := EnsureImageWith(context.Background(), runner, ref, auth)
 	if err != nil || !pulled {
 		t.Fatalf("pulled=%v err=%v", pulled, err)
 	}
@@ -99,7 +99,7 @@ func TestECRHostUsesInstanceRoleToken(t *testing.T) {
 
 	runner = &pullRunner{}
 	target = ""
-	if _, err := EnsureImageWith(context.Background(), runner, "sudo ", "ghcr.io/org/app:1", auth); err != nil {
+	if _, err := EnsureImageWith(context.Background(), runner, "ghcr.io/org/app:1", auth); err != nil {
 		t.Fatal(err)
 	}
 	if target != "" || strings.Contains(runner.commands[len(runner.commands)-1], "--user") {
@@ -117,7 +117,7 @@ func TestECRDeniedIsVerbatim(t *testing.T) {
 	defer api.Close()
 	auth := ECRAuth{Credentials: credentials.NewStaticCredentialsProvider("A", "B", ""), Endpoint: api.URL}
 	runner := &pullRunner{}
-	_, err := EnsureImageWith(context.Background(), runner, "", "123456789012.dkr.ecr.us-east-2.amazonaws.com/x:1", auth)
+	_, err := EnsureImageWith(context.Background(), runner, "123456789012.dkr.ecr.us-east-2.amazonaws.com/x:1", auth)
 	if err == nil || !strings.Contains(err.Error(), denied) {
 		t.Fatalf("err = %v, want ECR's answer verbatim", err)
 	}

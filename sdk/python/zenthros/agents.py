@@ -15,28 +15,7 @@ import contextlib
 import json
 import os
 
-from zenthros import config, console
-
-if os.name == "nt":
-    import errno
-    import msvcrt
-
-    def _lock(handle):
-        # Its first byte, waited for as long as another agent holds it:
-        # LK_LOCK alone gives up after 10 s, with EDEADLOCK.
-        handle.seek(0)
-        while True:
-            try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-                return
-            except OSError as err:
-                if err.errno != errno.EDEADLOCK:
-                    raise
-else:
-    import fcntl
-
-    def _lock(handle):
-        fcntl.flock(handle, fcntl.LOCK_EX)
+from zenthros import config, console, locking
 
 # Who started a job, for an agent to stop only what it started; and where,
 # for the limit of machines. Labels, so a list of the jobs answers both.
@@ -87,6 +66,5 @@ def turn():
     """One agent at a time counts and creates: three that start together on a
     limit of one must not all see none running."""
     os.makedirs(os.path.dirname(path()), mode=0o700, exist_ok=True)
-    with open(f"{path()}.lock", "a", encoding="utf-8") as handle:
-        _lock(handle)
+    with locking.held(f"{path()}.lock"):
         yield

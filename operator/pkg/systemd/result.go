@@ -112,7 +112,7 @@ func (r Recorded) exitCode() *int32 {
 
 // Recorded reads the unit's result record; ok is false when it has none.
 func (m *Manager) Recorded(ctx context.Context, name string) (Recorded, bool, error) {
-	out, err := m.runner.Run(ctx, fmt.Sprintf(`%scat "%s" 2>/dev/null || true`, m.cfg.SudoPrefix(), ResultPath(m.cfg, name)))
+	out, err := m.runner.Run(ctx, fmt.Sprintf(`cat "%s" 2>/dev/null || true`, ResultPath(m.cfg, name)))
 	if err != nil {
 		return Recorded{}, false, fmt.Errorf("read result of %s: %w", name, err)
 	}
@@ -133,7 +133,7 @@ func (m *Manager) FinishedState(ctx context.Context, name string, inferred backe
 		state.StartTime, state.CompletionTime = inferred.StartTime, inferred.CompletionTime
 		return state, nil
 	}
-	if _, err := m.runner.Run(ctx, fmt.Sprintf(`%scat "%s"`, m.cfg.SudoPrefix(), m.cfg.UnitPath(name))); err != nil {
+	if _, err := m.runner.Run(ctx, fmt.Sprintf(`cat "%s"`, m.cfg.UnitPath(name))); err != nil {
 		return backend.JobState{}, fmt.Errorf("unit %s is not installed: %w", name, err)
 	}
 	return backend.JobState{}, fmt.Errorf("%w: %s", ErrNotStarted, name)
@@ -155,7 +155,7 @@ func (m *Manager) Adoptable(ctx context.Context, name string) (bool, error) {
 // clearRecord removes the unit's result record.
 func (m *Manager) clearRecord(ctx context.Context, name string) error {
 	path := ResultPath(m.cfg, name)
-	if _, err := m.runner.Run(ctx, fmt.Sprintf(`%srm -f "%s" "%s.tmp"`, m.cfg.SudoPrefix(), path, path)); err != nil {
+	if _, err := m.runner.Run(ctx, fmt.Sprintf(`rm -f "%s" "%s.tmp"`, path, path)); err != nil {
 		return fmt.Errorf("remove result of %s: %w", name, err)
 	}
 	return nil

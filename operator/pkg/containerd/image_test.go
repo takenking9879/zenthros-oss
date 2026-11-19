@@ -55,7 +55,7 @@ func (r *scriptedRunner) Run(_ context.Context, cmd string) (string, error) {
 
 func TestImageExistsMatchesQuietListing(t *testing.T) {
 	r := &scriptedRunner{}
-	ok, err := ImageExists(context.Background(), r, "sudo ", "python:3.13-slim")
+	ok, err := ImageExists(context.Background(), r, "python:3.13-slim")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestImageExistsMatchesQuietListing(t *testing.T) {
 
 func TestImageExistsCommandNotFoundIsError(t *testing.T) {
 	r := &scriptedRunner{infoErr: errors.New("sudo: ctr: command not found")}
-	ok, err := ImageExists(context.Background(), r, "sudo ", "python:3.13-slim")
+	ok, err := ImageExists(context.Background(), r, "python:3.13-slim")
 	if err == nil {
 		t.Fatal("missing ctr binary must not look like a cache miss")
 	}
@@ -77,7 +77,7 @@ func TestImageExistsCommandNotFoundIsError(t *testing.T) {
 
 func TestEnsureImageSkipsPullWhenPresent(t *testing.T) {
 	r := &scriptedRunner{}
-	pulled, err := EnsureImage(context.Background(), r, "sudo ", "python:3.13-slim")
+	pulled, err := EnsureImage(context.Background(), r, "python:3.13-slim")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestEnsureImageSkipsPullWhenPresent(t *testing.T) {
 
 func TestEnsureImagePullsWhenAbsent(t *testing.T) {
 	r := &scriptedRunner{infoErr: errors.New("ctr: image not found")}
-	pulled, err := EnsureImage(context.Background(), r, "sudo ", "python:3.13-slim")
+	pulled, err := EnsureImage(context.Background(), r, "python:3.13-slim")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestOffGCPPullOfGCRIsAnonymous(t *testing.T) {
 	for _, ref := range []string{"gcr.io/distroless/static:nonroot", "us-central1-docker.pkg.dev/zenthros/zenthros/playground-runtime:1.0.0"} {
 		r := &scriptedRunner{infoErr: errors.New("ctr: image not found")}
 		auth := GARAuth{TokenURL: "http://127.0.0.1:1/token"}
-		if _, err := EnsureImageWith(context.Background(), r, "", ref, auth); err != nil {
+		if _, err := EnsureImageWith(context.Background(), r, ref, auth); err != nil {
 			t.Fatalf("%s: %v", ref, err)
 		}
 		cmd := r.commands[len(r.commands)-1]
@@ -140,7 +140,7 @@ func TestOnGCPPullUsesTheServiceAccountToken(t *testing.T) {
 	t.Cleanup(server.Close)
 	r := &scriptedRunner{infoErr: errors.New("ctr: image not found")}
 	ref := "us-central1-docker.pkg.dev/zenthros/zenthros/playground-runtime:1.0.0"
-	if _, err := EnsureImageWith(context.Background(), r, "", ref, GARAuth{TokenURL: server.URL, Client: server.Client()}); err != nil {
+	if _, err := EnsureImageWith(context.Background(), r, ref, GARAuth{TokenURL: server.URL, Client: server.Client()}); err != nil {
 		t.Fatal(err)
 	}
 	cmd := r.commands[len(r.commands)-1]
@@ -180,7 +180,7 @@ func TestEnsureImageTriesAgainWhenTheNetworkFailsThePull(t *testing.T) {
 	lookup := errors.New(`ctr: failed to resolve image: failed to authorize: failed to fetch anonymous token: Get "https://auth.docker.io/token": dial tcp: lookup auth.docker.io on 10.43.0.10:53: server misbehaving`)
 
 	r := &flakyPull{scriptedRunner: absent, errs: []error{lookup, errors.New("read tcp 10.0.0.1:443: i/o timeout")}}
-	if pulled, err := EnsureImage(context.Background(), r, "sudo ", "python:3.13-slim"); err != nil || !pulled {
+	if pulled, err := EnsureImage(context.Background(), r, "python:3.13-slim"); err != nil || !pulled {
 		t.Fatalf("pulled=%v err=%v after two network failures and a good pull", pulled, err)
 	}
 	if r.pulls != 3 {
@@ -190,7 +190,7 @@ func TestEnsureImageTriesAgainWhenTheNetworkFailsThePull(t *testing.T) {
 	// The network stays down: the last error is the job's, after one try
 	// more than there are waits.
 	r = &flakyPull{scriptedRunner: absent, errs: []error{lookup, lookup, lookup, lookup, lookup}}
-	if _, err := EnsureImage(context.Background(), r, "sudo ", "python:3.13-slim"); err == nil || !strings.Contains(err.Error(), "server misbehaving") {
+	if _, err := EnsureImage(context.Background(), r, "python:3.13-slim"); err == nil || !strings.Contains(err.Error(), "server misbehaving") {
 		t.Fatalf("err = %v, want the lookup failure", err)
 	}
 	if r.pulls != 4 {
@@ -206,7 +206,7 @@ func TestEnsureImageTriesAgainWhenTheNetworkFailsThePull(t *testing.T) {
 		"dial tcp: lookup regisry.example.com: no such host",
 	} {
 		r = &flakyPull{scriptedRunner: absent, errs: []error{errors.New(refusal)}}
-		if _, err := EnsureImage(context.Background(), r, "sudo ", "python:3.13-slim"); err == nil || r.pulls != 1 {
+		if _, err := EnsureImage(context.Background(), r, "python:3.13-slim"); err == nil || r.pulls != 1 {
 			t.Fatalf("%q: err=%v after %d pulls, want it final at the first", refusal, err, r.pulls)
 		}
 	}
@@ -221,7 +221,7 @@ func TestEnsureImageStopsRetryingWhenCancelled(t *testing.T) {
 	cancel()
 	r := &flakyPull{scriptedRunner: scriptedRunner{infoErr: errors.New("ctr: image not found")},
 		errs: []error{errors.New("dial tcp 1.2.3.4:443: connection refused"), errors.New("never asked")}}
-	if _, err := EnsureImage(ctx, r, "sudo ", "python:3.13-slim"); err == nil || r.pulls != 1 {
+	if _, err := EnsureImage(ctx, r, "python:3.13-slim"); err == nil || r.pulls != 1 {
 		t.Fatalf("err=%v after %d pulls, want the first failure and no wait", err, r.pulls)
 	}
 }
@@ -263,7 +263,7 @@ func TestAPullFailureCarriesItsRetryClass(t *testing.T) {
 		{"ctr: failed to prepare extraction snapshot \"extract-1\": parent snapshot sha256:9f2a does not exist: not found", backend.ErrDestinationUnavailable},
 	} {
 		r := &flakyPull{scriptedRunner: absent, errs: []error{errors.New(tc.answer)}}
-		_, err := EnsureImage(context.Background(), r, "sudo ", "python:3.13-slim")
+		_, err := EnsureImage(context.Background(), r, "python:3.13-slim")
 		if !errors.Is(err, tc.class) || !strings.Contains(err.Error(), tc.answer) {
 			t.Fatalf("%q: err = %v, want %v with the registry's text", tc.answer, err, tc.class)
 		}

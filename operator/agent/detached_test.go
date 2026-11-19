@@ -113,7 +113,7 @@ func TestADetachedAgentAsksAgainUntilItsJobsStop(t *testing.T) {
 func TestADetachedMachineKeepsNothingOfAJobThatEnded(t *testing.T) {
 	machine := &fakeSystemd{files: map[string]string{}, active: map[string]bool{}}
 	root := t.TempDir()
-	executor := SystemdExecutor{Manager: systemd.NewManager(systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}, machine, logr.Discard()), Secrets: awssecret.Config{Root: root}}
+	executor := SystemdExecutor{Manager: systemd.NewManager(systemd.Config{Scope: systemd.ScopeSystem}, machine, logr.Discard()), Secrets: awssecret.Config{Root: root}}
 	a := NewWithExecutor(Config{BackendID: "vm-test", BackendType: "vm"}, executor, logr.Discard())
 	spec := vmTestSpec()
 	job, err := envelope.Encode(spec)

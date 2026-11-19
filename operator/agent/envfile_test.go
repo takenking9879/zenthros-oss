@@ -47,7 +47,7 @@ func writtenTeeBody(t *testing.T, commands []string, pathSubstr string) string {
 
 func submitEnv(t *testing.T, env map[string]string) string {
 	t.Helper()
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	runner := &recordingRunner{}
 	exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard())}
 	if _, err := exec.Submit(context.Background(), containerdSpec(), env); err != nil {

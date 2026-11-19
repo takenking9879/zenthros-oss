@@ -28,7 +28,7 @@ from support import FakeAPI
 SAMPLES = pathlib.Path(__file__).resolve().parents[3] / "operator" / "pkg" / "api" / "testdata" / "wire" / "refusals.json"
 
 MEANS = {"job-absent": errors.JobNotFound, "not-found": errors.NotFound, "too-large": errors.ValidationError,
-         "workspace-full": errors.TransientError, "other-wire": errors.WireMismatch}
+         "workspace-full": errors.TransientError, "other-wire": errors.WireMismatch, "code-absent": errors.CodeAbsent}
 
 
 class APIRefusalsTest(unittest.TestCase):

@@ -111,7 +111,7 @@ func testSpec() jobspec.JobSpec {
 
 func TestInstallRunsExpectedSequence(t *testing.T) {
 	runner := &fakeRunner{}
-	m := NewManager(Config{Scope: ScopeSystem, UseSudo: true}, runner, logr.Discard())
+	m := NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
 
 	name, err := m.Install(context.Background(), testSpec(), map[string]string{"A": "1"})
 	if err != nil {
@@ -127,13 +127,41 @@ func TestInstallRunsExpectedSequence(t *testing.T) {
 	}
 }
 
+// The agent is root. A sudo before each of a job's preparing commands (its
+// user, directories, environment, log, unit) opened a session and wrote the
+// journal: ~90 ms each inside the agent's CPUQuota on an e2-small, 2.3 s
+// before every job's code (2026-11-18). None is run, nor on its end.
+func TestAJobOnTheMachineIsPreparedWithoutSudo(t *testing.T) {
+	runner := &fakeRunner{}
+	m := NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
+	spec := testSpec()
+	spec.Workspace = "risk"
+	if _, err := m.Install(context.Background(), spec, map[string]string{"A": "1"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if !runner.ran("useradd") || !runner.ran("chown") {
+		t.Fatalf("a Workspace's job was not confined to its user; ran %v", runner.commands)
+	}
+	if err := m.Uninstall(context.Background(), UnitName(spec.ID)); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if err := m.RemoveWorkDir(context.Background(), spec.ID); err != nil {
+		t.Fatalf("RemoveWorkDir: %v", err)
+	}
+	for _, cmd := range runner.commands {
+		if strings.Contains(cmd, "sudo") {
+			t.Errorf("ran %q", cmd)
+		}
+	}
+}
+
 // TestInstallIsIdempotentForSameSpec guards the create-or-reuse contract: the
 // reconciler resubmits a job on every reconcile, so a second Install with an
 // unchanged spec must reuse the existing unit and NOT re-run `enable --now`
 // (re-starting a fast-completing unit trips systemd's start-limit-hit).
 func TestInstallIsIdempotentForSameSpec(t *testing.T) {
 	runner := &fakeRunner{}
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	m := NewManager(cfg, runner, logr.Discard())
 	spec := testSpec()
 	env := map[string]string{"A": "1"}
@@ -167,7 +195,7 @@ func TestInstallIsIdempotentForSameSpec(t *testing.T) {
 // as ErrSpecMismatch (and never started).
 func TestInstallRejectsChangedSpecOnResubmit(t *testing.T) {
 	runner := &fakeRunner{}
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	m := NewManager(cfg, runner, logr.Discard())
 
 	other := testSpec()
@@ -185,7 +213,7 @@ func TestInstallRejectsChangedSpecOnResubmit(t *testing.T) {
 
 func TestUninstallIsIdempotentSequence(t *testing.T) {
 	runner := &fakeRunner{}
-	m := NewManager(Config{Scope: ScopeSystem, UseSudo: true}, runner, logr.Discard())
+	m := NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
 
 	if err := m.Uninstall(context.Background(), "zenthros-uid-123.service"); err != nil {
 		t.Fatalf("Uninstall: %v", err)
@@ -213,7 +241,7 @@ func TestStatusParsesShowOutput(t *testing.T) {
 
 func TestUserScopeUsesUserFlagAndNoSudo(t *testing.T) {
 	runner := &fakeRunner{}
-	m := NewManager(Config{Scope: ScopeUser, UseSudo: false}, runner, logr.Discard())
+	m := NewManager(Config{Scope: ScopeUser}, runner, logr.Discard())
 
 	if _, err := m.Install(context.Background(), testSpec(), nil); err != nil {
 		t.Fatalf("Install: %v", err)
@@ -257,7 +285,7 @@ func TestLocalRunnerReportsExitCode(t *testing.T) {
 // the prepared source, not just the unit.
 func TestRemoveWorkDirDeletesJobDir(t *testing.T) {
 	runner := &fakeRunner{}
-	m := NewManager(Config{Scope: ScopeSystem, UseSudo: true}, runner, logr.Discard())
+	m := NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
 
 	if err := m.RemoveWorkDir(context.Background(), "uid-123"); err != nil {
 		t.Fatalf("RemoveWorkDir: %v", err)
@@ -282,7 +310,7 @@ func TestRemoveWorkDirUserScope(t *testing.T) {
 // TestRetainWorkdirReadsUnitFlag proves the GC flag is read off the installed unit
 // (so it survives agent restarts) and defaults to false when the unit is absent.
 func TestRetainWorkdirReadsUnitFlag(t *testing.T) {
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 
 	retained := testSpec()
 	retained.RetainWorkdir = true
@@ -309,7 +337,7 @@ func TestRetainWorkdirReadsUnitFlag(t *testing.T) {
 // retention pass uninstalls the unit first, so the finalizer's later Cancel must
 // still recover the retain decision from the marker inside the job dir.
 func TestRetainWorkdirFallsBackToMarker(t *testing.T) {
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	runner := &fakeRunner{markerExists: true} // cat fails: unit already uninstalled
 	m := NewManager(cfg, runner, logr.Discard())
 
@@ -330,7 +358,7 @@ func TestInstallWritesRetainMarker(t *testing.T) {
 	retained.Source.Inline = inlineTarball(map[string]string{"main.py": "print(1)"}, nil)
 
 	runner := &fakeRunner{}
-	m := NewManager(Config{Scope: ScopeSystem, UseSudo: true}, runner, logr.Discard())
+	m := NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
 	if _, err := m.Install(context.Background(), retained, nil); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -341,7 +369,7 @@ func TestInstallWritesRetainMarker(t *testing.T) {
 	}
 
 	runner = &fakeRunner{}
-	m = NewManager(Config{Scope: ScopeSystem, UseSudo: true}, runner, logr.Discard())
+	m = NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
 	if _, err := m.Install(context.Background(), testSpec(), nil); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -353,7 +381,7 @@ func TestInstallWritesRetainMarker(t *testing.T) {
 	noSource := testSpec()
 	noSource.RetainWorkdir = true
 	runner = &fakeRunner{}
-	m = NewManager(Config{Scope: ScopeSystem, UseSudo: true}, runner, logr.Discard())
+	m = NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
 	if _, err := m.Install(context.Background(), noSource, nil); err != nil {
 		t.Fatalf("Install: %v", err)
 	}

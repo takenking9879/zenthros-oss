@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -514,6 +515,82 @@ class GitTest(unittest.TestCase):
             client._write("x", {"manifest": {}})
             with open(os.path.join(os.path.realpath(folder), ".zenthros", ".gitignore")) as handle:
                 self.assertEqual(handle.read().strip(), "*")
+
+
+class ReleasingEngine(AnsweringEngine):
+    """The agent as it is about a job it let go: its status reads lost
+    (WORKER_LOST: statusOf in agent/localclient.go) and a finish brings
+    nothing. The first status asked waits until a finish let a job go, or
+    a second: a collector that read the record before another collected the
+    job asks the agent only after."""
+
+    def __init__(self):
+        super().__init__()
+        self.released = threading.Event()
+        self.asked = 0
+
+    def run_kept(self, args, stdin, keep, timeout=600):
+        if json.loads(stdin)["id"] in self.let_go:
+            line = json.dumps({"reports": [], "log": ""}) + "\n"
+            keep(line)
+            return 0, line, ""
+        code, out, err = super().run_kept(args, stdin, keep, timeout)
+        self.released.set()
+        return code, out, err
+
+    def agent(self, container, args, stdin):
+        if args[0] == "status":
+            self.asked += 1
+            if self.asked == 1:
+                self.released.wait(1)
+            if json.loads(stdin)["id"] in self.let_go:
+                lost = "job not found"
+                return 0, json.dumps({"phase": FAILED, "message": lost, "reason": "WORKER_LOST",
+                                      "reasons": [{"code": "WORKER_LOST", "detail": lost}]}), ""
+        return super().agent(container, args, stdin)
+
+
+class OneCollectorTest(Env):
+    """A job's end is collected once. In a pipeline two threads look at one
+    step: the call that waits on it, and the next step waiting for it to end
+    (_start_after). Both collected its end: the second read the record before
+    the first wrote it, asked the agent after the agent let the job go, read
+    it lost, and wrote that over the first one's record. The step ended
+    Failed, or with no reports, so the next step had no SHA-256 to read its
+    result by (test_pipeline_e2e d4 and d9, 2026-11-18)."""
+
+    def setUp(self):
+        super().setUp()
+        self.engine = ReleasingEngine()
+        self.client = L.LocalJobClient(root=self.folder + "/project", engine=self.engine)
+        self.client.poll_seconds = 0.01
+
+    def test_an_end_collected_by_its_wait_and_by_another_at_once_keeps_what_it_brought(self):
+        self.engine.reports = json.dumps([{"payload": {"a": 1}}])
+        self.client.submit(job())
+        self.finish()
+        other = threading.Thread(target=self.client.job_object, args=("j",))
+        other.start()
+        time.sleep(0.2)  # it read the record and asks the agent
+        status, _ = self.client._status_since("j", "", 1)
+        other.join(5)
+        record = self.client._read("j")
+        self.assertEqual((status.phase, record["status"]["phase"]), (SUCCEEDED, SUCCEEDED))
+        self.assertEqual([r["payload"] for r in record["reports"]], [{"a": 1}])
+        self.assertEqual(self.engine.execs().count("finish"), 1, "its end was collected twice")
+
+    def test_a_step_cancelled_while_it_waits_for_its_upstream_never_starts(self):
+        self.client.submit(job("up"))
+        waiting = job("down")
+        waiting.spec.depends_on = ["up"]
+        self.client.submit(waiting)
+        self.client.cancel("down")
+        self.finish("up")
+        for thread in threading.enumerate():
+            if thread.name.endswith("(_start_after)"):
+                thread.join(5)
+        self.assertEqual(self.engine.jobs, 1, "the cancelled step was sent to the agent")
+        self.assertEqual(self.client.job_object("down")["status"]["phase"], "Cancelled")
 
 
 if __name__ == "__main__":

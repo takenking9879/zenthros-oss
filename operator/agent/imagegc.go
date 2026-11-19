@@ -39,7 +39,6 @@ const (
 // each removal take turns (mu), and a removal first reads the ledger again.
 type ImageGC struct {
 	Runner systemd.Runner
-	Sudo   string
 	Ledger *imagegc.Ledger
 	Policy imagegc.Policy
 	// Forget drops a removed image from what the machine reports warm.
@@ -62,9 +61,9 @@ type imageHold struct {
 }
 
 // NewImageGC is the sweeper of a machine, with its ledger and what runs.
-func NewImageGC(runner systemd.Runner, sudo string, ledger *imagegc.Ledger, policy imagegc.Policy, forget func(string),
+func NewImageGC(runner systemd.Runner, ledger *imagegc.Ledger, policy imagegc.Policy, forget func(string),
 	running func(context.Context) (map[string]bool, error), logger logr.Logger) *ImageGC {
-	return &ImageGC{Runner: runner, Sudo: sudo, Ledger: ledger, Policy: policy, Forget: forget, Running: running,
+	return &ImageGC{Runner: runner, Ledger: ledger, Policy: policy, Forget: forget, Running: running,
 		Logger: logger, Now: time.Now, kick: make(chan struct{}, 1), holds: map[string]imageHold{}}
 }
 
@@ -192,11 +191,11 @@ func (g *ImageGC) Run(ctx context.Context) {
 // the store is over its limit, the least recently used, measuring again
 // after each (layers shared with another image free nothing).
 func (g *ImageGC) Sweep(ctx context.Context) error {
-	refs, err := ctd.ListImages(ctx, g.Runner, g.Sudo)
+	refs, err := ctd.ListImages(ctx, g.Runner)
 	if err != nil {
 		return err
 	}
-	inUse, err := ctd.ContainerImages(ctx, g.Runner, g.Sudo)
+	inUse, err := ctd.ContainerImages(ctx, g.Runner)
 	if err != nil {
 		return err
 	}
@@ -223,7 +222,7 @@ func (g *ImageGC) Sweep(ctx context.Context) error {
 		if removed[ref] {
 			continue
 		}
-		used, disk, err := ctd.ImageSpace(ctx, g.Runner, g.Sudo)
+		used, disk, err := ctd.ImageSpace(ctx, g.Runner)
 		if err != nil {
 			return err
 		}
@@ -245,7 +244,7 @@ func (g *ImageGC) remove(ctx context.Context, ref string, seen time.Time, why st
 	if !g.Ledger.LastUsed(ref).Equal(seen) {
 		return nil
 	}
-	if err := ctd.RemoveImage(ctx, g.Runner, g.Sudo, ref); err != nil {
+	if err := ctd.RemoveImage(ctx, g.Runner, ref); err != nil {
 		return err
 	}
 	g.Logger.Info("removed an image", "image", ref, "why", why)

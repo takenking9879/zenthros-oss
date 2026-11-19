@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zenthros"
-version = "0.2.1"
+version = "0.2.2"
 description = "Run a Python function on a machine of yours (any cloud, a GPU pod, your other computer) from a notebook, and get its value back"
 requires-python = ">=3.11"
 license = "Apache-2.0"

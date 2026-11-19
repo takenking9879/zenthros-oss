@@ -42,7 +42,7 @@ func secretJob(runtime string) (jobspec.JobSpec, SystemdExecutor, *recordingRunn
 		Materialization:   v1.SecretMaterialization{Mode: v1.SecretMaterializationEnv, EnvName: "TOKEN"},
 	}}
 	exec := SystemdExecutor{
-		Manager: systemd.NewManager(systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}, runner, logr.Discard()),
+		Manager: systemd.NewManager(systemd.Config{Scope: systemd.ScopeSystem}, runner, logr.Discard()),
 		Secrets: awssecret.Config{
 			Root:     root,
 			Identity: func(context.Context) (bool, error) { return true, nil },
@@ -84,7 +84,7 @@ func TestAJobsSecretsAreGivenToItsUserBeforeItStarts(t *testing.T) {
 // A container job's own directories are its user's, made before its unit
 // starts; its process takes that user's uid in the container.
 func TestAContainerJobsDirectoriesAreItsUsers(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	runner := &recordingRunner{}
 	exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard())}
 	spec := containerdSpec()
@@ -108,7 +108,7 @@ func TestAContainerJobsDirectoriesAreItsUsers(t *testing.T) {
 // namespace of their Workspace's; one that cannot runs them as before.
 func TestAContainerJobRunsInAUserNamespaceWhereTheMachineCan(t *testing.T) {
 	for _, can := range []bool{true, false} {
-		cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+		cfg := systemd.Config{Scope: systemd.ScopeSystem}
 		runner := &recordingRunner{}
 		exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard()), UserNS: can}
 		spec := containerdSpec()
@@ -130,7 +130,7 @@ func TestAJobNamedAsAPathIsRefusedBeforeAnythingIsMade(t *testing.T) {
 		func() jobspec.JobSpec { s := vmTestSpec(); s.Runtime = v1.RuntimeSystemd; s.ID = "../x"; return s }(),
 	} {
 		runner := &recordingRunner{}
-		exec := SystemdExecutor{Manager: systemd.NewManager(systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}, runner, logr.Discard())}
+		exec := SystemdExecutor{Manager: systemd.NewManager(systemd.Config{Scope: systemd.ScopeSystem}, runner, logr.Discard())}
 		if _, err := exec.Submit(context.Background(), spec, nil); !errors.Is(err, backend.ErrInvalid) {
 			t.Errorf("id %q workspace %q: %v, want ErrInvalid", spec.ID, spec.Workspace, err)
 		}

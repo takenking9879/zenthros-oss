@@ -632,3 +632,27 @@ func TestAGPUThatDoesNotStartIsNoLongerDeclared(t *testing.T) {
 		t.Fatalf("after WithoutGPU: %+v", host)
 	}
 }
+
+// Ended is the agent's word that a job ended (StatusWatcher.awaitEnds): it
+// closes once the job's result is written, so the Status read it wakes says
+// the end, and it is nil for a job this executor does not run.
+func TestEndedClosesOnceTheJobsResultIsWritten(t *testing.T) {
+	e := newTestExecutor(t, "")
+	handle, err := e.Submit(context.Background(), shellJob("e", "sleep 0.2"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := e.Ended(context.Background(), handle)
+	select {
+	case <-ended:
+	case <-time.After(time.Minute):
+		t.Fatal("Ended did not close after the job ended")
+	}
+	state, err := e.Status(context.Background(), handle)
+	if err != nil || state.Phase != v1.PhaseSucceeded {
+		t.Fatalf("Status once Ended closed: %+v, %v; want Succeeded", state, err)
+	}
+	if e.Ended(context.Background(), "unknown") != nil {
+		t.Fatal("Ended of a job this executor does not run is not nil")
+	}
+}

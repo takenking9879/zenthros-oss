@@ -49,7 +49,7 @@ func inlineTarball(files, links map[string]string) string {
 
 func TestPrepareSourceGitClone(t *testing.T) {
 	runner := &fakeRunner{}
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 
 	workDir, err := PrepareSource(context.Background(), runner, gitSpec(), cfg)
 	if err != nil {
@@ -80,7 +80,7 @@ func TestPrepareSourceGitClone(t *testing.T) {
 
 func TestPrepareSourceGitCloneNoRef(t *testing.T) {
 	runner := &fakeRunner{}
-	cfg := Config{Scope: ScopeSystem, UseSudo: false}
+	cfg := Config{Scope: ScopeSystem}
 	spec := gitSpec()
 	spec.Source.GitRef = ""
 
@@ -92,13 +92,13 @@ func TestPrepareSourceGitCloneNoRef(t *testing.T) {
 		t.Errorf("no ref means no --branch; ran %v", runner.commands)
 	}
 	if runner.ran("sudo ") {
-		t.Errorf("UseSudo=false must not use sudo; ran %v", runner.commands)
+		t.Errorf("the root agent must not use sudo; ran %v", runner.commands)
 	}
 }
 
 func TestPrepareSourceInlineWorkspaceUsesIsolatedDir(t *testing.T) {
 	runner := &fakeRunner{}
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	spec := inlineSpec()
 	spec.Workspace = "default"
 
@@ -114,7 +114,7 @@ func TestPrepareSourceInlineWorkspaceUsesIsolatedDir(t *testing.T) {
 
 func TestPrepareSourceInlineExtract(t *testing.T) {
 	runner := &fakeRunner{}
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 
 	workDir, err := PrepareSource(context.Background(), runner, inlineSpec(), cfg)
 	if err != nil {
@@ -144,7 +144,7 @@ func TestAnInlineArchiveThatEscapesIsRefused(t *testing.T) {
 			runner := &fakeRunner{}
 			spec := inlineSpec()
 			spec.Source.Inline = archive
-			if _, err := PrepareSource(context.Background(), runner, spec, Config{Scope: ScopeSystem, UseSudo: true}); err == nil {
+			if _, err := PrepareSource(context.Background(), runner, spec, Config{Scope: ScopeSystem}); err == nil {
 				t.Fatal("an archive escaping its work directory was accepted")
 			}
 			if runner.ran("cp -a ") || runner.ran("tar ") {
@@ -156,7 +156,7 @@ func TestAnInlineArchiveThatEscapesIsRefused(t *testing.T) {
 
 func TestPrepareSourceUserScope(t *testing.T) {
 	runner := &fakeRunner{}
-	cfg := Config{Scope: ScopeUser, UseSudo: false}
+	cfg := Config{Scope: ScopeUser}
 
 	workDir, err := PrepareSource(context.Background(), runner, gitSpec(), cfg)
 	if err != nil {
@@ -169,7 +169,7 @@ func TestPrepareSourceUserScope(t *testing.T) {
 
 func TestPrepareSourceNoSource(t *testing.T) {
 	runner := &fakeRunner{}
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 
 	workDir, err := PrepareSource(context.Background(), runner, testSpec(), cfg)
 	if err != nil {
@@ -185,7 +185,7 @@ func TestPrepareSourceNoSource(t *testing.T) {
 
 func TestInstallWithGitSourceSetsWorkingDirectory(t *testing.T) {
 	runner := &fakeRunner{}
-	m := NewManager(Config{Scope: ScopeSystem, UseSudo: true}, runner, logr.Discard())
+	m := NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
 
 	name, err := m.Install(context.Background(), gitSpec(), nil)
 	if err != nil {
@@ -208,7 +208,7 @@ func TestInlineSourceNeverRidesTheCommandLine(t *testing.T) {
 	spec := inlineSpec()
 	spec.Source.Inline = inlineTarball(map[string]string{"big.bin": strings.Repeat("A", 512<<10)}, nil)
 
-	if _, err := PrepareSource(context.Background(), runner, spec, Config{Scope: ScopeSystem, UseSudo: true}); err != nil {
+	if _, err := PrepareSource(context.Background(), runner, spec, Config{Scope: ScopeSystem}); err != nil {
 		t.Fatalf("PrepareSource: %v", err)
 	}
 	for _, cmd := range runner.commands {

@@ -41,10 +41,31 @@ type StatusWatcher struct {
 	// now asks for a poll before the next tick; its channel closes once
 	// the poll ran (PollNow).
 	now chan chan struct{}
+	// ends is the executor's word that a job ended, when it has one:
+	// waits holds a wait on it for each job tracked, and woken asks for
+	// the poll that pushes the end (Wake).
+	ends  jobEnds
+	waits map[string]context.CancelFunc
+	woken chan struct{}
+}
+
+// jobEnds is an executor that knows when a job ends as it happens: procagent
+// when its process exits, the VM executor when systemd says the unit ended.
+// The end is pushed, and the job's slot freed, then, not at the next tick:
+// with a tick every 2 s each task of a map on one machine started ~1 s after
+// the one before had ended, on average, and up to 2 s (This computer,
+// 2026-11-18).
+type jobEnds interface {
+	// Ended is closed once the job ended; nil for a job it does not know.
+	Ended(ctx context.Context, handle string) <-chan struct{}
 }
 
 func newStatusWatcher(executor Executor, tracker *jobTracker, sender *streamSender, backendID string, logger Logger) *StatusWatcher {
+	ends, _ := executor.(jobEnds)
 	return &StatusWatcher{
+		ends:      ends,
+		waits:     map[string]context.CancelFunc{},
+		woken:     make(chan struct{}, 1),
 		executor:  executor,
 		tracker:   tracker,
 		sender:    sender,
@@ -69,9 +90,52 @@ func (w *StatusWatcher) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			w.pollAll(ctx)
+		case <-w.woken:
+			w.pollAll(ctx)
 		case done := <-w.now:
 			w.pollAll(ctx)
 			close(done)
+		}
+	}
+}
+
+// Wake asks for a poll before the next tick, and returns at once: a job just
+// submitted is waited on from then, a job that ended is pushed.
+func (w *StatusWatcher) Wake() {
+	select {
+	case w.woken <- struct{}{}:
+	default:
+	}
+}
+
+// awaitEnds waits on the end of each job of jobs, as its executor says it,
+// and stops waiting on the jobs no longer tracked. The waits end with ctx,
+// the stream's.
+func (w *StatusWatcher) awaitEnds(ctx context.Context, jobs []activeJob) {
+	if w.ends == nil {
+		return
+	}
+	tracked := make(map[string]bool, len(jobs))
+	for _, job := range jobs {
+		tracked[job.handleName] = true
+		if _, ok := w.waits[job.handleName]; ok {
+			continue
+		}
+		waitCtx, cancel := context.WithCancel(ctx)
+		w.waits[job.handleName] = cancel
+		ended := w.ends.Ended(waitCtx, job.handleName)
+		go func() {
+			select {
+			case <-ended:
+				w.Wake()
+			case <-waitCtx.Done():
+			}
+		}()
+	}
+	for handle, cancel := range w.waits {
+		if !tracked[handle] {
+			cancel()
+			delete(w.waits, handle)
 		}
 	}
 }
@@ -120,6 +184,8 @@ func (w *StatusWatcher) pollAll(ctx context.Context) {
 	started := time.Now()
 	pollErrors := 0
 	jobs := w.tracker.Snapshot()
+	// Before the read: a job that ends after it wakes the next poll.
+	w.awaitEnds(ctx, jobs)
 	states, errs := w.readStates(ctx, jobs)
 	for i, job := range jobs {
 		state, err := states[i], errs[i]

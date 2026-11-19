@@ -387,6 +387,13 @@ func (e SystemdExecutor) Logs(ctx context.Context, handle string, req backend.Lo
 	return f.Read(ctx, req, ended)
 }
 
+// Ended is closed once systemd says the job's unit ended (the Manager's
+// TerminalWatch, shared with the follow streams): the agent pushes the end
+// then, not at its next poll.
+func (e SystemdExecutor) Ended(ctx context.Context, handle string) <-chan struct{} {
+	return e.Manager.TerminalWatch().Ended(ctx, handle)
+}
+
 // endedBefore is the end a read that does not follow never waits for.
 var endedBefore = func() <-chan struct{} {
 	ch := make(chan struct{})
@@ -550,7 +557,6 @@ func (e SystemdExecutor) installCtrWrapper(ctx context.Context, spec jobspec.Job
 		opts.ExtraMounts = append(opts.ExtraMounts, ctd.BindMount{Source: m.Source, Dest: m.Target, ReadOnly: true})
 	}
 	opts.ReportSocketDir = e.ReportSocketDir
-	sudo := cfg.SudoPrefix()
 	runner := e.Manager.Runner()
 	dir := systemd.IsolatedJobDir(spec.Workspace, spec.ID, cfg)
 	if err := opts.ConfineHostMounts(dir, cfg.HostRoots, resolveExisting); err != nil {
@@ -568,7 +574,7 @@ func (e SystemdExecutor) installCtrWrapper(ctx context.Context, spec jobspec.Job
 	for _, d := range append([]string{dir}, leaves...) {
 		quoted = append(quoted, shellword.Quote(d))
 	}
-	if _, err := runner.Run(ctx, sudo+"mkdir -p "+strings.Join(quoted, " ")); err != nil {
+	if _, err := runner.Run(ctx, "mkdir -p "+strings.Join(quoted, " ")); err != nil {
 		return "", fmt.Errorf("create containerd job dir: %w", err)
 	}
 	if opts.User != "" {
@@ -578,8 +584,8 @@ func (e SystemdExecutor) installCtrWrapper(ctx context.Context, spec jobspec.Job
 	}
 	write := func(path, body, mode string) error {
 		enc := base64.StdEncoding.EncodeToString([]byte(body))
-		cmd := fmt.Sprintf(`printf '%%s' '%s' | base64 -d | %stee "%s" >/dev/null && %schmod %s "%s"`,
-			enc, sudo, path, sudo, mode, path)
+		cmd := fmt.Sprintf(`printf '%%s' '%s' | base64 -d | tee "%s" >/dev/null && chmod %s "%s"`,
+			enc, path, mode, path)
 		_, err := runner.Run(ctx, cmd)
 		return err
 	}
@@ -595,18 +601,18 @@ func (e SystemdExecutor) installCtrWrapper(ctx context.Context, spec jobspec.Job
 	if e.Images != nil {
 		e.Images.Hold(systemd.UnitName(spec.ID), opts.Image)
 	}
-	ok, err := ctd.ImageExists(ctx, runner, sudo, opts.Image)
+	ok, err := ctd.ImageExists(ctx, runner, opts.Image)
 	if err != nil {
 		return "", err
 	}
 	if ok {
-		_, _ = runner.Run(ctx, imageEvent("job_image_cache_hit", opts.Image, sudo))
+		_, _ = runner.Run(ctx, imageEvent("job_image_cache_hit", opts.Image))
 	} else {
-		_, _ = runner.Run(ctx, imageEvent("job_image_pull_start", opts.Image, sudo))
-		if _, err := ctd.EnsureImageWith(ctx, runner, sudo, opts.Image, e.Registry); err != nil {
+		_, _ = runner.Run(ctx, imageEvent("job_image_pull_start", opts.Image))
+		if _, err := ctd.EnsureImageWith(ctx, runner, opts.Image, e.Registry); err != nil {
 			return "", err
 		}
-		_, _ = runner.Run(ctx, imageEvent("job_image_pull_end", opts.Image, sudo))
+		_, _ = runner.Run(ctx, imageEvent("job_image_pull_end", opts.Image))
 	}
 	if e.Cache != nil {
 		e.Cache.NoteImage(opts.Image)
@@ -616,9 +622,9 @@ func (e SystemdExecutor) installCtrWrapper(ctx context.Context, spec jobspec.Job
 
 // imageEvent writes one ZENTHROS_EVENT line to the console. The image comes
 // from the job spec, so it is passed as data, never as shell text.
-func imageEvent(event, image, sudo string) string {
-	return fmt.Sprintf(`printf 'ZENTHROS_EVENT event=%s image=%%s ts=%%s\n' %s "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" | %stee /dev/console >/dev/null`,
-		event, shellword.Quote(image), sudo)
+func imageEvent(event, image string) string {
+	return fmt.Sprintf(`printf 'ZENTHROS_EVENT event=%s image=%%s ts=%%s\n' %s "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" | tee /dev/console >/dev/null`,
+		event, shellword.Quote(image))
 }
 
 // resolveExisting resolves symlinks in the longest existing prefix of path,
@@ -696,8 +702,7 @@ func (e SystemdExecutor) ResolvedImage(ctx context.Context, spec jobspec.JobSpec
 	if container, err := containerRuntime(spec.Runtime); err != nil || !container {
 		return ""
 	}
-	cfg := e.Manager.Config()
-	ref, err := ctd.ImageDigest(ctx, e.Manager.Runner(), cfg.SudoPrefix(), spec.Image)
+	ref, err := ctd.ImageDigest(ctx, e.Manager.Runner(), spec.Image)
 	if err != nil {
 		return ""
 	}

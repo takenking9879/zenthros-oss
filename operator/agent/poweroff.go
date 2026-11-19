@@ -48,16 +48,12 @@ func (a *Agent) powerOff() {
 }
 
 // SystemPowerOff powers the machine off through systemd, which stops its
-// units in order first.
-func SystemPowerOff(useSudo bool) func(ctx context.Context) error {
+// units in order first. The agent is root: no sudo.
+func SystemPowerOff() func(ctx context.Context) error {
 	return func(ctx context.Context) error {
-		args := []string{"systemctl", "poweroff"}
-		if useSudo {
-			args = append([]string{"sudo", "-n"}, args...)
-		}
-		out, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
+		out, err := exec.CommandContext(ctx, "systemctl", "poweroff").CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("%s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("systemctl poweroff: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}

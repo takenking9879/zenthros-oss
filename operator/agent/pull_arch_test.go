@@ -14,7 +14,7 @@ import (
 
 func submitPull(t *testing.T) []string {
 	t.Helper()
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	runner := &recordingRunner{}
 	exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard())}
 	if _, err := exec.Submit(context.Background(), containerdSpec(), nil); err != nil {

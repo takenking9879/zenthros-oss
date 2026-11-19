@@ -119,6 +119,11 @@ class NotFound(ZenthrosError, LookupError):
     route, a route this hub does not serve. A job is JobNotFound."""
 
 
+class CodeAbsent(NotFound):
+    """The code a job names by its digest is not on the hub (its bundle went
+    with the last job that held it): the SDK sends it inline instead."""
+
+
 class JobNotFound(NotFound):
     """The job does not exist: never created, deleted, or collected after
     its TTL (1 h by default). Not a TransientError: waiting does not bring

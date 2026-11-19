@@ -26,8 +26,6 @@ func NewVMCache(manager *systemd.Manager, registry ctd.RegistryAuth, root string
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("create cache %s: %w", root, err)
 	}
-	cfg := manager.Config()
-	sudo := cfg.SudoPrefix()
 	runner := manager.Runner()
 	return &cache.Manager{
 		Root:     root,
@@ -37,7 +35,7 @@ func NewVMCache(manager *systemd.Manager, registry ctd.RegistryAuth, root string
 				return false, errors.New("containerd is not running on this machine; images are warmed in containerd (VMPool spec.runtime.container.engine: containerd)")
 			}
 			images.Note(ref)
-			return ctd.EnsureImageWith(ctx, runner, sudo, ref, registry)
+			return ctd.EnsureImageWith(ctx, runner, ref, registry)
 		},
 		Install: func(ctx context.Context, name, version string, packages []string) error {
 			script := KeptInstallerDir + "/install-agent.sh"
@@ -48,8 +46,8 @@ func NewVMCache(manager *systemd.Manager, registry ctd.RegistryAuth, root string
 			if version != "" {
 				spec += "@" + version
 			}
-			cmd := fmt.Sprintf(`%senv $(cat %s/env) bash %s --only-toolchains --toolchain %s`,
-				sudo, KeptInstallerDir, script, shellword.Quote(spec))
+			cmd := fmt.Sprintf(`env $(cat %s/env) bash %s --only-toolchains --toolchain %s`,
+				KeptInstallerDir, script, shellword.Quote(spec))
 			if len(packages) > 0 {
 				cmd += " --toolchain-packages " + shellword.Quote(strings.Join(packages, " "))
 			}

@@ -16,7 +16,7 @@ import (
 // An installed unit with the same spec that never ran (no result record) must
 // be started. Reusing it returns the old handle and the job never runs.
 func TestInstallRestartsFinishedUnitWithSameSpec(t *testing.T) {
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	runner := &fakeRunner{}
 	manager := NewManager(cfg, runner, logr.Discard())
 	spec := jobspec.JobSpec{
@@ -46,7 +46,7 @@ func TestInstallRestartsFinishedUnitWithSameSpec(t *testing.T) {
 // and no result record) is started directly; job units set
 // StartLimitIntervalSec=0, so there is no start limit to clear.
 func TestRestartOfFinishedUnitNeverResetsItsState(t *testing.T) {
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	runner := &fakeRunner{showOutput: "LoadState=loaded\nActiveState=failed\nResult=exit-code\nExecMainStatus=7\n"}
 	manager := NewManager(cfg, runner, logr.Discard())
 	spec := jobspec.JobSpec{ID: "uid-failed", Name: "hello", Namespace: "tenant-default",

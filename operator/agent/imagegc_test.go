@@ -111,7 +111,7 @@ func newTestGC(t *testing.T, ctr *fakeCtr, policy imagegc.Policy, now time.Time,
 		}
 	}
 	var forgotten []string
-	gc := NewImageGC(ctr, "", ledger, policy, func(ref string) { forgotten = append(forgotten, ref) }, noUnits, logr.Discard())
+	gc := NewImageGC(ctr, ledger, policy, func(ref string) { forgotten = append(forgotten, ref) }, noUnits, logr.Discard())
 	gc.Now = func() time.Time { return now }
 	return gc, &forgotten
 }
@@ -196,7 +196,7 @@ func TestTheSweepRemovesOnlyWhatNoContainerUses(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctr := &fakeCtr{images: []string{"old"}, disk: 1000}
-		gc := NewImageGC(ctr, "", restarted, week, nil, noUnits, logr.Discard())
+		gc := NewImageGC(ctr, restarted, week, nil, noUnits, logr.Discard())
 		gc.Now = func() time.Time { return now }
 		if err := gc.Sweep(context.Background()); err != nil {
 			t.Fatal(err)
@@ -256,10 +256,10 @@ func TestAnImageNamedDuringASweepStays(t *testing.T) {
 // until its container uses it, and a sweep is asked for once the job is
 // installed. A host job's names no image.
 func TestAContainerJobNotesItsImageBeforeItsPull(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	path := filepath.Join(t.TempDir(), "images.json")
 	runner := &ledgerAtPull{recordingRunner: &recordingRunner{}, path: path}
-	gc := NewImageGC(runner, "", imagegc.New(path), imagegc.Policy{MaxAge: time.Hour}, nil, noUnits, logr.Discard())
+	gc := NewImageGC(runner, imagegc.New(path), imagegc.Policy{MaxAge: time.Hour}, nil, noUnits, logr.Discard())
 	runner.gc = gc
 	noted := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
 	gc.Now = func() time.Time { return noted }

@@ -2,6 +2,7 @@
 
 """In-process job client for W4. No Ray, no cluster, no zctl."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from zenthros import errors
@@ -108,18 +109,27 @@ class FakeJobClient(JobClient):
             lifecycle="Service" if job["job"].spec.workload.template.service else "",
         )
 
-    def wait(self, job_id, timeout=None, on_reschedule=None, cancel_on_timeout=False):
+    def wait(self, job_id, timeout=None, on_reschedule=None, cancel_on_timeout=False, on_status=None):
         job = self._require(job_id)
         script = job.get("script")
         if script:
             return self._wait_script(job_id, script, on_reschedule)
+        if job["failed"] and job["phase"] != CANCELLED:
+            job["phase"] = FAILED
+        elif job["phase"] not in (CANCELLED, FAILED):
+            job["phase"] = SUCCEEDED
+        self.seen_end(job_id, on_status)
         if job["phase"] == CANCELLED:
             raise errors.JobCancelled(f"job {job_id} cancelled")
-        if job["failed"] or job["phase"] == FAILED:
-            job["phase"] = FAILED
+        if job["phase"] == FAILED:
             raise errors.JobFailed(f"job {job_id} failed", reasons=job.get("reasons"))
-        job["phase"] = SUCCEEDED
         return SUCCEEDED
+
+    def seen_end(self, job_id, on_status):
+        """As zenthros-api's wait: the status that ended the job, with the
+        job it was read from."""
+        if on_status is not None:
+            on_status(replace(self.job_status(job_id), job=self.job_object(job_id)))
 
     def _wait_script(self, job_id, script, on_reschedule):
         job = self._require(job_id)

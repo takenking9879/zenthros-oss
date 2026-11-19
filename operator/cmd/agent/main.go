@@ -159,7 +159,7 @@ func main() {
 	// its cloud account may stop taking the provisioner's terminate.
 	if envconf.Or("ZENTHROS_AGENT_MODE", agentModeVM) == agentModeVM &&
 		infrav1alpha1.NormalizeOwnership(cfg.Ownership) == infrav1alpha1.OwnershipManaged {
-		cfg.PowerOff = agent.SystemPowerOff(os.Getenv("ZENTHROS_USE_SUDO") == "true")
+		cfg.PowerOff = agent.SystemPowerOff()
 	}
 	backendType, err := backendTypeFor(envconf.Or("ZENTHROS_AGENT_MODE", agentModeVM), cfg.BackendType)
 	if err != nil {
@@ -371,10 +371,8 @@ func newExecutor(mode string, logger logr.Logger) (agent.Executor, agepayload.Bu
 			return nil, agepayload.Bundle{}, err
 		}
 		scope := envconf.Or("ZENTHROS_SYSTEMD_SCOPE", systemd.ScopeSystem)
-		useSudo := os.Getenv("ZENTHROS_USE_SUDO") == "true"
 		manager := systemd.NewManager(systemd.Config{
 			Scope:        scope,
-			UseSudo:      useSudo,
 			RuntimeImage: strings.TrimSpace(os.Getenv("ZENTHROS_RUNTIME_IMAGE")),
 			HostRoots:    systemd.HostRoots(os.Getenv(systemd.HostRootsEnv)),
 		}, systemd.LocalRunner{}, logger)
@@ -395,7 +393,7 @@ func newExecutor(mode string, logger logr.Logger) (agent.Executor, agepayload.Bu
 			// Asked at each start: the installer restarts the agent once
 			// containerd is there.
 			probe, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			can, why := ctd.UserNamespaces(probe, manager.Runner(), manager.Config().SudoPrefix())
+			can, why := ctd.UserNamespaces(probe, manager.Runner())
 			cancel()
 			executor.UserNS = can
 			if can {
@@ -491,7 +489,7 @@ func newImageGC(manager *systemd.Manager, logger logr.Logger) (*agent.ImageGC, e
 		logger.Error(err, "the images' ledger cannot be read; starting a new one")
 		ledger = imagegc.New(agent.ImagesLedger)
 	}
-	return agent.NewImageGC(manager.Runner(), manager.Config().SudoPrefix(), ledger, policy, nil, agent.RunningUnits(manager), logger.WithName("imagegc")), nil
+	return agent.NewImageGC(manager.Runner(), ledger, policy, nil, agent.RunningUnits(manager), logger.WithName("imagegc")), nil
 }
 
 func newK8sExecutor(logger logr.Logger) (*k8sagent.Executor, error) {

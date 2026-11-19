@@ -183,6 +183,21 @@ func TestTheAgentsUnitHoldsIt(t *testing.T) {
 			t.Errorf("agent unit has %q: what it makes for a job would not be where the job looks:\n%s", never, unit)
 		}
 	}
+	// The agent is root: a sudo before each of a job's 26 preparing commands
+	// opened a session and wrote the journal, ~90 ms each inside the agent's
+	// CPUQuota on an e2-small, 2.3 s before every job's code (2026-11-18).
+	if strings.Contains(unit, "SUDO") {
+		t.Errorf("agent unit asks the root agent to sudo:\n%s", unit)
+	}
+	// systemd 259 (Ubuntu 26.04) removed CPUAccounting= and warns each time
+	// it loads the unit: CPU is always counted, and CPUQuota= needs no
+	// switch. systemd-analyze below sees it only where systemd is that new
+	// (the CI runner's move to 26.04 did, 2026-11-18).
+	for _, removed := range []string{"CPUAccounting="} {
+		if strings.Contains(unit, removed) {
+			t.Errorf("agent unit has %q, which systemd 259 removed:\n%s", removed, unit)
+		}
+	}
 	if !slices.Equal(systemd.AgentHomes, []string{"/home", "/root", "/run/user"}) {
 		t.Errorf("systemd.AgentHomes = %v, want what ProtectHome=tmpfs hides: /home, /root, /run/user", systemd.AgentHomes)
 	}

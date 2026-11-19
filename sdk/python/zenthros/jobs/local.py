@@ -33,7 +33,7 @@ import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from zenthros import errors
+from zenthros import errors, locking
 from zenthros.core.storage import is_carried
 from zenthros.jobs import logrecords
 from zenthros.jobs import spec as S
@@ -338,6 +338,24 @@ class LocalJobClient(JobClient):
     def _log_file(self, name):
         return self.root / "jobs" / f"{name}.log"
 
+    def _lock_file(self, name):
+        return self.root / "jobs" / f".{name}.lock"
+
+    @contextlib.contextmanager
+    def _held(self, name):
+        """The job's record to whoever changes it from what it read: collects
+        its end, cancels it, starts it after its upstreams. Read it again
+        inside. In a pipeline the call that waits on a step and the next step
+        waiting for it both collected its end: the second had read the
+        record before the first wrote it, asked the agent once it had let the
+        job go, read it lost, and wrote that over the first one's record (the
+        step Failed, or with no reports to pin its result by; 2026-11-18).
+        Held by one thread or process at a time, never twice by one."""
+        path = self._lock_file(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with locking.held(path):
+            yield
+
     def _read(self, name):
         try:
             return json.loads(self._job_file(name).read_text())
@@ -640,13 +658,16 @@ class LocalJobClient(JobClient):
             threading.Thread(target=self._start_after, args=(job.name, box, depends), daemon=True).start()
             return JobHandle(job.name, self)
         try:
-            self._start_job(job.name, box)
+            with self._held(job.name):
+                self._start_job(job.name, box)
         except BaseException:
             self._job_file(job.name).unlink(missing_ok=True)
             raise
         return JobHandle(job.name, self)
 
     def _start_job(self, name, box):
+        """Sends the job to its container's agent. The caller holds the job
+        (_held)."""
         record = self._read(name)
         manifest = record["manifest"]
         template = manifest["spec"]["workload"]["template"]
@@ -699,18 +720,28 @@ class LocalJobClient(JobClient):
                         break
                     time.sleep(self.poll_seconds)
                 if phase != SUCCEEDED:
-                    self._end(name, FAILED, "UPSTREAM_FAILED", f"{upstream} ended {phase}")
+                    self._end_unless_ended(name, "UPSTREAM_FAILED", f"{upstream} ended {phase}")
                     return
                 pin = self._results_pin(upstream)
                 if pin:
                     pins[upstream] = pin
-            record = self._read(name)
-            if pins:
-                record["manifest"].setdefault("status", {})["upstreamResults"] = pins
-                self._write(name, record)
-            self._start_job(name, box)
+            # Cancelled while it waited, it stays so.
+            with self._held(name):
+                record = self._read(name)
+                if record.get("final"):
+                    return
+                if pins:
+                    record["manifest"].setdefault("status", {})["upstreamResults"] = pins
+                    self._write(name, record)
+                self._start_job(name, box)
         except errors.ZenthrosError as err:
-            self._end(name, FAILED, "SUBMIT_FAILED", str(err))
+            self._end_unless_ended(name, "SUBMIT_FAILED", str(err))
+
+    def _end_unless_ended(self, name, reason, message):
+        """name Failed for reason, unless it already ended (cancelled)."""
+        with self._held(name):
+            if not self._read(name).get("final"):
+                self._end(name, FAILED, reason, message)
 
     def _results_pin(self, name):
         """The controller's pin of a job's results (resultdigest.Pin)."""
@@ -765,11 +796,14 @@ class LocalJobClient(JobClient):
 
     def job_object(self, job_id):
         record = self._read(job_id)
-        if not record.get("final") and record.get("local"):
-            record = self._refresh(job_id, record)
-        elif not record.get("final") and not _alive(record.get("pid")):
-            self._end(job_id, FAILED, "SUBMIT_FAILED", "the process that was waiting for its upstream went")
-            record = self._read(job_id)
+        if not record.get("final"):
+            with self._held(job_id):
+                record = self._read(job_id)
+                if not record.get("final") and record.get("local"):
+                    record = self._refresh(job_id, record)
+                elif not record.get("final") and not _alive(record.get("pid")):
+                    self._end(job_id, FAILED, "SUBMIT_FAILED", "the process that was waiting for its upstream went")
+                    record = self._read(job_id)
         return {**record["manifest"], "status": record["status"]}
 
     waits_for_change = True
@@ -794,8 +828,13 @@ class LocalJobClient(JobClient):
                 return self.job_status(job_id), None
             raise errors.TransientError(f"job {job_id}: {err.strip()}")
         answer = json.loads(out)
-        record = self._refresh(job_id, record, answer["status"])
-        return status_from_object({**record["manifest"], "status": record["status"]}), answer["seen"]
+        with self._held(job_id):
+            current = self._read(job_id)
+            # The answer is of the attempt it waited on, and only while no one
+            # collected it since.
+            if not current.get("final") and current.get("local") == record["local"]:
+                current = self._refresh(job_id, current, answer["status"])
+        return status_from_object({**current["manifest"], "status": current["status"]}), answer["seen"]
 
     def _before_its_deadline(self, record):
         """Seconds until the job's timeout, which this client keeps: a wait
@@ -909,26 +948,29 @@ class LocalJobClient(JobClient):
         return status_from_object(self.job_object(job_id))
 
     def cancel(self, job_id):
-        record = self._read(job_id)
-        if record.get("final"):
-            return
-        if record.get("local"):
-            cursor = self.cursor_of(job_id)
-            code, _, err = self._exec(record["container"], "cancel", stdin=json.dumps(record["local"]), timeout=120)
-            if code != 0 and not self._gone(record["container"]):
-                raise errors.TransientError(f"cancel {job_id}: {err.strip()}")
-            for task in record["local"]["tasks"]:
-                self._exec(record["container"], "forget", task["id"], timeout=60)
-            if cursor:
-                record["status"] = {**record.get("status", {}), "progress": cursor}
-        record["status"] = {**record.get("status", {}), "phase": CANCELLED, "message": "cancelled", "completionTime": _now()}
-        record["final"] = True
-        self._write(job_id, record)
+        with self._held(job_id):
+            record = self._read(job_id)
+            if record.get("final"):
+                return
+            if record.get("local"):
+                cursor = self.cursor_of(job_id)
+                code, _, err = self._exec(record["container"], "cancel", stdin=json.dumps(record["local"]), timeout=120)
+                if code != 0 and not self._gone(record["container"]):
+                    raise errors.TransientError(f"cancel {job_id}: {err.strip()}")
+                for task in record["local"]["tasks"]:
+                    self._exec(record["container"], "forget", task["id"], timeout=60)
+                if cursor:
+                    record["status"] = {**record.get("status", {}), "progress": cursor}
+            record["status"] = {**record.get("status", {}), "phase": CANCELLED, "message": "cancelled",
+                                "completionTime": _now()}
+            record["final"] = True
+            self._write(job_id, record)
 
     def delete(self, job_id):
         self.cancel(job_id)
         self._job_file(job_id).unlink(missing_ok=True)
         self._log_file(job_id).unlink(missing_ok=True)
+        self._lock_file(job_id).unlink(missing_ok=True)
 
     def logs(self, job_id, tail=None):
         record = self._read(job_id)
@@ -1030,6 +1072,7 @@ class LocalJobClient(JobClient):
             if ended and now - ended > int(keep):
                 path.unlink(missing_ok=True)
                 self._log_file(path.stem).unlink(missing_ok=True)
+                self._lock_file(path.stem).unlink(missing_ok=True)
 
     def containers(self):
         """This project's containers: name and state."""

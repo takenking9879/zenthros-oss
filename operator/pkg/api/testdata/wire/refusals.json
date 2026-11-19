@@ -38,10 +38,16 @@
       "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"the hub keeps 1000 jobs of Workspace risk, the most: delete finished ones (zenthros.get(NAME).delete()) or wait for them to expire\",\"reason\":\"TooManyRequests\",\"code\":429}\n"
     },
     {
+      "case": "the code a job names by its digest is not on the hub",
+      "means": "code-absent",
+      "code": 404,
+      "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"configmaps \\\"zenthros-src-5694d08a2e53ffca\\\" not found\",\"reason\":\"NotFound\",\"details\":{\"name\":\"zenthros-src-5694d08a2e53ffca\",\"kind\":\"configmaps\"},\"code\":404}\n"
+    },
+    {
       "case": "an SDK of another wire",
       "means": "other-wire",
       "code": 426,
-      "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"zenthros 0.1.0 speaks wire 0; this hub speaks 5: pip install -U 'https://dl.example/zenthros-0.2.0-py3-none-any.whl'\",\"reason\":\"UpgradeRequired\",\"code\":426}\n"
+      "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"zenthros 0.1.0 speaks wire 0; this hub speaks 6: pip install -U 'https://dl.example/zenthros-0.2.0-py3-none-any.whl'\",\"reason\":\"UpgradeRequired\",\"code\":426}\n"
     }
   ]
 }

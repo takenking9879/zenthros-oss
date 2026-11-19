@@ -46,7 +46,7 @@ func cancelWithSecret(t *testing.T) (existedAtUninstall bool, sawUninstall bool,
 	if err := os.WriteFile(secretPath, []byte("line1\nline2"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	runner := &secretOrderRunner{
 		recordingRunner: &recordingRunner{unitContent: systemd.RenderUnit(spec, nil, cfg, "")},
 		secretPath:      secretPath,
@@ -97,7 +97,7 @@ func TestACancelThatLeavesSecretsFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	exec := SystemdExecutor{
 		Manager: systemd.NewManager(cfg, &recordingRunner{unitContent: systemd.RenderUnit(spec, nil, cfg, "")}, logr.Discard()),
 		Secrets: awssecret.Config{Root: root},

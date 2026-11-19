@@ -1427,6 +1427,8 @@ class RemoteCall:
         self.why = ""
         # uri -> (SHA-256, size) of what _read_verified checked.
         self._verified = {}
+        # The job's reports as read once it ended (_end_reports).
+        self._ended_reports = None
 
     cached = False
     action = "run"
@@ -1649,6 +1651,8 @@ class RemoteCall:
                     progress.stop()
             self.timings["finished"] = time.time()
             self._outcome = self._collect(failure)
+            if progress is not None:
+                progress.last_look()
             self._record_end()
             self.release()
             if stream_logs and self._outcome[0]:
@@ -1701,7 +1705,7 @@ class RemoteCall:
                 if tail:
                     record.line(tail if tail.endswith("\n") else tail + "\n")
         try:
-            reports = user_reports(self.reports())
+            reports = user_reports(self._end_reports())
         except (errors.ZenthrosError, OSError):  # a record, not a check
             reports = []
         if reports:
@@ -1865,6 +1869,8 @@ class RemoteCall:
         store is not the job's to vouch for: a Workspace member who may
         presign a PUT, a job with the bucket's credentials, or another host
         can write there (audit 2026-10-03 SEC-4)."""
+        deadline = time.monotonic() + DIGEST_GRACE
+        reported, answered = self._reported_digests()
         raws = {}
         for uri in uris:
             try:
@@ -1872,13 +1878,13 @@ class RemoteCall:
             except FileNotFoundError:
                 pass
         wanted = {uri: hashlib.sha256(raw).hexdigest() for uri, raw in raws.items()}
-        deadline = time.monotonic() + DIGEST_GRACE
         while True:
-            reported, answered = self._reported_digests()
             unvouched = [uri for uri, digest in wanted.items() if digest not in reported.get(uri, ())]
             if not unvouched or time.monotonic() >= deadline:
                 break
             time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            # A digest not there yet: the job and its reports as they are now.
+            reported, answered = self._reported_digests(fresh=True)
         if unvouched and not answered:
             # The API did not answer: no word on the digests is not a job
             # that reported none, and nothing is kept of it.
@@ -1894,25 +1900,28 @@ class RemoteCall:
         self._verified = {uri: (wanted[uri], len(raws[uri])) for uri in raws}
         return [self._record(pickle.loads(raws[uri])) if uri in raws else None for uri in uris]
 
-    def _reported_digests(self):
+    def _reported_digests(self, fresh=False):
         """(uri -> the SHA-256s the job's runners reported for it, every
         attempt's: each one is the job's own word; whether the job's status
         and its reports both answered). From the job's status, where the controller keeps them
         past the report store (an in-memory one forgets them on a restart:
         post-fix review R-4), and a distributed job's tasks' too; and from
-        its reports."""
+        its reports. Both as the job ended (the job the wait saw end, the
+        reports read once), or as they are now when fresh."""
         found = {}
         entries = []
         answered = True
         try:
-            obj = self._client.job_object(self.name) or {}
+            obj = None if fresh else self._ended_job()
+            if obj is None:
+                obj = self._client.job_object(self.name) or {}
             entries.extend((obj.get("status") or {}).get("results") or [])
         except errors.TransientError:
             answered = False
         except errors.JobNotFound:
             pass
         try:
-            views = self._client.reports(self.name)
+            views = self._end_reports(fresh)
         except errors.TransientError as err:
             # Either source away is no answer: the digest may be only there.
             # A 501 is one: the API keeps no reports, for good.
@@ -1924,6 +1933,23 @@ class RemoteCall:
             if isinstance(entry, dict) and entry.get("uri") and entry.get("sha256"):
                 found.setdefault(entry["uri"], set()).add(entry["sha256"])
         return found, answered
+
+    def _ended_job(self):
+        """The job as the wait saw it end (its metadata and status), or None
+        where the client answers phases (a local one)."""
+        last = self.handle.last
+        return last.job if last is not None and last.phase in TERMINAL_PHASES else None
+
+    def _end_reports(self, fresh=False):
+        """The job's reports once it ended, read once (again when fresh): the
+        result's bytes with no bucket, the SHA-256s that vouch for them, the
+        progress line's last look and the local record all take this one read.
+        Each read them apart: three requests at every call's end."""
+        if fresh or self._ended_reports is None:
+            self._ended_reports = self._client.reports(self.name)
+            if isinstance(self._store, carried.CarriedStore):
+                self._store.saw(self.name, self._ended_reports)
+        return self._ended_reports
 
     def _record(self, record):
         for key in ("started", "finished"):
@@ -2075,9 +2101,9 @@ class _ReportFollower(threading.Thread):
             self.check()
             self._stopping.wait(self._poll)
 
-    def check(self):
+    def check(self, read=None):
         try:
-            current = last_reports(self._call.reports())
+            current = last_reports((read or self._call.reports)())
         except (errors.ZenthrosError, OSError):  # progress, not a check
             return
         for producer, report in sorted(current.items()):
@@ -2092,6 +2118,11 @@ class _ReportFollower(threading.Thread):
         self._stopping.set()
         if self.is_alive():
             self.join(timeout=self._poll + 1)
+
+    def last_look(self):
+        """Once stopped and the job ended: what was reported since the last
+        look, from the reports read at the end."""
+        self.check(self._call._end_reports)
 
 
 class _LogFollower(threading.Thread):

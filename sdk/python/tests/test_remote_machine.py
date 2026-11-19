@@ -50,11 +50,12 @@ class SubprocessClient(FakeJobClient):
         # Per task: the files left in its directory when the command ended.
         self.leftovers = []
 
-    def wait(self, job_id, timeout=None, on_reschedule=None, cancel_on_timeout=False):
+    def wait(self, job_id, timeout=None, on_reschedule=None, cancel_on_timeout=False, on_status=None):
         if job_id not in self.exit_codes:
             self.exit_codes[job_id] = self._run(self.submitted(job_id))
         code = self.exit_codes[job_id]
         self._jobs[job_id]["phase"] = SUCCEEDED if code == 0 else FAILED
+        self.seen_end(job_id, on_status)
         if code != 0:
             raise errors.JobFailed(f"job {job_id} failed", reasons=[{"code": "PROCESS_FAILED"}])
         return SUCCEEDED

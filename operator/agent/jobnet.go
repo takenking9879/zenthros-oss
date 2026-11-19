@@ -22,8 +22,7 @@ import (
 // it removed.
 func (e SystemdExecutor) SweepJobNetworks(ctx context.Context) ([]string, error) {
 	runner := e.Manager.Runner()
-	sudo := e.Manager.Config().SudoPrefix()
-	out, err := runner.Run(ctx, sudo+"ip netns list 2>/dev/null || true")
+	out, err := runner.Run(ctx, "ip netns list 2>/dev/null || true")
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +43,7 @@ func (e SystemdExecutor) SweepJobNetworks(ctx context.Context) ([]string, error)
 	var removed []string
 	for _, ns := range staleJobNets(out, stopped) {
 		script := base64.StdEncoding.EncodeToString([]byte(ctd.JobNetDownScript(ns)))
-		if _, err := runner.Run(ctx, fmt.Sprintf(`printf '%%s' '%s' | base64 -d | %sbash`, script, sudo)); err != nil {
+		if _, err := runner.Run(ctx, fmt.Sprintf(`printf '%%s' '%s' | base64 -d | bash`, script)); err != nil {
 			return removed, fmt.Errorf("remove job network %s: %w", ns, err)
 		}
 		removed = append(removed, ns)

@@ -89,7 +89,7 @@ func (m *Manager) Runner() Runner {
 func (m *Manager) MatchingUnit(ctx context.Context, spec jobspec.JobSpec, env map[string]string) (string, bool, error) {
 	name := UnitName(spec.ID)
 	path := m.cfg.UnitPath(name)
-	existing, err := m.runner.Run(ctx, fmt.Sprintf("%scat \"%s\"", m.cfg.SudoPrefix(), path))
+	existing, err := m.runner.Run(ctx, fmt.Sprintf("cat \"%s\"", path))
 	if err != nil {
 		return "", false, nil
 	}
@@ -155,7 +155,7 @@ func (m *Manager) InstallWithWrapper(ctx context.Context, spec jobspec.JobSpec, 
 	// Persist the retain flag inside the job dir as well as in the unit comment:
 	// a repeat Cancel finds the unit already uninstalled and must still know.
 	if spec.RetainWorkdir && workDir != "" {
-		markerCmd := fmt.Sprintf(`%stouch "%s"`, m.cfg.SudoPrefix(), RetainMarkerPath(spec.Workspace, spec.ID, m.cfg))
+		markerCmd := fmt.Sprintf(`touch "%s"`, RetainMarkerPath(spec.Workspace, spec.ID, m.cfg))
 		if _, err := m.runner.Run(ctx, markerCmd); err != nil {
 			return "", fmt.Errorf("write retain marker for %s: %w", name, err)
 		}
@@ -178,11 +178,11 @@ func (m *Manager) InstallWithWrapper(ctx context.Context, spec jobspec.JobSpec, 
 	}
 	unit := renderUnit(spec, env, m.cfg, workDir, execWrapper, jail)
 
-	if _, err := m.runner.Run(ctx, fmt.Sprintf(`%smkdir -p "%s"`, m.cfg.SudoPrefix(), m.cfg.UnitDir())); err != nil {
+	if _, err := m.runner.Run(ctx, fmt.Sprintf(`mkdir -p "%s"`, m.cfg.UnitDir())); err != nil {
 		return "", fmt.Errorf("create unit dir for %s: %w", name, err)
 	}
 	encoded := base64.StdEncoding.EncodeToString([]byte(unit))
-	writeCmd := fmt.Sprintf(`printf '%%s' '%s' | base64 -d | %stee "%s" >/dev/null`, encoded, m.cfg.SudoPrefix(), path)
+	writeCmd := fmt.Sprintf(`printf '%%s' '%s' | base64 -d | tee "%s" >/dev/null`, encoded, path)
 	if _, err := m.runner.Run(ctx, writeCmd); err != nil {
 		return "", fmt.Errorf("write unit %s: %w", name, err)
 	}
@@ -214,9 +214,8 @@ func (m *Manager) InstallWithWrapper(ctx context.Context, spec jobspec.JobSpec, 
 // fail the start without the directory. A file an earlier start of the unit
 // wrote is kept, and the job appends to it.
 func (m *Manager) prepareLog(ctx context.Context, name string) error {
-	sudo := m.cfg.SudoPrefix()
-	cmd := fmt.Sprintf(`%[1]smkdir -p -m 0700 "%[2]s" && %[1]ssh -c 'umask 077 && : >> "$1"' sh "%[3]s"`,
-		sudo, logDir(m.cfg), LogPath(m.cfg, name))
+	cmd := fmt.Sprintf(`mkdir -p -m 0700 "%[1]s" && sh -c 'umask 077 && : >> "$1"' sh "%[2]s"`,
+		logDir(m.cfg), LogPath(m.cfg, name))
 	if _, err := m.runner.Run(ctx, cmd); err != nil {
 		return fmt.Errorf("make the log of %s: %w", name, err)
 	}
@@ -227,10 +226,9 @@ func (m *Manager) prepareLog(ctx context.Context, name string) error {
 // 0600 under umask 077, in a directory only root reads, so no job sees it
 // even for a moment.
 func (m *Manager) writeEnvFile(ctx context.Context, name string, env map[string]string) error {
-	sudo := m.cfg.SudoPrefix()
 	encoded := base64.StdEncoding.EncodeToString([]byte(formatEnvFile(env)))
-	cmd := fmt.Sprintf(`%[1]smkdir -p -m 0700 "%[2]s" && printf '%%s' '%[3]s' | %[1]ssh -c 'umask 077 && base64 -d > "$1"' sh "%[4]s"`,
-		sudo, envFileDir, encoded, EnvFilePath(name))
+	cmd := fmt.Sprintf(`mkdir -p -m 0700 "%[1]s" && printf '%%s' '%[2]s' | sh -c 'umask 077 && base64 -d > "$1"' sh "%[3]s"`,
+		envFileDir, encoded, EnvFilePath(name))
 	if _, err := m.runner.Run(ctx, cmd); err != nil {
 		return fmt.Errorf("write the environment of %s: %w", name, err)
 	}
@@ -243,7 +241,7 @@ func (m *Manager) Uninstall(ctx context.Context, name string) error {
 	if _, err := m.runner.Run(ctx, m.cfg.Systemctl("disable --now "+name)); err != nil {
 		m.logger.Info("disable reported (unit may be absent)", "unit", name, "error", err.Error())
 	}
-	removeCmd := fmt.Sprintf(`%srm -f "%s"`, m.cfg.SudoPrefix(), m.cfg.UnitPath(name))
+	removeCmd := fmt.Sprintf(`rm -f "%s"`, m.cfg.UnitPath(name))
 	if m.cfg.Scope == ScopeSystem {
 		removeCmd += fmt.Sprintf(` "%s"`, EnvFilePath(name))
 	}
@@ -268,10 +266,9 @@ func (m *Manager) Uninstall(ctx context.Context, name string) error {
 // where a systemd job or one with no Workspace keeps it, and the Workspace's
 // (IsolatedJobDir). Idempotent: a missing directory is not an error.
 func (m *Manager) RemoveWorkDir(ctx context.Context, jobID string) error {
-	sudo := m.cfg.SudoPrefix()
 	jobDir := JobDir(jobID, m.cfg)
 	isolated := workspacesRoot(m.cfg) + "/*/jobs/" + jobID
-	removeCmd := fmt.Sprintf(`%srm -rf "%s" %s`, sudo, jobDir, isolated)
+	removeCmd := fmt.Sprintf(`rm -rf "%s" %s`, jobDir, isolated)
 	if _, err := m.runner.Run(ctx, removeCmd); err != nil {
 		return fmt.Errorf("remove work dir for %s: %w", jobID, err)
 	}
@@ -285,7 +282,7 @@ func (m *Manager) RemoveWorkDir(ctx context.Context, jobID string) error {
 // inside the job dir still carries the decision. Best-effort: a missing unit and
 // marker report false (nothing left to retain).
 func (m *Manager) RetainWorkdir(ctx context.Context, name string) bool {
-	if stdout, err := m.runner.Run(ctx, fmt.Sprintf("%scat \"%s\"", m.cfg.SudoPrefix(), m.cfg.UnitPath(name))); err == nil {
+	if stdout, err := m.runner.Run(ctx, fmt.Sprintf("cat \"%s\"", m.cfg.UnitPath(name))); err == nil {
 		if ParseRetainWorkdir(stdout) {
 			return true
 		}
@@ -323,7 +320,7 @@ func (m *Manager) JobUnits(ctx context.Context) ([]string, error) {
 // interruption notice (see preemptSignalKey), to the main process only. It
 // reports whether one was sent; a job that asked for none gets none.
 func (m *Manager) SignalPreempt(ctx context.Context, name string) (bool, error) {
-	unit, err := m.runner.Run(ctx, fmt.Sprintf("%scat \"%s\"", m.cfg.SudoPrefix(), m.cfg.UnitPath(name)))
+	unit, err := m.runner.Run(ctx, fmt.Sprintf("cat \"%s\"", m.cfg.UnitPath(name)))
 	if err != nil {
 		return false, nil
 	}

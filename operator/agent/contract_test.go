@@ -89,7 +89,7 @@ func TestSystemdKeepsTheExecutorContract(t *testing.T) {
 	executortest.Contract(t, executortest.Harness{
 		New: func(t *testing.T) executortest.Executor {
 			machine = &fakeSystemd{files: map[string]string{}, active: map[string]bool{}}
-			cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+			cfg := systemd.Config{Scope: systemd.ScopeSystem}
 			return SystemdExecutor{Manager: systemd.NewManager(cfg, machine, logr.Discard()), Secrets: awssecret.Config{Root: t.TempDir()}}
 		},
 		Spec:    vmTestSpec(),

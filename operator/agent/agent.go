@@ -135,7 +135,7 @@ var keepaliveParams = keepalive.ClientParameters{
 // (scale lab, 2026-10-10).
 func (a *Agent) slotsChanged() {
 	if beat := a.beat.Load(); beat != nil {
-		beat.send()
+		beat.sendCount()
 	}
 }
 

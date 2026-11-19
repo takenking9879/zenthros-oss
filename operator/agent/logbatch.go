@@ -20,11 +20,18 @@ import (
 // chunk: a chunk's data is raw log bytes, newlines included, and every
 // reader writes it as it comes.
 //
-// A line that follows a quiet moment is sent at once, so the first line of a
-// log and a job that prints now and then are not delayed. Lines that come
-// within the window of the last message wait for the window to end, or for
-// logBatchBytes of them, whichever is first; a chunk that is that much
-// alone (a read of a busy log) leaves at once, as it came. A chunk joined to
+// A pull may send logBatchBurst messages at once, and earns one more each
+// window: a line after a quiet moment and the one right after it leave at
+// once, and so does each line of a job that prints once a window, so the
+// first line of a log, the function's first line right after the runner's,
+// and a job that prints now and then are not delayed. Counted from the last
+// message sent instead, a line that came just after a send waited the whole
+// window, and so did each one after it: a job that printed a line a second
+// had every line 1 s late, one line a message (This computer, 2026-11-18).
+// Lines that come when the pull has none to spend wait for the next, or for
+// logBatchBytes of them, whichever is first: a busy log still leaves one
+// message a window. A chunk that is that much alone (a read of a busy log)
+// leaves at once, as it came. A chunk joined to
 // the waiting ones gives the batch its cursor. Lines of the other stream (stderr after
 // stdout), a chunk after a gap or one that says what its read left out, and
 // a line that would take the batch past backend.MaxLogChunk are never joined
@@ -46,6 +53,7 @@ import (
 // between a job's lines.
 const (
 	defaultLogBatchWindow = time.Second
+	logBatchBurst         = 2
 	logBatchBytes         = 16 << 10
 )
 
@@ -67,9 +75,20 @@ type channelLogSender struct {
 	// pending are the lines waiting for the window to end; timer ends it.
 	pending *agentpb.LogChunk
 	timer   *time.Timer
-	// sentAt is when the last message left; err the first failed send.
-	sentAt time.Time
-	err    error
+	// credit is the messages that may leave at once as of creditAt (none
+	// sent yet: logBatchBurst); err the first failed send.
+	credit   float64
+	creditAt time.Time
+	err      error
+}
+
+// creditNow is the messages that may leave at once at now: one more each
+// window since the last message, up to logBatchBurst.
+func (s *channelLogSender) creditNow(now time.Time) float64 {
+	if s.creditAt.IsZero() {
+		return logBatchBurst
+	}
+	return min(logBatchBurst, s.credit+float64(now.Sub(s.creditAt))/float64(s.window))
 }
 
 func newChannelLogSender(ctx context.Context, client *logChannelClient, requestID string, window time.Duration, hourly *hourlyBudget) *channelLogSender {
@@ -95,8 +114,11 @@ func (s *channelLogSender) Send(chunk *agentpb.LogChunk) error {
 	if s.pending == nil {
 		// A chunk that fills a batch alone (a read of a busy log) has
 		// nothing to wait for: joining it to nothing only copied it.
-		quiet := time.Since(s.sentAt)
-		if quiet >= s.window || len(chunk.GetData()) >= logBatchBytes {
+		if s.window == 0 || len(chunk.GetData()) >= logBatchBytes {
+			return s.sendLocked(chunk)
+		}
+		credit := s.creditNow(time.Now())
+		if credit >= 1 {
 			return s.sendLocked(chunk)
 		}
 		// The batch is the chunk. Its bytes may share an array with a
@@ -104,7 +126,7 @@ func (s *channelLogSender) Send(chunk *agentpb.LogChunk) error {
 		// first append copies them rather than writing over that one.
 		chunk.Data = slices.Clip(chunk.GetData())
 		s.pending = chunk
-		s.timer = time.AfterFunc(s.window-quiet, s.windowEnded)
+		s.timer = time.AfterFunc(time.Duration((1-credit)*float64(s.window)), s.windowEnded)
 	} else {
 		s.pending.Data = append(s.pending.Data, chunk.GetData()...)
 		// A piece of a long line has no place of its own: the batch keeps
@@ -169,7 +191,12 @@ func (s *channelLogSender) sendLocked(chunk *agentpb.LogChunk) error {
 		s.skipped, s.after = 0, nil
 	}
 	s.err = s.client.send(&agentpb.LogChannelFromAgent{RequestId: s.requestID, Chunk: chunk})
-	s.sentAt = time.Now()
+	if s.window > 0 {
+		// A message sent with none to spend (a batch cut at its size, or
+		// before another stream's line) leaves none: the next waits a window.
+		now := time.Now()
+		s.credit, s.creditAt = max(0, s.creditNow(now)-1), now
+	}
 	return s.err
 }
 

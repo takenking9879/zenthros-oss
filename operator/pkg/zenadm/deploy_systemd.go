@@ -139,7 +139,6 @@ Environment=ZENTHROS_TLS_KEY=` + filepath.Join(p.StateDir, "agent.key") + `
 Environment=ZENTHROS_TLS_CA=` + filepath.Join(p.StateDir, "ca.crt") + `
 Environment=ZENTHROS_TLS_SERVER_NAME=` + tlsServerName + `
 Environment=ZENTHROS_SYSTEMD_SCOPE=system
-Environment=ZENTHROS_USE_SUDO=true
 Environment=ZENTHROS_HEARTBEAT_INTERVAL=15s
 Environment=ZENTHROS_AGENT_HEALTH_ADDR=` + agentHealthAddr + `
 ` + foldersLine(p.Folders) + `ExecStart=` + agentBin + `
@@ -147,7 +146,6 @@ Restart=always
 RestartSec=5
 RestartPreventExitStatus=78
 TimeoutStopSec=30
-CPUAccounting=yes
 CPUQuota=50%
 ` + agentConfinement + `
 

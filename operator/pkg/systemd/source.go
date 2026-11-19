@@ -103,13 +103,11 @@ func sourceWorkDir(spec jobspec.JobSpec, cfg Config) string {
 
 func prepareGit(ctx context.Context, runner Runner, spec jobspec.JobSpec, cfg Config) (string, error) {
 	workDir := sourceWorkDir(spec, cfg)
-	sudo := cfg.SudoPrefix()
-
-	if _, err := runner.Run(ctx, fmt.Sprintf(`%smkdir -p "%s"`, sudo, workDir)); err != nil {
+	if _, err := runner.Run(ctx, fmt.Sprintf(`mkdir -p "%s"`, workDir)); err != nil {
 		return "", fmt.Errorf("create work dir for git source: %w", err)
 	}
 
-	cmd := fmt.Sprintf(`%sgit clone --depth 1`, sudo)
+	cmd := "git clone --depth 1"
 	if spec.Source.GitRef != "" {
 		cmd += " --branch " + shellword.Quote(spec.Source.GitRef)
 	}
@@ -125,7 +123,6 @@ func prepareGit(ctx context.Context, runner Runner, spec jobspec.JobSpec, cfg Co
 
 func prepareInline(ctx context.Context, runner Runner, spec jobspec.JobSpec, cfg Config) (string, error) {
 	workDir := sourceWorkDir(spec, cfg)
-	sudo := cfg.SudoPrefix()
 
 	// The archive is the job's: tar run as root writes where its entries
 	// say (../x, a link out, then a file through it). It is unpacked as the
@@ -143,7 +140,7 @@ func prepareInline(ctx context.Context, runner Runner, spec jobspec.JobSpec, cfg
 	if err := os.Chmod(staged, 0o755); err != nil {
 		return "", fmt.Errorf("stage inline source: %w", err)
 	}
-	if _, err := runner.Run(ctx, fmt.Sprintf(`%smkdir -p "%s" && %scp -a %s/. "%s"`, sudo, workDir, sudo, shellword.Quote(staged), workDir)); err != nil {
+	if _, err := runner.Run(ctx, fmt.Sprintf(`mkdir -p "%s" && cp -a %s/. "%s"`, workDir, shellword.Quote(staged), workDir)); err != nil {
 		return "", fmt.Errorf("copy inline source into %s: %w", workDir, err)
 	}
 	return workDir, nil

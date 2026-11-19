@@ -51,7 +51,7 @@ func TestAStartWhoseAnswerWasLostKeepsTheJobsSecrets(t *testing.T) {
 		}}
 		runner := &startTimesOutRunner{recordingRunner: &recordingRunner{}, activeState: state}
 		exec := SystemdExecutor{
-			Manager: systemd.NewManager(systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}, runner, logr.Discard()),
+			Manager: systemd.NewManager(systemd.Config{Scope: systemd.ScopeSystem}, runner, logr.Discard()),
 			Secrets: awssecret.Config{
 				Root:     root,
 				Identity: func(context.Context) (bool, error) { return true, nil },

@@ -5,11 +5,14 @@ back in the job's final report, verified as any. C7: a Workspace with no store a
 a machine of yours."""
 
 import base64
+import contextlib
 import io
+import json
 import os
 import tarfile
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from zenthros import errors, remote
@@ -38,6 +41,13 @@ def double(x):
 
 def large(n):
     return b"x" * n
+
+
+def reporting(x):
+    import zenthros
+
+    zenthros.report({"loss": x})
+    return x * 2
 
 
 class Carried(unittest.TestCase):
@@ -191,15 +201,43 @@ class Carried(unittest.TestCase):
         self.assertTrue(self.carries_its_project(again))
         self.assertEqual(again.result(stream_logs=False), 42)
 
-    def test_a_map_reads_the_reports_of_its_job_once(self):
-        """Its N results are in its reports (its tasks', through the Gateway): read once
-        for the bytes, and once for the SHA-256s that vouch for them, however many."""
-        asked = []
-        reports = self.client.reports
-        with mock.patch.object(self.client, "reports", lambda name: asked.append(name) or reports(name)):
-            mapped = remote.map(double, [1, 2, 3, 4], code_dir=None)
-            self.assertEqual(mapped.result(stream_logs=False), [2, 4, 6, 8])
-        self.assertEqual(asked.count(mapped.name), 2, asked)
+    def test_a_call_and_a_map_read_their_reports_once_at_the_end(self):
+        """Once the job ended, its reports are read once, for all that need them
+        there: the result's bytes (a map's N in its tasks' reports), the SHA-256s
+        that vouch for them, the progress line's last look and the local record. The job is the one the wait saw
+        end, not asked for again; the cost is asked for the receipt. Each was a
+        request of its own: five after a call's end (v0.2.1 point 3, 2026-11-18)."""
+        os.chdir(self.home.name)
+        self.addCleanup(os.chdir, os.path.dirname(os.path.abspath(__file__)))
+        asked, ended = [], []
+        for method in ("reports", "job_object", "source_of", "job_cost"):
+            real = getattr(self.client, method)
+            counted = (lambda *a, _real=real, _name=method, **k: (ended and asked.append(_name)) or _real(*a, **k))
+            patcher = mock.patch.object(self.client, method, counted)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        waited = self.client.wait
+
+        def wait(*args, **kwargs):
+            try:
+                return waited(*args, **kwargs)
+            finally:
+                ended.append(True)
+
+        out = io.StringIO()
+        with mock.patch.object(self.client, "wait", wait), mock.patch.object(remote.call._ReportFollower, "run", lambda self: None), \
+                remote.configure(log_dir=f"{self.home.name}/runs"), contextlib.redirect_stdout(out):
+            call = self.run_call(reporting, 21)
+            self.assertEqual(call.result(), 42)
+            self.assertEqual(sorted(asked), ["job_cost", "reports"])
+            asked.clear(), ended.clear()
+            mapped = remote.map(reporting, [1, 2, 3, 4], code_dir=None)
+            self.assertEqual(mapped.result(), [2, 4, 6, 8])
+            self.assertEqual(sorted(asked), ["job_cost", "reports"])
+        self.assertIn(f"{call.name} · loss", out.getvalue())
+        self.assertIn(f"{mapped.name} task 3 · loss", out.getvalue())
+        rows = [json.loads(line) for line in (Path(call.runlog.dir) / "reports.jsonl").read_text().splitlines()]
+        self.assertIn({"loss": 21}, [r["payload"] for r in rows])
 
     def test_a_command_needs_none_of_it(self):
         call = remote.run(["echo", "hello"], code_dir=None)

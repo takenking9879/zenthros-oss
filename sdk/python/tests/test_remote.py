@@ -157,18 +157,18 @@ class ExecutingClient(FakeJobClient):
         self.events.append(("submit", uri, uri in self.store.data))
         return super().submit(spec)
 
-    def wait(self, job_id, timeout=None, on_reschedule=None, cancel_on_timeout=False):
+    def wait(self, job_id, timeout=None, on_reschedule=None, cancel_on_timeout=False, on_status=None):
         """What the controller and the machine do: upstreams first (dependsOn),
         then the command once per task."""
         if job_id in self.exit_codes:
-            return self._ended(job_id)
+            return self._ended(job_id, on_status)
         job = self.submitted(job_id)
         for upstream in job.spec.depends_on:
             try:
                 self.wait(upstream)
             except errors.JobFailed:
                 self.exit_codes[job_id] = "DEPENDENCY_FAILED"
-                return self._ended(job_id)
+                return self._ended(job_id, on_status)
         self.events.append(("wait", job_id))
         pins = {}
         for upstream in job.spec.depends_on if self.pin_upstreams else ():
@@ -200,11 +200,12 @@ class ExecutingClient(FakeJobClient):
         self._jobs[job_id]["results"] = [
             view.payload["zenthros.result"] for view in self._jobs[job_id]["reports"]
             if isinstance((view.payload or {}).get("zenthros.result"), dict)]
-        return self._ended(job_id)
+        return self._ended(job_id, on_status)
 
-    def _ended(self, job_id):
+    def _ended(self, job_id, on_status):
         code = self.exit_codes[job_id]
         self._jobs[job_id]["phase"] = SUCCEEDED if code == 0 else FAILED
+        self.seen_end(job_id, on_status)
         if code == "DEPENDENCY_FAILED":
             raise errors.JobFailed(f"job {job_id}: a dependency failed", reasons=[{"code": "DEPENDENCY_FAILED"}])
         if code != 0:

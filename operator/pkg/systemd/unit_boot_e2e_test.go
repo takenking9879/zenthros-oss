@@ -45,7 +45,7 @@ func unitBodyFromInstall(t *testing.T, commands []string) string {
 // The unit text that path writes must not contain WantedBy=multi-user.target,
 // the same string TestJobUnitIsNotEnabledAcrossReboot rejects.
 func TestInstallUnitIsNotEnabledAcrossRebootE2E(t *testing.T) {
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	runner := &fakeRunner{}
 	manager := NewManager(cfg, runner, logr.Discard())
 	if _, err := manager.Install(context.Background(), jobspec.JobSpec{

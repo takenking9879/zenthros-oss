@@ -435,6 +435,18 @@ func (e *Executor) wait(j *job, cmd *exec.Cmd) {
 	close(j.done)
 }
 
+// Ended is closed once the job's process exited and how it ended is
+// recorded: the agent pushes the end then, not at its next poll. nil for a
+// job this session did not start.
+func (e *Executor) Ended(_ context.Context, handle string) <-chan struct{} {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if j := e.jobs[handle]; j != nil {
+		return j.done
+	}
+	return nil
+}
+
 // Status reports the job in Zenthros phases. A job this container does not
 // know is not found: on a container that means it ended with an earlier
 // agent session (the container restarted), and the controller submits it

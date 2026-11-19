@@ -12,7 +12,7 @@ import platform
 import sys
 from importlib import metadata
 
-WIRE = 5
+WIRE = 6
 
 
 def sdk_version():

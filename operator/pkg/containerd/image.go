@@ -32,12 +32,12 @@ func NormalizeImageRef(ref string) string {
 }
 
 // ImageExists reports whether ref is already in the containerd namespace.
-func ImageExists(ctx context.Context, runner systemd.Runner, sudo, ref string) (bool, error) {
+func ImageExists(ctx context.Context, runner systemd.Runner, ref string) (bool, error) {
 	ref = NormalizeImageRef(ref)
 	if ref == "" {
 		return false, fmt.Errorf("image ref is empty")
 	}
-	out, err := runner.Run(ctx, sudo+"ctr -n "+Namespace+" images ls -q")
+	out, err := runner.Run(ctx, "ctr -n "+Namespace+" images ls -q")
 	if err != nil {
 		if isAbsent(err, out) {
 			return false, nil
@@ -60,8 +60,8 @@ func imageListed(listing, ref string) bool {
 
 // EnsureImage pulls ref with `ctr images pull` when it is not already present.
 // pulled is true only when a registry fetch ran.
-func EnsureImage(ctx context.Context, runner systemd.Runner, sudo, ref string) (pulled bool, err error) {
-	return EnsureImageWith(ctx, runner, sudo, ref, nil)
+func EnsureImage(ctx context.Context, runner systemd.Runner, ref string) (pulled bool, err error) {
+	return EnsureImageWith(ctx, runner, ref, nil)
 }
 
 // EnsureImageWith is EnsureImage with a registry login from auth for the
@@ -74,12 +74,12 @@ func EnsureImage(ctx context.Context, runner systemd.Runner, sudo, ref string) (
 // need. Who could read that argv already has the token: a container job
 // does not see the host's processes, and a host process asks the instance
 // metadata for the machine's identity itself (07#6, decided 2026-10-21).
-func EnsureImageWith(ctx context.Context, runner systemd.Runner, sudo, ref string, auth RegistryAuth) (pulled bool, err error) {
+func EnsureImageWith(ctx context.Context, runner systemd.Runner, ref string, auth RegistryAuth) (pulled bool, err error) {
 	ref = NormalizeImageRef(ref)
 	if ref == "" {
 		return false, fmt.Errorf("image ref is empty")
 	}
-	ok, err := ImageExists(ctx, runner, sudo, ref)
+	ok, err := ImageExists(ctx, runner, ref)
 	if err != nil {
 		return false, err
 	}
@@ -105,7 +105,7 @@ func EnsureImageWith(ctx context.Context, runner systemd.Runner, sudo, ref strin
 		}
 	}
 	for attempt := 0; ; attempt++ {
-		_, err := runner.Run(ctx, pullCommand(sudo, ref, userFile))
+		_, err := runner.Run(ctx, pullCommand(ref, userFile))
 		if err == nil {
 			return true, nil
 		}
@@ -159,8 +159,8 @@ func imageHost(ref string) string {
 // userFile when there is one (GARAuth reads the GCE token on Google Cloud),
 // else anonymously. No --platform: ctr pulls the host architecture.
 // linux/amd64 on an arm64 VM is the wrong image.
-func pullCommand(sudo, ref, userFile string) string {
-	pull := sudo + "ctr -n " + Namespace + " images pull "
+func pullCommand(ref, userFile string) string {
+	pull := "ctr -n " + Namespace + " images pull "
 	if userFile != "" {
 		return pull + `--user "$(cat ` + shellword.Quote(userFile) + `)" ` + shellword.Quote(ref)
 	}
@@ -178,7 +178,7 @@ func isAbsent(err error, stdout string) bool {
 // ImageDigest is ref pinned by the digest it resolved to in the containerd
 // namespace (repo@sha256:...), or "" when ref is not there or ctr does not
 // say. A ref already pinned by digest is returned as is.
-func ImageDigest(ctx context.Context, runner systemd.Runner, sudo, ref string) (string, error) {
+func ImageDigest(ctx context.Context, runner systemd.Runner, ref string) (string, error) {
 	ref = NormalizeImageRef(ref)
 	if ref == "" {
 		return "", nil
@@ -186,7 +186,7 @@ func ImageDigest(ctx context.Context, runner systemd.Runner, sudo, ref string) (
 	if strings.Contains(ref, "@sha256:") {
 		return ref, nil
 	}
-	out, err := runner.Run(ctx, sudo+"ctr -n "+Namespace+" images ls "+shellword.Quote("name=="+ref))
+	out, err := runner.Run(ctx, "ctr -n "+Namespace+" images ls "+shellword.Quote("name=="+ref))
 	if err != nil {
 		if isAbsent(err, out) {
 			return "", nil
@@ -231,8 +231,8 @@ func PinnedRef(ref, digest string) string {
 const Root = "/var/lib/containerd"
 
 // ListImages is every image ref in the namespace.
-func ListImages(ctx context.Context, runner systemd.Runner, sudo string) ([]string, error) {
-	out, err := runner.Run(ctx, sudo+"ctr -n "+Namespace+" images ls -q")
+func ListImages(ctx context.Context, runner systemd.Runner) ([]string, error) {
+	out, err := runner.Run(ctx, "ctr -n "+Namespace+" images ls -q")
 	if err != nil {
 		return nil, fmt.Errorf("ctr images ls: %w", err)
 	}
@@ -241,8 +241,8 @@ func ListImages(ctx context.Context, runner systemd.Runner, sudo string) ([]stri
 
 // ContainerImages is the image of every container in the namespace, running
 // or not, as containerd says now (CONTAINER IMAGE RUNTIME).
-func ContainerImages(ctx context.Context, runner systemd.Runner, sudo string) (map[string]bool, error) {
-	out, err := runner.Run(ctx, sudo+"ctr -n "+Namespace+" containers ls")
+func ContainerImages(ctx context.Context, runner systemd.Runner) (map[string]bool, error) {
+	out, err := runner.Run(ctx, "ctr -n "+Namespace+" containers ls")
 	if err != nil {
 		return nil, fmt.Errorf("ctr containers ls: %w", err)
 	}
@@ -257,8 +257,8 @@ func ContainerImages(ctx context.Context, runner systemd.Runner, sudo string) (m
 
 // RemoveImage removes ref from the namespace and waits until what only it
 // held is gone from the disk (--sync); one already gone is no error.
-func RemoveImage(ctx context.Context, runner systemd.Runner, sudo, ref string) error {
-	out, err := runner.Run(ctx, sudo+"ctr -n "+Namespace+" images rm --sync "+shellword.Quote(ref))
+func RemoveImage(ctx context.Context, runner systemd.Runner, ref string) error {
+	out, err := runner.Run(ctx, "ctr -n "+Namespace+" images rm --sync "+shellword.Quote(ref))
 	if err != nil && !isAbsent(err, out) {
 		return fmt.Errorf("ctr images rm %s: %w", ref, err)
 	}
@@ -267,8 +267,8 @@ func RemoveImage(ctx context.Context, runner systemd.Runner, sudo, ref string) e
 
 // ImageSpace is the bytes containerd's store takes on its disk, and that
 // disk's size.
-func ImageSpace(ctx context.Context, runner systemd.Runner, sudo string) (used, disk int64, err error) {
-	out, err := runner.Run(ctx, sudo+"du -sxb "+Root+" | cut -f1; "+sudo+"df -B1 --output=size "+Root+" | tail -n 1")
+func ImageSpace(ctx context.Context, runner systemd.Runner) (used, disk int64, err error) {
+	out, err := runner.Run(ctx, "du -sxb "+Root+" | cut -f1; df -B1 --output=size "+Root+" | tail -n 1")
 	if err != nil {
 		return 0, 0, fmt.Errorf("measure %s: %w", Root, err)
 	}

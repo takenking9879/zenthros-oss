@@ -90,6 +90,11 @@ func (a *Agent) Submit(ctx context.Context, req *agentpb.SubmitRequest) *agentpb
 	}
 	a.tracker.Add(spec.ID, name)
 	a.slotsChanged()
+	// Waited on from now (StatusWatcher.awaitEnds): a short job's end is
+	// pushed as it ends too.
+	if watcher := a.watcher.Load(); watcher != nil {
+		watcher.Wake()
+	}
 	a.saveLog(spec, name)
 	if spec.Service != nil {
 		if err := a.services.Put(name, spec.Service); err != nil {

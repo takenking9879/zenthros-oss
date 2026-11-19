@@ -8,7 +8,10 @@ client may do is what Kubernetes RBAC grants that token in the Workspace's
 namespace. A refusal is Kubernetes' own words.
 """
 
+import base64
+import copy
 import gzip
+import hashlib
 import http.client
 import json
 import os
@@ -74,6 +77,34 @@ def _retry_after(answer):
     return min(int(value), RATE_LIMIT_MAX_WAIT) if value and value.isdigit() else None
 
 
+# A code bundle's name starts so, and the hub moves an inline source of this
+# many base64 bytes or more to one (operator/pkg/sourcebundle Prefix and
+# MinInlineBytes).
+BUNDLE_PREFIX = "zenthros-src-"
+MIN_INLINE_BYTES = 8 << 10
+
+
+def bundle_name(data):
+    """The name the hub keeps code under: its digest, as sourcebundle.Name
+    makes it (operator/pkg/sourcebundle/testdata/name.json holds both)."""
+    return BUNDLE_PREFIX + hashlib.sha256(data).hexdigest()[:16]
+
+
+def _by_digest(manifest):
+    """manifest naming its large inline code by its digest, or None: the
+    SDK's core rode inline in every job, 290 KB uploaded on every call to a
+    hub across the internet (2026-11-18), and the hub keeps it by name."""
+    source = manifest.get("spec", {}).get("workload", {}).get("template", {}).get("source") or {}
+    inline = source.get("inline") or ""
+    if len(inline) < MIN_INLINE_BYTES:
+        return None
+    named = copy.deepcopy(manifest)
+    by_name = named["spec"]["workload"]["template"]["source"]
+    del by_name["inline"]
+    by_name["ref"] = bundle_name(base64.b64decode(inline))
+    return named
+
+
 def _refusal(code, message, details):
     if code == 401:
         return errors.login_expired(message)
@@ -86,6 +117,8 @@ def _refusal(code, message, details):
         # not there, never a job collected after its TTL.
         if details.get("group") == S.API_VERSION.split("/")[0] and details.get("kind") == S.RESOURCE:
             return errors.JobNotFound(message)
+        if details.get("kind") == "configmaps" and str(details.get("name", "")).startswith(BUNDLE_PREFIX):
+            return errors.CodeAbsent(message)
         return errors.NotFound(message)
     if code == 409:
         return errors.Conflict(f"zenthros-api 409: {message}")
@@ -241,6 +274,18 @@ class HTTPJobClient(JobClient):
         # the error did not name the first (audit 2026-10-16 AUD-075).
         nonce = uuid.uuid4().hex
         manifest["metadata"].setdefault("annotations", {})[SUBMISSION] = nonce
+        named = _by_digest(manifest)
+        if named is not None:
+            try:
+                self._create(job.name, named, nonce)
+                return JobHandle(job.name, self)
+            except errors.CodeAbsent:
+                logger.info(f"Job {job.name}: the hub does not hold its code; sending it inline")
+        self._create(job.name, manifest, nonce)
+        return JobHandle(job.name, self)
+
+    def _create(self, name, manifest, nonce):
+        """POST manifest, sent again by its name when the answer is lost."""
         for attempt in range(1, SUBMIT_ATTEMPTS + 1):
             try:
                 # Sent twice, by its nonce, it is one job.
@@ -250,19 +295,18 @@ class HTTPJobClient(JobClient):
                 if attempt == 1:
                     raise
                 try:
-                    mine = self._submitted(job.name, nonce)
+                    mine = self._submitted(name, nonce)
                 except errors.TransientError as exc:
-                    raise _maybe_created(job.name, exc) from exc
+                    raise _maybe_created(name, exc) from exc
                 if not mine:
                     raise
                 break
             except errors.TransientError as exc:
                 if attempt == SUBMIT_ATTEMPTS:
-                    raise _maybe_created(job.name, exc) from exc
-                logger.warning(f"Submitting job {job.name}: {exc}; sending it again by the same name")
+                    raise _maybe_created(name, exc) from exc
+                logger.warning(f"Submitting job {name}: {exc}; sending it again by the same name")
                 _sleep(SUBMIT_BACKOFF)
-        logger.info(f"Submitted job {job.name} workspace={self.workspace} via {self.server}")
-        return JobHandle(job.name, self)
+        logger.info(f"Submitted job {name} workspace={self.workspace} via {self.server}")
 
     def _submitted(self, name, nonce):
         """Whether the job named name is the one a submission with nonce

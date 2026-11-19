@@ -40,7 +40,7 @@ func (r mismatchRunner) Run(_ context.Context, cmd string) (string, error) {
 // a resubmit-with-changed-spec as backend.ErrSpecMismatch, so the controller maps
 // it to a terminal spec-conflict exactly like the k8s backend does.
 func TestSystemdExecutorSubmitMapsSpecMismatch(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	spec := jobspec.JobSpec{
 		ID:         "uid-x",
 		Name:       "job",
@@ -66,7 +66,7 @@ func TestSystemdExecutorSubmitMapsSpecMismatch(t *testing.T) {
 // E2E TestResubmitAfterCheckpointAckAdopts, TestExitZeroWithoutCompleteFails
 // and TestJobRunsOnHostWithoutImage on Floci, where machines have a cache.
 func TestSystemdExecutorResubmitWithCacheAdopts(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	spec := vmTestSpec()
 	spec.Runtime = "systemd"
 	store := &cache.Manager{Root: t.TempDir()}
@@ -163,7 +163,7 @@ func TestSystemdExecutorIgnoresTheContainerdDefaultWhenRuntimeSystemd(t *testing
 		t.Fatal(err)
 	}
 	for _, runtime := range []string{v1.RuntimeSystemd, ""} {
-		cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+		cfg := systemd.Config{Scope: systemd.ScopeSystem}
 		runner := &recordingRunner{}
 		exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard())}
 		spec := vmTestSpec()
@@ -186,7 +186,7 @@ func TestSystemdExecutorIgnoresTheContainerdDefaultWhenRuntimeSystemd(t *testing
 // A container runtime without an image is refused before anything is
 // installed, with the field the user must set.
 func TestSystemdExecutorContainerdNeedsImage(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	runner := &recordingRunner{}
 	exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard())}
 	spec := containerdSpec()
@@ -203,7 +203,7 @@ func TestSystemdExecutorContainerdNeedsImage(t *testing.T) {
 // TestSystemdExecutorCancelRemovesWorkdir covers the VM half of Phase L: cleaning
 // up a finished job removes the unit AND its work directory.
 func TestSystemdExecutorCancelRemovesWorkdir(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	runner := &recordingRunner{unitContent: systemd.RenderUnit(vmTestSpec(), nil, cfg, "")}
 	exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard())}
 
@@ -221,7 +221,7 @@ func TestSystemdExecutorCancelRemovesWorkdir(t *testing.T) {
 // TestSystemdExecutorCancelHonorsRetainWorkdir proves the GC flag shipped in the
 // unit file keeps the work directory (debugging opt-in).
 func TestSystemdExecutorCancelHonorsRetainWorkdir(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	spec := vmTestSpec()
 	spec.RetainWorkdir = true
 	runner := &recordingRunner{unitContent: systemd.RenderUnit(spec, nil, cfg, "")}
@@ -244,7 +244,7 @@ func TestSystemdExecutorCancelHonorsRetainWorkdir(t *testing.T) {
 // must recover the retain decision from the marker inside the job dir instead of
 // deleting the retained workdir.
 func TestSystemdExecutorRepeatCancelHonorsRetainWorkdir(t *testing.T) {
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	runner := &recordingRunner{unitContent: "", markerExists: true} // unit already uninstalled
 	exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard())}
 
@@ -259,7 +259,7 @@ func TestSystemdExecutorRepeatCancelHonorsRetainWorkdir(t *testing.T) {
 func TestSystemdExecutorMaterializesAWSSecretWithoutPuttingValueInUnit(t *testing.T) {
 	const plaintext = "executor-must-not-embed-this"
 	root := t.TempDir()
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	runner := &recordingRunner{}
 	spec := vmTestSpec()
 	spec.SecretSources = []v1.SecretSourceRef{{
@@ -299,7 +299,7 @@ func TestSystemdExecutorMaterializesAWSSecretWithoutPuttingValueInUnit(t *testin
 func TestSystemdExecutorMaterializesEncryptedPayloadWithoutPuttingValueInUnit(t *testing.T) {
 	const plaintext = "executor-must-not-embed-this"
 	root := t.TempDir()
-	cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+	cfg := systemd.Config{Scope: systemd.ScopeSystem}
 	runner := &recordingRunner{}
 	bundle, err := agepayload.Generate()
 	if err != nil {
@@ -348,7 +348,7 @@ func (f getterStub) Get(ctx context.Context, req awssecret.GetRequest) (string, 
 func TestAttemptUnitNameDistinct(t *testing.T) {
 	names := map[int32]string{}
 	for _, attempt := range []int32{0, 1, 2} {
-		cfg := systemd.Config{Scope: systemd.ScopeSystem, UseSudo: true}
+		cfg := systemd.Config{Scope: systemd.ScopeSystem}
 		runner := &recordingRunner{}
 		exec := SystemdExecutor{Manager: systemd.NewManager(cfg, runner, logr.Discard())}
 		spec := vmTestSpec()

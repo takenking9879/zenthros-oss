@@ -2,8 +2,10 @@
 
 A backend says which workload kinds it runs. Nothing else in Zenthros decides
 this. Each agent's executor declares its kinds when it connects, and again on
-a heartbeat whenever the declaration changes (`capability_hash`). The
-controller and the scheduler only read that declaration:
+its periodic heartbeat whenever the declaration changes (`capability_hash`).
+The heartbeat sent because a job started or ended carries only the job count,
+so it never waits on the declaration. The controller and the scheduler only
+read that declaration:
 
 - **Admission**: a job whose kind the chosen backend does not declare fails
   before anything is submitted. The error is `UNSUPPORTED_WORKLOAD_KIND` and

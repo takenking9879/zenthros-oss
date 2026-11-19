@@ -79,7 +79,7 @@ func TestAWorkspacesJobUserIsItsNamesHash(t *testing.T) {
 // the machine's /tmp and /var/tmp, and the folders the owner opened.
 func TestAHostJobRunsAsItsWorkspacesUserAndWritesOnlyItsOwn(t *testing.T) {
 	runner := &fakeRunner{}
-	cfg := Config{Scope: ScopeSystem, UseSudo: true, HostRoots: []string{"/data", "/srv/my set"}}
+	cfg := Config{Scope: ScopeSystem, HostRoots: []string{"/data", "/srv/my set"}}
 	m := NewManager(cfg, runner, logr.Discard())
 	spec := hostJob()
 	if _, err := m.Install(context.Background(), spec, spec.Env); err != nil {
@@ -168,7 +168,7 @@ func TestAHostJobKeepsTheHomeItSet(t *testing.T) {
 // a link at the retain marker, which the agent writes as root.
 func TestAJobsDirectoriesAreGivenAfterItsSourceAndBeforeItStarts(t *testing.T) {
 	runner := &fakeRunner{}
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	m := NewManager(cfg, runner, logr.Discard())
 	spec := hostJob()
 	spec.RetainWorkdir = true
@@ -237,7 +237,7 @@ func TestOnlyAHostJobOnTheSystemManagerIsHeldByItsUnit(t *testing.T) {
 
 func TestUninstallRemovesTheEnvironmentFile(t *testing.T) {
 	runner := &fakeRunner{}
-	m := NewManager(Config{Scope: ScopeSystem, UseSudo: true}, runner, logr.Discard())
+	m := NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
 	if err := m.Uninstall(context.Background(), "zenthros-uid-123.service"); err != nil {
 		t.Fatal(err)
 	}

@@ -45,8 +45,8 @@ const idMapFunction = `zj_idmap() {
 // remap ids (remap-ids, containerd's own test of the kernel's idmapped
 // mounts on overlayfs, Linux 5.19 and newer), and unshare must be there to
 // make a job's network inside one.
-func UserNamespaces(ctx context.Context, runner systemd.Runner, sudo string) (bool, string) {
-	out, err := runner.Run(ctx, sudo+"ctr plugins ls -d id==overlayfs")
+func UserNamespaces(ctx context.Context, runner systemd.Runner) (bool, string) {
+	out, err := runner.Run(ctx, "ctr plugins ls -d id==overlayfs")
 	if err != nil {
 		return false, "containerd does not answer: " + err.Error()
 	}

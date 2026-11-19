@@ -231,11 +231,11 @@ func TestUserNamespacesNeedContainerdToRemapIDs(t *testing.T) {
 		"no capabilitie": {r: probeRunner{out: map[string]string{"plugins ls": "Type: io.containerd.snapshotter.v1\nID: overlayfs\n", "command -v unshare": "/usr/bin/unshare\n"}}, says: "remap"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			ok, why := UserNamespaces(context.Background(), &c.r, "sudo ")
+			ok, why := UserNamespaces(context.Background(), &c.r)
 			if ok != c.ok || !strings.Contains(why, c.says) {
 				t.Fatalf("UserNamespaces = %v, %q; want %v, saying %q", ok, why, c.ok, c.says)
 			}
-			if !strings.HasPrefix(c.r.ran[0], "sudo ctr plugins ls -d id==overlayfs") {
+			if !strings.HasPrefix(c.r.ran[0], "ctr plugins ls -d id==overlayfs") {
 				t.Errorf("asked %q", c.r.ran[0])
 			}
 		})

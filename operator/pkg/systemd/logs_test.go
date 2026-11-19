@@ -58,7 +58,7 @@ func TestUnitTerminal(t *testing.T) {
 func TestTheLogIsMadeBeforeTheStart(t *testing.T) {
 	spec := jobspec.JobSpec{ID: "uid-log", Name: "j", Command: []string{"/bin/true"}}
 	for _, installed := range []bool{false, true} {
-		cfg := Config{Scope: ScopeSystem, UseSudo: true}
+		cfg := Config{Scope: ScopeSystem}
 		runner := &fakeRunner{}
 		if installed {
 			runner.unitContent = RenderUnit(spec, nil, cfg, "")

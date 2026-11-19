@@ -105,7 +105,42 @@ func (h *HeartbeatSender) notifyWhenRuntimeReady(ctx context.Context) {
 	}
 }
 
+// send heartbeats with the machine's declaration when it changed. The
+// declaration is read before the turn to send: a VM's runs systemctl, and a
+// heartbeat that frees a slot (sendCount) must not wait behind it.
 func (h *HeartbeatSender) send() {
+	declaration := h.readDeclaration()
+	h.beat(&declaration)
+}
+
+// sendCount heartbeats the job count alone, at once: a job started or ended.
+// The hub sends a machine's next job as it hears the last one's end, which
+// this heartbeat follows on the stream; a read of the machine between the
+// two found it full and kept that for a second (BACKEND_BUSY). It reads no
+// declaration: a VM's took long enough for that read on each task of a map
+// (lab, 2026-11-18). The next periodic heartbeat declares.
+func (h *HeartbeatSender) sendCount() {
+	h.beat(nil)
+}
+
+// declaration is what the executor declared, and its hash.
+type declaration struct {
+	set  capability.Set
+	host capability.Host
+	hash string
+}
+
+func (h *HeartbeatSender) readDeclaration() declaration {
+	if h.declare == nil || h.advertised == nil {
+		return declaration{}
+	}
+	set, host, hash := h.declare(context.Background())
+	return declaration{set: set, host: host, hash: hash}
+}
+
+// beat sends one heartbeat with the count when its turn comes, and with
+// declared when it is not nil and differs from what the gateway holds.
+func (h *HeartbeatSender) beat(declared *declaration) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	maxJobs := int32(h.maxJobs)
@@ -137,7 +172,7 @@ func (h *HeartbeatSender) send() {
 			msg.Heartbeat.RebalanceRecommendedUnix = at.Unix()
 		}
 	}
-	changed := h.attachDeclaration(msg.Heartbeat)
+	changed := declared != nil && h.attachDeclaration(msg.Heartbeat, *declared)
 	// Stamped before Send: the ack can be read before Send returns.
 	h.sentAt.Store(time.Now().UnixNano())
 	if err := h.sender.Send(msg); err != nil {
@@ -151,22 +186,18 @@ func (h *HeartbeatSender) send() {
 	metrics.RecordAgentHeartbeatSent()
 }
 
-// attachDeclaration puts the executor's declaration on hb when it differs
-// from the advertised one, and reports whether it did.
-func (h *HeartbeatSender) attachDeclaration(hb *agentpb.Heartbeat) bool {
-	if h.declare == nil || h.advertised == nil {
+// attachDeclaration puts declared on hb when it differs from the advertised
+// one, and reports whether it did.
+func (h *HeartbeatSender) attachDeclaration(hb *agentpb.Heartbeat, declared declaration) bool {
+	hb.CapabilityHash = declared.hash
+	if declared.hash == "" {
 		return false
 	}
-	set, host, hash := h.declare(context.Background())
-	hb.CapabilityHash = hash
-	if hash == "" {
+	if last, _ := h.advertised.Load().(string); last == declared.hash {
 		return false
 	}
-	if last, _ := h.advertised.Load().(string); last == hash {
-		return false
-	}
-	hb.Capabilities = capwire.ToProto(set)
-	hb.Host = capwire.HostToProto(host)
+	hb.Capabilities = capwire.ToProto(declared.set)
+	hb.Host = capwire.HostToProto(declared.host)
 	return true
 }
 

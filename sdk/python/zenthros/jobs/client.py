@@ -93,8 +93,9 @@ class JobClient:
         after at most wait seconds."""
         return self.job_status(job_id), None
 
-    def wait(self, job_id, timeout=None, on_reschedule=None, cancel_on_timeout=False):
-        """Block until the job finishes.
+    def wait(self, job_id, timeout=None, on_reschedule=None, cancel_on_timeout=False, on_status=None):
+        """Block until the job finishes. on_status(status) with each status
+        read, the last one the job's end.
 
         Process completion: prefer the ZenthrosJob phase. A trainer may
         publish ``final=true`` mid-job, so a report snapshot alone is not
@@ -143,6 +144,8 @@ class JobClient:
                 if now - failing_since >= TRANSIENT_WARN_AFTER and (warned_at is None or now - warned_at >= TRANSIENT_WARN_EVERY):
                     logger.warning(f"job {job_id}: {self.transport} has failed for {int(now - failing_since)}s, still waiting: {err}")
                     warned_at = now
+            if snap is not None and on_status is not None:
+                on_status(snap)
             if self._final_report_decides():
                 try:
                     views = self.reports(job_id)

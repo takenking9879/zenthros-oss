@@ -21,15 +21,14 @@ const (
 	ScopeUser = "user"
 )
 
-// Config describes how to address systemd on a host: the scope and whether file
-// and systemctl operations need a sudo prefix. It carries no connection details;
-// those live with the transport (SSH client or local runner).
+// Config describes how to address systemd on a host. The agent that uses it
+// runs as root, so no command is prefixed with sudo: it opened a session and
+// wrote the journal for each of a job's preparing commands, 2.3 s per job on an
+// e2-small (2026-11-18). It carries no connection details; those live with the
+// transport (SSH client or local runner).
 type Config struct {
 	// Scope is ScopeSystem or ScopeUser.
 	Scope string
-	// UseSudo prefixes systemctl and file operations with sudo (typical for system
-	// scope where the acting user has passwordless sudo).
-	UseSudo bool
 	// RuntimeImage, when set, runs the job inside containerd (ctr run) while the
 	// Agent stays on the host. Empty keeps ExecStart on the host binary.
 	RuntimeImage string
@@ -59,24 +58,13 @@ func (c Config) UnitPath(name string) string {
 	return c.unitDir() + "/" + name
 }
 
-// Systemctl returns a systemctl command line for the configured scope and privilege.
+// Systemctl returns a systemctl command line for the configured scope.
 func (c Config) Systemctl(args string) string {
 	cmd := "systemctl"
 	if c.Scope == ScopeUser {
 		cmd += " --user"
 	}
-	if c.UseSudo {
-		cmd = "sudo " + cmd
-	}
 	return cmd + " " + args
-}
-
-// SudoPrefix returns the privilege prefix for non-systemctl file operations.
-func (c Config) SudoPrefix() string {
-	if c.UseSudo {
-		return "sudo "
-	}
-	return ""
 }
 
 // UnitName maps a job id to a stable, systemd-safe unit name. Job ids are k8s

@@ -23,7 +23,7 @@ func (r *listingRunner) Run(_ context.Context, cmd string) (string, error) {
 func TestImageDigestPinsTheListedDigest(t *testing.T) {
 	r := &listingRunner{listing: "REF                                TYPE                                                      DIGEST                                                                  SIZE     PLATFORMS   LABELS\n" +
 		"docker.io/library/python:3.13-slim application/vnd.oci.image.index.v1+json                  sha256:4f6b0b1a2c3d4e5f60718293a4b5c6d7e8f9011223344556677889900aabbccdd 41.2 MiB linux/amd64 -\n"}
-	got, err := ImageDigest(context.Background(), r, "sudo ", "python:3.13-slim")
+	got, err := ImageDigest(context.Background(), r, "python:3.13-slim")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestImageDigestPinsTheListedDigest(t *testing.T) {
 	}
 
 	r.listing = "REF TYPE DIGEST SIZE PLATFORMS LABELS\n"
-	if got, _ := ImageDigest(context.Background(), r, "", "python:3.13-slim"); got != "" {
+	if got, _ := ImageDigest(context.Background(), r, "python:3.13-slim"); got != "" {
 		t.Fatalf("an image containerd does not list pinned as %q", got)
 	}
 }
@@ -51,7 +51,7 @@ func TestPinnedRefKeepsTheRepository(t *testing.T) {
 			t.Errorf("PinnedRef(%q) = %q, want %q", tc.ref, got, tc.want)
 		}
 	}
-	if got, _ := ImageDigest(context.Background(), &listingRunner{}, "", "repo/train@sha256:given"); got != "docker.io/repo/train@sha256:given" {
+	if got, _ := ImageDigest(context.Background(), &listingRunner{}, "repo/train@sha256:given"); got != "docker.io/repo/train@sha256:given" {
 		t.Errorf("a digest reference resolved to %q, want itself, normalized", got)
 	}
 }

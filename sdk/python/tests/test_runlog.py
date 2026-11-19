@@ -99,7 +99,7 @@ class RunLogTest(unittest.TestCase):
         mine = ReportView(job_id="j", producer_id="host-a", payload={"epoca": 3, "loss": 0.33}, sequence=3,
                           produced_at="1792128932")
         internal = ReportView(job_id="j", producer_id=f"{RESULT_PRODUCER}-g1", payload={"zenthros.result": {}})
-        with mock.patch.object(type(call), "reports", lambda self: [mine, internal]):
+        with mock.patch.object(self.client, "reports", lambda name: [mine, internal]):
             call.result(stream_logs=False)
         rows = [json.loads(line) for line in (self.root / call.name / "reports.jsonl").read_text().splitlines()]
         self.assertEqual(rows, [{"producer_id": "host-a", "sequence": 3, "produced_at": "1792128932", "final": False,

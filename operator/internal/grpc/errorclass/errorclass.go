@@ -137,6 +137,26 @@ func JobAbsent(namespace, name string) error {
 // never its words.
 func IsJobAbsent(err error) bool { return hasDetail(err, jobAbsent) }
 
+// noMachine marks the Gateway's refusal of a log of a job that runs on no
+// machine yet: zenthros-api holds a followed one until the job changes.
+var noMachine = &errdetails.ErrorInfo{Domain: "zenthros.io", Reason: "NO_MACHINE_YET"}
+
+// NoMachine is the Gateway's refusal of a log of a job that runs on no
+// machine yet (seats.RunsOn): not submitted to one, or its lease fenced
+// after its machine was lost.
+func NoMachine() error {
+	refused, err := status.New(codes.FailedPrecondition, "the job runs on no machine yet").WithDetails(noMachine)
+	if err != nil {
+		// WithDetails fails only for codes.OK.
+		panic(err)
+	}
+	return refused.Err()
+}
+
+// IsNoMachine reports whether err is NoMachine's refusal: by its detail,
+// never its words.
+func IsNoMachine(err error) bool { return hasDetail(err, noMachine) }
+
 // notThisReplica marks a Gateway replica's refusal of a LogChannel when
 // another replica holds the agent's Register session.
 var notThisReplica = &errdetails.ErrorInfo{Domain: "zenthros.io", Reason: "NOT_THIS_REPLICA"}

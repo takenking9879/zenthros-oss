@@ -137,7 +137,7 @@ func TestRecordedStateCarriesTheExitCode(t *testing.T) {
 // unit has not run (an error, so the controller resubmits and the unit is
 // started), even when systemd infers a success.
 func TestFinishedStateComesFromTheRecord(t *testing.T) {
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	unit := RenderUnit(testSpec(), nil, cfg, "")
 	name := UnitName(testSpec().ID)
 	inferred := backend.JobState{Phase: v1.PhaseSucceeded, Message: "process exited successfully"}
@@ -163,7 +163,7 @@ func TestFinishedStateComesFromTheRecord(t *testing.T) {
 // A resubmit (after a failed status read) adopts a unit that ran to an end
 // it recorded, whatever the end: starting it again runs the job twice.
 func TestResubmitAdoptsUnitThatRan(t *testing.T) {
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	for _, record := range []string{"result=success code=exited status=0", "result=exit-code code=exited status=7"} {
 		runner := &fakeRunner{showOutput: "LoadState=loaded\nActiveState=inactive\nResult=success\n", record: record}
 		runner.unitContent = RenderUnit(testSpec(), nil, cfg, "")
@@ -181,7 +181,7 @@ func TestResubmitAdoptsUnitThatRan(t *testing.T) {
 // before the start, and Uninstall removes it after the stop (which writes it
 // one last time).
 func TestRecordIsClearedAroundTheRun(t *testing.T) {
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	runner := &fakeRunner{}
 	manager := NewManager(cfg, runner, logr.Discard())
 	if _, err := manager.Install(context.Background(), testSpec(), nil); err != nil {
@@ -206,7 +206,7 @@ func TestRecordIsClearedAroundTheRun(t *testing.T) {
 // record yet: it is the job's attempt still running, as MapState says, and a
 // resubmit adopts it rather than start it again (19#6).
 func TestResubmitAdoptsAUnitStillStopping(t *testing.T) {
-	cfg := Config{Scope: ScopeSystem, UseSudo: true}
+	cfg := Config{Scope: ScopeSystem}
 	runner := &fakeRunner{showOutput: "LoadState=loaded\nActiveState=deactivating\nSubState=stop-post\n"}
 	runner.unitContent = RenderUnit(testSpec(), nil, cfg, "")
 	manager := NewManager(cfg, runner, logr.Discard())
@@ -227,7 +227,7 @@ func TestResubmitAdoptsAUnitStillStopping(t *testing.T) {
 // the unit ran without them (R4 ronda 5, P4).
 func TestAUnitWithAStartQueuedMayRun(t *testing.T) {
 	runner := &fakeRunner{showOutput: "LoadState=loaded\nActiveState=inactive\nSubState=dead\nJob=4211\n"}
-	manager := NewManager(Config{Scope: ScopeSystem, UseSudo: true}, runner, logr.Discard())
+	manager := NewManager(Config{Scope: ScopeSystem}, runner, logr.Discard())
 	if active, err := manager.UnitActive(context.Background(), UnitName(testSpec().ID)); err != nil || !active {
 		t.Fatalf("UnitActive = %t, %v with a start queued", active, err)
 	}

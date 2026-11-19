@@ -40,8 +40,8 @@ func (m *Manager) EnsureJobUser(ctx context.Context, workspace string) (string, 
 	m.usersMu.Lock()
 	defer m.usersMu.Unlock()
 	name := JobUser(workspace)
-	cmd := fmt.Sprintf(`id -u %[1]s >/dev/null 2>&1 || %[2]suseradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin %[1]s`,
-		name, m.cfg.SudoPrefix())
+	cmd := fmt.Sprintf(`id -u %[1]s >/dev/null 2>&1 || useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin %[1]s`,
+		name)
 	if _, err := m.runner.Run(ctx, cmd); err != nil {
 		return "", fmt.Errorf("make the job user %s: %w", name, err)
 	}
@@ -184,7 +184,7 @@ func (m *Manager) giveTo(ctx context.Context, user, flags string, paths ...strin
 	for i, p := range paths {
 		quoted[i] = shellword.Quote(p)
 	}
-	cmd := fmt.Sprintf(`%schown %s %s %s`, m.cfg.SudoPrefix(), flags, shellword.Quote(user+":"+user), strings.Join(quoted, " "))
+	cmd := fmt.Sprintf(`chown %s %s %s`, flags, shellword.Quote(user+":"+user), strings.Join(quoted, " "))
 	if _, err := m.runner.Run(ctx, cmd); err != nil {
 		return fmt.Errorf("give %s to %s: %w", strings.Join(paths, ", "), user, err)
 	}
@@ -216,11 +216,10 @@ func (m *Manager) confine(ctx context.Context, spec jobspec.JobSpec, workDir, ex
 	if err != nil {
 		return nil, err
 	}
-	sudo := m.cfg.SudoPrefix()
-	mkdir := fmt.Sprintf(`%[1]smkdir -p -m 0700 %[2]s && %[1]schmod 0700 %[2]s`, sudo, shellword.Quote(jail.envs))
+	mkdir := fmt.Sprintf(`mkdir -p -m 0700 %[1]s && chmod 0700 %[1]s`, shellword.Quote(jail.envs))
 	var owned []string
 	if host {
-		mkdir += fmt.Sprintf(` && %smkdir -p %s`, sudo, shellword.Quote(jail.home))
+		mkdir += fmt.Sprintf(` && mkdir -p %s`, shellword.Quote(jail.home))
 		owned = append(owned, jail.home)
 	}
 	if workDir != "" {

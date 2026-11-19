@@ -54,6 +54,11 @@ class CarriedStore(BlobStore):
         self.files[uri] = payload
         return uri
 
+    def saw(self, name, views):
+        """The reports of job name, as its call read them once it ended:
+        what get() looks in first."""
+        self._reports[name] = views
+
     def get(self, uri):
         if uri in self.files:
             return self.files[uri]

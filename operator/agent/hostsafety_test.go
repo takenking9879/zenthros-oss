@@ -14,7 +14,7 @@ import (
 func TestImageEventDoesNotRunTheImageName(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "pwned")
 	image := `repo/img:1"; touch ` + marker + `; echo "$(touch ` + marker + `)`
-	command := imageEvent("job_image_pull_start", image, "")
+	command := imageEvent("job_image_pull_start", image)
 	printer, _, found := strings.Cut(command, " | ")
 	if !found {
 		t.Fatalf("unexpected command shape: %s", command)

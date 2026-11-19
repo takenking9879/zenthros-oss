@@ -8,9 +8,11 @@ The client carries a token and nothing else: every request has it, a
 refusal is the server's words mapped to the SDK's errors, and the job's
 namespace is the Workspace's, never the client's.
 """
+import base64
 import io
 import json
 import os
+import pathlib
 import sys
 import tempfile
 import threading
@@ -30,6 +32,10 @@ from zenthros.remote import options
 from zenthros.remote.call import _LogFollower
 
 from support import FakeAPI, record, status
+
+OPERATOR = pathlib.Path(__file__).resolve().parents[3] / "operator"
+REFUSALS = OPERATOR / "pkg" / "api" / "testdata" / "wire" / "refusals.json"
+NAME_VECTOR = OPERATOR / "pkg" / "sourcebundle" / "testdata" / "name.json"
 
 
 def read(path):
@@ -175,6 +181,42 @@ class HTTPJobClientTest(unittest.TestCase):
         self.assertTrue(posts[0]["metadata"]["annotations"][http.SUBMISSION])
         slept.assert_called_once_with(http.SUBMIT_BACKOFF)
 
+    def test_a_large_code_goes_by_its_digest_and_inline_only_when_the_hub_lacks_it(self):
+        # The SDK's core rode inline in every job: 290 KB uploaded on every
+        # call to a hub across the internet, 0.25-2.5 s of a POST whose hub
+        # work took 0.07 s (2026-11-18). The hub keeps it by its digest: it
+        # goes by name, and inline once when the hub does not hold it.
+        code = b"print('zenthros')\n" * 1024
+        name = http.bundle_name(code)
+        absent = next(r for r in json.loads(REFUSALS.read_text())["refusals"] if r["means"] == "code-absent")
+        said = json.loads(absent["body"])["details"]["name"]
+        answers = [(404, absent["body"].replace(said, name).encode()), (201, {"metadata": {"name": "j"}}),
+                   (201, {"metadata": {"name": "k"}})]
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = lambda _body: answers.pop(0)
+        inline = base64.b64encode(code).decode()
+        for name_of in ("j", "k"):
+            sent = job(name_of)
+            sent.spec.workload.template.source = S.Source(inline=inline)
+            self.client.submit(sent)
+        posts = [r["body"] for r in self.api.requests if r["method"] == "POST"]
+        sources = [json.loads(p)["spec"]["workload"]["template"]["source"] for p in posts]
+        self.assertEqual(sources, [{"ref": name}, {"inline": inline}, {"ref": name}])
+        self.assertLess(len(posts[0]), 10_000)
+        self.assertEqual(json.loads(posts[0])["metadata"]["annotations"], json.loads(posts[1])["metadata"]["annotations"],
+                         "sent again inline, the same submission")
+
+    def test_a_small_code_and_one_named_by_the_hub_go_as_they_are(self):
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = (201, {"metadata": {"name": "j"}})
+        small = job()
+        small.spec.workload.template.source = S.Source(inline=base64.b64encode(b"print(1)").decode())
+        self.client.submit(small)
+        source = json.loads(self.api.requests[-1]["body"])["spec"]["workload"]["template"]["source"]
+        self.assertEqual(source, {"inline": base64.b64encode(b"print(1)").decode()})
+
+    def test_a_bundle_is_named_as_the_hub_names_it(self):
+        vector = json.loads(NAME_VECTOR.read_text())
+        self.assertEqual(http.bundle_name(base64.b64decode(vector["data"])), vector["name"])
+
     def test_a_name_another_submission_took_is_refused_after_a_lost_answer(self):
         answers = [status(503, "busy", "ServiceUnavailable"), status(409, 'zenthrosjobs "j" already exists', "AlreadyExists")]
         self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = lambda _body: answers.pop(0)
@@ -218,6 +260,17 @@ class HTTPJobClientTest(unittest.TestCase):
         with self.assertRaises(errors.JobFailed) as caught:
             self.client.wait("j", timeout=10)
         self.assertEqual(str(caught.exception), "job is Failed")
+
+    def test_the_wait_gives_the_job_it_saw_end(self):
+        """zenthros-api's wait answers the job's metadata and status: what
+        ended a call is read from it, not asked for again (v0.2.1 point 3,
+        2026-11-18)."""
+        self.api.phases = ["Running", "Succeeded"]
+        seen = []
+        self.assertEqual(self.client.wait("j", timeout=10, on_status=seen.append), SUCCEEDED)
+        self.assertEqual([s.phase for s in seen], ["Running", SUCCEEDED])
+        self.assertEqual(seen[-1].job["status"]["phase"], SUCCEEDED)
+        self.assertFalse([r for r in self.api.requests if r["path"] == "/v1/workspaces/risk/jobs/j"])
 
     def test_wait_names_the_api_when_it_times_out_refused(self):
         self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = status(503, "Workspace has no namespace yet", "ServiceUnavailable")

@@ -106,6 +106,10 @@ class JobStatus:
     # What the workload's process returned, once it ended and returned one: a
     # machine that was lost has none (reason says so).
     exit_code: Optional[int] = None
+    # The stored job this status was read from (zenthros-api's wait answers
+    # its metadata and status): what ended a call is read from it, not asked
+    # for again. None where the client answers phases.
+    job: Optional[dict] = field(default=None, compare=False, repr=False)
 
     def is_reschedule_wait(self):
         if self.phase in TERMINAL_PHASES:
@@ -141,6 +145,9 @@ class JobHandle:
         self._client = client
         # The last log followed with logs(follow=True).
         self.followed = None
+        # The last status wait() read: the job's end, once it returned or
+        # raised for it.
+        self.last = None
 
     def status(self):
         return self._client.status(self.job_id)
@@ -150,15 +157,13 @@ class JobHandle:
 
     def wait(self, timeout=None, on_reschedule=None, cancel_on_timeout=False):
         """Block until the job ends. Past timeout, raise WaitTimeout; the job
-        keeps running unless cancel_on_timeout."""
-        if cancel_on_timeout:
-            return self._client.wait(
-                self.job_id, timeout=timeout, on_reschedule=on_reschedule,
-                cancel_on_timeout=True,
-            )
-        return self._client.wait(
-            self.job_id, timeout=timeout, on_reschedule=on_reschedule
-        )
+        keeps running unless cancel_on_timeout. self.last is the last status
+        it read."""
+        return self._client.wait(self.job_id, timeout=timeout, on_reschedule=on_reschedule,
+                                 cancel_on_timeout=cancel_on_timeout, on_status=self._saw)
+
+    def _saw(self, status):
+        self.last = status
 
     def cancel(self):
         """Stop the job and keep it as Cancelled."""
@@ -229,6 +234,7 @@ def status_from_object(obj):
         lifecycle=str(status.get("lifecycle") or ""),
         cleanup_pending=_cleanup_pending(obj, status),
         exit_code=status.get("exitCode"),
+        job=obj,
     )
 
 

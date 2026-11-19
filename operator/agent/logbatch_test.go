@@ -95,8 +95,8 @@ func TestLogLinesOfABurstTravelTogether(t *testing.T) {
 	if err := sender.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(stream.sent()); n != 2 {
-		t.Fatalf("200 lines of a burst went in %d messages, want 2: the first line at once, the rest together", n)
+	if n := len(stream.sent()); n != 3 {
+		t.Fatalf("200 lines of a burst went in %d messages, want 3: the first two lines at once, the rest together", n)
 	}
 	if got := stream.data(); got != want.String() {
 		t.Fatalf("the reader gets %d bytes, want the %d sent, in order", len(got), want.Len())
@@ -123,26 +123,69 @@ func TestLogLineAfterAQuietMomentGoesAtOnce(t *testing.T) {
 	}
 }
 
+// The runner's first line and the function's right after it, then a line each
+// window: each leaves when it is read. Counted from the last message sent, the
+// function's first line waited the rest of the window behind the runner's, and
+// from then on each line came just after a send and waited a whole window:
+// a job that printed a line a second had every line 1 s late, and each
+// message still carried one line (This computer, 2026-11-18).
+func TestALineEachWindowLeavesWhenItIsRead(t *testing.T) {
+	const window = 200 * time.Millisecond
+	sender, stream := batchSender(window)
+	if err := sender.Send(line("stdout", 0)); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	time.Sleep(5 * time.Millisecond)
+	for i := 1; i <= 5; i++ {
+		time.Sleep(time.Until(start.Add(time.Duration(i-1) * window)))
+		if err := sender.Send(line("stdout", i)); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(stream.sent()); n != i+1 {
+			t.Fatalf("line %d: %d messages sent right after it, want %d: it waited for the window", i, n, i+1)
+		}
+	}
+}
+
+// A log busier than the window still leaves one message a window, plus the
+// two a quiet moment lets go: what halved the Gateways' CPU with 900 readers
+// (scale lab, 2026-10-12).
+func TestABusyLogLeavesOneMessageAWindow(t *testing.T) {
+	const window = 50 * time.Millisecond
+	sender, stream := batchSender(window)
+	start := time.Now()
+	for i := 0; time.Since(start) < 20*window; i++ {
+		if err := sender.Send(line("stdout", i)); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(window / 10)
+	}
+	if n := len(stream.sent()); n > 20+2 {
+		t.Fatalf("%d messages in 20 windows, want at most one a window and the two after a quiet moment", n)
+	}
+}
+
 // Lines that wait go when the window ends, with nobody sending another.
 func TestWaitingLogLinesGoWhenTheWindowEnds(t *testing.T) {
 	sender, stream := batchSender(30 * time.Millisecond)
-	for i := range 3 {
+	for i := range 4 {
 		if err := sender.Send(line("stdout", i)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if n := len(stream.sent()); n != 1 {
-		t.Fatalf("%d messages right after the burst, want only the first line", n)
+	if n := len(stream.sent()); n != 2 {
+		t.Fatalf("%d messages right after the burst, want only the first two lines", n)
 	}
 	deadline := time.After(5 * time.Second)
-	for len(stream.sent()) < 2 {
+	for len(stream.sent()) < 3 {
 		select {
 		case <-deadline:
 			t.Fatal("the lines waiting were never sent")
 		case <-time.After(2 * time.Millisecond):
 		}
 	}
-	if got := stream.data(); got != "line 000\nline 001\nline 002\n" {
+	if got := stream.data(); got != "line 000\nline 001\nline 002\nline 003\n" {
 		t.Fatalf("the reader got %q", got)
 	}
 }
@@ -157,7 +200,8 @@ func TestLogBatchIsCutAtItsSize(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The first at once, then 4 lines (20 KiB, past the cut) twice.
+	// The first two at once, then 4 lines (20 KiB, past the cut), and 3
+	// waiting.
 	if n := len(stream.sent()); n != 3 {
 		t.Fatalf("%d messages for 9 lines of 5 KiB before any flush, want 3", n)
 	}
@@ -197,8 +241,10 @@ func TestAReadThatFillsABatchLeavesUncopied(t *testing.T) {
 // write over them.
 func TestABatchNeverWritesOverAChunkThatFollows(t *testing.T) {
 	sender, stream := batchSender(time.Hour)
-	if err := sender.Send(line("stdout", 0)); err != nil { // the window is open from here
-		t.Fatal(err)
+	for i := range logBatchBurst { // the window is open from here
+		if err := sender.Send(line("stdout", i)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	whole := []byte(strings.Repeat("a", 100) + strings.Repeat("c", 100))
 	for _, data := range [][]byte{whole[:100], []byte(strings.Repeat("b", 100)), whole[100:]} {
@@ -209,7 +255,7 @@ func TestABatchNeverWritesOverAChunkThatFollows(t *testing.T) {
 	if err := sender.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	want := "line 000\n" + strings.Repeat("a", 100) + strings.Repeat("b", 100) + strings.Repeat("c", 100)
+	want := "line 000\nline 001\n" + strings.Repeat("a", 100) + strings.Repeat("b", 100) + strings.Repeat("c", 100)
 	if got := stream.data(); got != want {
 		t.Fatalf("the reader gets %q, want %q", got, want)
 	}
@@ -221,11 +267,12 @@ func TestABatchNeverWritesOverAChunkThatFollows(t *testing.T) {
 // gets the next byte.
 func TestLogStreamsAndAGapAreNotJoined(t *testing.T) {
 	sender, stream := batchSender(time.Hour)
-	chunks := []*agentpb.LogChunk{line("stdout", 0), line("stdout", 1), line("stdout", 2), line("stderr", 3), line("stderr", 4), line("stderr", 5)}
+	chunks := []*agentpb.LogChunk{line("stdout", 0), line("stdout", 1), line("stdout", 2), line("stdout", 3),
+		line("stderr", 4), line("stderr", 5), line("stderr", 6)}
 	for i, c := range chunks {
 		c.Cursor = fmt.Sprint(i + 1)
 	}
-	chunks[5].Gap = 100
+	chunks[6].Gap = 100
 	for _, chunk := range chunks {
 		if err := sender.Send(chunk); err != nil {
 			t.Fatal(err)
@@ -241,9 +288,10 @@ func TestLogStreamsAndAGapAreNotJoined(t *testing.T) {
 	}
 	want := []string{
 		`stdout cursor=1 gap=0 "line 000\n"`,
-		`stdout cursor=3 gap=0 "line 001\nline 002\n"`,
-		`stderr cursor=5 gap=0 "line 003\nline 004\n"`,
-		`stderr cursor=6 gap=100 "line 005\n"`,
+		`stdout cursor=2 gap=0 "line 001\n"`,
+		`stdout cursor=4 gap=0 "line 002\nline 003\n"`,
+		`stderr cursor=6 gap=0 "line 004\nline 005\n"`,
+		`stderr cursor=7 gap=100 "line 006\n"`,
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("sent:\n  %s\nwant:\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
@@ -254,11 +302,10 @@ func TestLogStreamsAndAGapAreNotJoined(t *testing.T) {
 // accepted into a batch that will never leave.
 func TestLogSendErrorStopsThePull(t *testing.T) {
 	sender, stream := batchSender(time.Hour)
-	if err := sender.Send(line("stdout", 0)); err != nil {
-		t.Fatal(err)
-	}
-	if err := sender.Send(line("stdout", 1)); err != nil {
-		t.Fatal(err)
+	for i := range logBatchBurst + 1 { // the last one waits
+		if err := sender.Send(line("stdout", i)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	stream.mu.Lock()
 	stream.fail = errors.New("channel closed")
@@ -266,7 +313,7 @@ func TestLogSendErrorStopsThePull(t *testing.T) {
 	if err := sender.Flush(); err == nil {
 		t.Fatal("a failed flush reported nothing")
 	}
-	if err := sender.Send(line("stdout", 2)); err == nil {
+	if err := sender.Send(line("stdout", logBatchBurst+1)); err == nil {
 		t.Fatal("a line was accepted after the channel failed")
 	}
 }
@@ -361,9 +408,9 @@ func TestLogBatchWindowIsTheAgentsOption(t *testing.T) {
 	if n := pull(-1); n != 50 {
 		t.Fatalf("an agent with no window sent 50 lines in %d messages, want one each", n)
 	}
-	// The first line at once, the rest when the pull ends.
-	if n := pull(time.Hour); n != 2 {
-		t.Fatalf("an agent with a window of an hour sent 50 lines in %d messages, want 2", n)
+	// The first two lines at once, the rest when the pull ends.
+	if n := pull(time.Hour); n != 3 {
+		t.Fatalf("an agent with a window of an hour sent 50 lines in %d messages, want 3", n)
 	}
 }
 
@@ -421,6 +468,7 @@ func TestABatchNeverPassesTheGatewaysChunk(t *testing.T) {
 		}
 	}
 	send("first\n")
+	send("second\n")
 	send(strings.Repeat("a", 10<<10) + "\n")
 	send(strings.Repeat("b", backend.MaxLogLine) + "\n")
 	send("last\n")
@@ -582,6 +630,7 @@ func TestWhatTheBudgetSkippedAtTheEndIsSaid(t *testing.T) {
 func TestABatchKeepsItsPlaceThroughAPieceOfALine(t *testing.T) {
 	sender, stream := batchSender(time.Hour)
 	for _, chunk := range []*agentpb.LogChunk{
+		{Stream: "stdout", Data: []byte("zeroth\n"), Cursor: "c0"},
 		{Stream: "stdout", Data: []byte("first\n"), Cursor: "c1"},
 		{Stream: "stdout", Data: []byte("second\n"), Cursor: "c2"},
 		{Stream: "stdout", Data: []byte("a long line's first piece")},
