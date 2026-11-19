@@ -265,8 +265,12 @@ func backoffSequence(t *testing.T, forwarder *reportForwarder, spool *reportspoo
 		return stream.sentCount() >= 1
 	})
 
-	insertReport(t, spool, "job-1", "rep-2")
+	// The stream goes down before the next report exists: the forwarder may
+	// still be flushing (a leftover wake, the resend the clock just fired),
+	// and a report it lists while the stream answers goes out (CI,
+	// 2026-11-19).
 	stream.setFail(errors.New("down again"))
+	insertReport(t, spool, "job-1", "rep-2")
 	forwarder.Wake()
 	testutil.Eventually(t, "hasWait(clock, 2*time.Second) && lastWaitIs(clock, 2*time.Second)", func() bool { return hasWait(clock, 2*time.Second) && lastWaitIs(clock, 2*time.Second) })
 }
