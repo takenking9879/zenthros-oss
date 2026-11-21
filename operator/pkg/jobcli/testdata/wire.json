@@ -1,5 +1,11 @@
 {
   "_about": "One job's wire bytes, shared by pkg/jobcli (Go) and sdk/python/tests/test_job_protocol.py. Both must send exactly these bodies.",
+  "runner_packages": {
+    "_about": "What a function's runner needs on a machine's own Python, by its minor: pkg/backendjoin's runnerPackages (the toolchain of a VM and of a container) and the SDK's (remote/call.py runner_packages, the image of a This computer and a cluster's pod). One the machine lacks starts every call twice, the second time in a venv of the runner's own.",
+    "3.12": ["cloudpickle", "boto3", "backports.zstd"],
+    "3.13": ["cloudpickle", "boto3", "backports.zstd"],
+    "3.14": ["cloudpickle", "boto3"]
+  },
   "env": {
     "ZENTHROS_JOB_ID": "0f5c-uid",
     "ZENTHROS_GENERATION": "3",

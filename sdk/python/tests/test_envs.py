@@ -218,15 +218,16 @@ class PinsTest(unittest.TestCase):
         self.assertEqual({arch: (java["version"], *java[arch]) for arch in ("amd64", "arm64")}, rows)
 
 
-def demo_wheel(directory):
-    """A wheel of one module, zt_demo, made by hand: no build backend."""
-    path = Path(directory, "zt_demo-1.0-py3-none-any.whl")
-    files = {"zt_demo.py": "VALUE = 42\n",
-             "zt_demo-1.0.dist-info/METADATA": "Metadata-Version: 2.1\nName: zt-demo\nVersion: 1.0\n",
-             "zt_demo-1.0.dist-info/WHEEL": "Wheel-Version: 1.0\nGenerator: hand\nRoot-Is-Purelib: true\nTag: py3-none-any\n"}
-    record = "".join(f"{name},,\n" for name in files) + "zt_demo-1.0.dist-info/RECORD,,\n"
+def demo_wheel(directory, module="zt_demo"):
+    """A wheel of one module (zt_demo) made by hand: no build backend."""
+    project = module.replace("_", "-")
+    path = Path(directory, f"{module}-1.0-py3-none-any.whl")
+    files = {f"{module}.py": "VALUE = 42\n",
+             f"{module}-1.0.dist-info/METADATA": f"Metadata-Version: 2.1\nName: {project}\nVersion: 1.0\n",
+             f"{module}-1.0.dist-info/WHEEL": "Wheel-Version: 1.0\nGenerator: hand\nRoot-Is-Purelib: true\nTag: py3-none-any\n"}
+    record = "".join(f"{name},,\n" for name in files) + f"{module}-1.0.dist-info/RECORD,,\n"
     with zipfile.ZipFile(path, "w") as whl:
-        for name, text in {**files, "zt_demo-1.0.dist-info/RECORD": record}.items():
+        for name, text in {**files, f"{module}-1.0.dist-info/RECORD": record}.items():
             whl.writestr(name, text)
     return path
 
@@ -252,6 +253,37 @@ class RealVenvTest(unittest.TestCase):
         self.assertEqual(lines[0], "42")
         for parent in envs._parent_site():
             self.assertIn(parent, lines[1:])
+
+    def test_a_venv_made_from_a_venv_made_from_another_sees_all_three(self):
+        # A container's agent venv holds the store's client (boto3); the
+        # runner's own venv, made from it, holds only what it lacked
+        # (backports.zstd); the function's, made from the runner's, read
+        # the call without boto3 (lab, 2026-11-20).
+        root, wheels = tempfile.mkdtemp(), tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root)
+        self.addCleanup(shutil.rmtree, wheels)
+        for module in ("zt_agent", "zt_runner", "zt_fn"):
+            demo_wheel(wheels, module)
+        offline = f"--no-index\n--find-links {wheels}\n"
+        agent = Path(root, "agent")
+        quiet = {"capture_output": True, "text": True, "timeout": 120, "check": True}
+        subprocess.run([sys.executable, "-m", "venv", "--system-site-packages", str(agent)], **quiet)
+        subprocess.run([str(agent / "bin" / "python"), "-m", "pip", "install", "-q", "--disable-pip-version-check",
+                        "--no-index", "--find-links", wheels, "zt-agent==1.0"], **quiet)
+        # Each venv made by the Python of the one before, as the runner does.
+        make = ("import io, sys\nfrom unittest import mock\nfrom zenthros.remote import envs\n"
+                "with mock.patch.object(envs.shutil, 'which', return_value=None):\n"
+                "    print(envs._venv(envs.cache_root(), sys.argv[1], sys.argv[2], io.StringIO(), envs.subprocess.run))\n")
+        env = {**os.environ, envs.CACHE_ENV: os.path.join(root, "envs"), "PYTHONPATH": str(Path(envs.__file__).parents[2])}
+        python = str(agent / "bin" / "python")
+        for name, module in (("runner-x", "zt-runner"), ("fn-x", "zt-fn")):
+            done = subprocess.run([python, "-c", make, name, offline + f"{module}==1.0\n"], env=env, capture_output=True,
+                                  text=True, timeout=120)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            python = done.stdout.strip().splitlines()[-1]
+        done = subprocess.run([python, "-c", "import zt_agent, zt_runner, zt_fn"], env=env, capture_output=True, text=True,
+                              timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
 
 
 if __name__ == "__main__":

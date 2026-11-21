@@ -31,6 +31,7 @@ URI.
 
 import base64
 import hashlib
+import inspect
 import json
 import os
 import pickle
@@ -43,12 +44,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 from zenthros import console, errors
+from zenthros import upload as uploads
 from zenthros.core import checkpoint
 from zenthros.core.storage import GCS_KEY_ENV
 from zenthros.jobs import spec as S
 from zenthros.jobs.follow import FollowedLog
-from zenthros.jobs.handle import CANCELLED, FAILED, TERMINAL_PHASES, JobHandle, seconds_at
-from zenthros.remote import bundle, carried, envs, runlog, savedlogs
+from zenthros.jobs.handle import CANCELLED, FAILED, PROCESS_FAILURES, TERMINAL_PHASES, JobHandle, seconds_at
+from zenthros.remote import bundle, carried, envs, payload, runlog, savedlogs
 from zenthros.remote import snapshot as code_snapshot
 from zenthros.remote.options import (
     _own_bucket,
@@ -68,7 +70,6 @@ RESULT = "result.pkl"
 RESULTS = "results"
 _MAP_RESULT = re.compile(rf"{RESULTS}/\d+\.pkl")
 CALL_KIND, MAP_KIND, COMMAND_KIND = "call", "map", "command"
-PROCESS_FAILED = "PROCESS_FAILED"
 # The SHA-256 of the call as the caller wrote it, in the job's spec: only who
 # may edit the job's spec can change it.
 CALL_SHA256_ENV = "ZENTHROS_CALL_SHA256"
@@ -79,6 +80,8 @@ OUTPUT_LOG = "zenthros-output.log"
 # (cloudpickle at the caller's version, the store's client): installed where
 # it runs when the machine lacks them (a slim image, a bare VM's Python).
 RUNNER_PACKAGES_ENV = "ZENTHROS_RUNNER_PACKAGES"
+# How many left-out files a call names.
+LEFT_OUT_SHOWN = 8
 # The report payload key under which the runner gives a result's {uri,
 # sha256}, from a producer of its own per attempt and item.
 RESULT_REPORT = "zenthros.result"
@@ -97,6 +100,10 @@ MAP_ON = "zenthros.ai/map-on"
 MAP_SIZE = "zenthros.ai/map-size"
 # A label on every job this module submits (run, map, serve).
 REMOTE_LABEL = "zenthros.ai/remote"
+# What a job runs, for a person: the function's name, or the command's
+# words (zenthros jobs' FUNCTION).
+FUNCTION = "zenthros.ai/function"
+FUNCTION_MAX = 60
 # distribution.count's Maximum in the CRD (operator/api/v1
 # distribution_types.go): a map of more is refused before it uploads.
 MAX_TASKS = 256
@@ -191,7 +198,7 @@ class Upstream:
         return raws
 
     def _read(self, uri, raw):
-        record = pickle.loads(raw)
+        record = payload.load(raw)
         if not record.get("ok"):
             raise RemoteError(f"upstream {self.name} failed: {record.get('type')}: {record.get('message')}",
                               remote_type=record.get("type", ""), job=self.name)
@@ -297,7 +304,6 @@ def _in_reach(value, on, code_dir, upload):
     """value, if the place it runs can reach what it names. A path only here stops
     it before anything is made; with upload= it goes to the store first."""
     from zenthros import machines, reach
-    from zenthros import upload as uploads
 
     found = reach.answers(value, on, code_dir)
     blocked = [(ref, answer) for ref, answer in found if answer.answer == reach.IMPOSSIBLE]
@@ -309,6 +315,14 @@ def _in_reach(value, on, code_dir, upload):
     client = _client_for(on)
     root = _store(current, client)
     return uploads.send(value, [ref for ref, _ in blocked], root, blob_store(root, current, client))
+
+
+def _items_in_reach(items, shared, on, options):
+    """A map's items and shared arguments, if on can reach what they name
+    (_in_reach): with upload= in options (taken out of them), what only
+    this computer has goes to the store first, once by its content."""
+    found = _in_reach((items, shared), on, options.get("code_dir", "."), options.pop("upload", False))
+    return list(found[0]), found[1]
 
 
 def _contracts(inputs, outputs):
@@ -553,10 +567,11 @@ def map(fn, items, _shared=None, _annotations=None, on=None, _where=None, **opti
         raise errors.ValidationError("map needs at least one item")
     if not callable(fn):
         raise errors.ValidationError(f"map takes a function or a Task class, not {type(fn).__name__}")
-    unknown = set(options) - set(_OPTIONS) - {"name", "retries", "retry_on"}
+    unknown = set(options) - _MAP_TAKES
     if unknown:
         raise errors.ValidationError(f"map: unknown options {sorted(unknown)}")
     if _where is None:
+        items, _shared = _items_in_reach(items, _shared, on, options)
         return _placed_call(on, options, False, lambda where, placed: map(
             fn, items, _shared=_shared, _annotations=_annotations, _where=where, **placed),
             python=bundle.python_version())
@@ -573,8 +588,8 @@ def map(fn, items, _shared=None, _annotations=None, on=None, _where=None, **opti
                    **{**_OPTIONS, **_WHERE, **options, **_where})
 
 
-def serve(target, *args, port=None, ports=None, retries=2, on=None, keep=False, stop_after=None, _where=None,
-          **options):
+def serve(target, *args, port=None, ports=None, retries=2, on=None, keep=False, stop_after=None, params=None,
+          _where=None, **options):
     """Run target as a Service: it runs until cancelled, and .url() says
     where it answers. Returns a RemoteCall at once.
 
@@ -583,7 +598,8 @@ def serve(target, *args, port=None, ports=None, retries=2, on=None, keep=False, 
         ...
         llm.cancel()
 
-    target is run()'s: a command, or a function that serves (uvicorn.run).
+    target is run()'s: a command, or a function that serves (uvicorn.run),
+    called as target(*args, **params).
     port=8000 publishes one port, named "http"; ports={"api": 8000,
     "metrics": (9090, "TCP")} or [8000, 9090] several. The machine must
     publish them. A process that exits is run
@@ -613,7 +629,7 @@ def serve(target, *args, port=None, ports=None, retries=2, on=None, keep=False, 
     if _where is None:
         return _placed_call(on, {**_OPTIONS, **options}, keep,
                             lambda where, placed: serve(target, *args, port=port, ports=ports, retries=retries,
-                                                        stop_after=stop_after, _where=where, **placed),
+                                                        stop_after=stop_after, params=params, _where=where, **placed),
                             python=_pickled(target), ports=[p.port for p in service.ports])
     name = options.pop("name", None)
     opts = {**_OPTIONS, **_WHERE, **options, **_where}
@@ -621,7 +637,7 @@ def serve(target, *args, port=None, ports=None, retries=2, on=None, keep=False, 
         print(f"zenthros: serving {', '.join(f'{p.name}={p.port}' for p in service.ports)} with no secrets=; "
               "its URL may be public, so the service should check a key of its own", file=sys.stderr)
     if isinstance(target, (str, list, tuple)):
-        if args:
+        if args or params:
             raise errors.ValidationError("a command takes its arguments inside it: serve(['vllm', 'serve', 'm'])")
         argv = ["sh", "-c", target] if isinstance(target, str) else [str(part) for part in target]
         if not argv or not argv[-1]:
@@ -630,9 +646,9 @@ def serve(target, *args, port=None, ports=None, retries=2, on=None, keep=False, 
                        **opts)
     if not callable(target):
         raise errors.ValidationError(f"serve takes a function or a command, not {type(target).__name__}")
-    body = {"fn": target, "args": args, "kwargs": {}, "retries": 0, "retry_on": ()}
+    body = {"fn": target, "args": args, "kwargs": dict(params or {}), "retries": 0, "retry_on": ()}
     return _submit(CALL_KIND, name or _job_name(target), target, body=body, backoff=retries, service=service,
-                   upstream=(args, {}), **opts)
+                   upstream=(args, body["kwargs"]), **opts)
 
 
 def _service(port, ports):
@@ -674,8 +690,30 @@ def _service(port, ports):
 _OPTIONS = dict(cpu=None, memory=None, gpu=None, instance_type="", spot=None, image="",
                 python=None, code_dir=".", env=None, secrets=None, logs=None, timeout=None, after=(), resilient=True,
                 labels=None, requirements=None, packages=None, tools=(), keep_for=None)
-# Where a call runs, as its spec says it: only on= sets these (machines.place).
-_WHERE = dict(pool="", backend="", acquire=None, client=None)
+# Where a call runs, as its spec says it, and whether that machine has no
+# cloud role of its own (a container): only on= sets these (machines.place).
+_WHERE = dict(pool="", backend="", no_role=False, acquire=None, client=None)
+# run()'s options and their defaults, as @zenthros.cloud takes them: dry_run is a call's.
+_RUN_DEFAULTS = {p.name: p.default for p in inspect.signature(run).parameters.values()
+                 if p.kind is p.KEYWORD_ONLY and not p.name.startswith("_") and p.name != "dry_run"}
+RUN_OPTIONS = frozenset(_RUN_DEFAULTS)
+# What map and serve take of them.
+_MAP_TAKES = frozenset(_OPTIONS) | {"name", "retries", "retry_on", "upload"}
+_SERVE_TAKES = frozenset(_OPTIONS) | {"name", "on", "keep", "retries", "params"}
+
+
+def refuse_unknown(where, options, own="params="):
+    """Options that are not run()'s, refused where they were written: never
+    passed on to the function as its keyword arguments. own: where those go."""
+    unknown = sorted(set(options) - RUN_OPTIONS)
+    if unknown:
+        raise errors.ValidationError(f"{where}: {unknown} are not run()'s options ({', '.join(sorted(RUN_OPTIONS))}); "
+                                     f"the function's own keyword arguments go in {own}")
+
+
+def _or(value, default):
+    """value, or default where the call left it out (None)."""
+    return default if value is None else value
 
 
 def gather(*calls, return_exceptions=False):
@@ -733,7 +771,7 @@ def get(name):
     if not expected or hashlib.sha256(raw).hexdigest() != expected:
         raise RemoteError(f"{call_uri} is not the call job {name!r} was submitted with (its SHA-256 differs from "
                           f"the spec's {CALL_SHA256_ENV}); refusing to unpickle it", job=name)
-    envelope = pickle.loads(raw)
+    envelope = payload.load(raw)
     call = RemoteCall(name, call_uri.rsplit("/", 1)[0], JobHandle(name, client), client, store,
                       envelope.get("submitted_at", submitted), kind=envelope.get("kind", CALL_KIND),
                       count=envelope.get("count", 0), call_uri=call_uri)
@@ -877,7 +915,7 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
             memory, gpu, instance_type, spot, image, python, code_dir, env, secrets, timeout, after,
             resilient, labels, logs=None, requirements=None, packages=None, tools=(), acquire=None, keep_for=None,
             annotations=None, client=None, snapshot=False, note=None, deps=None, contracts=None, resume_from=None,
-            same=None):
+            same=None, no_role=False):
     if count > MAX_TASKS:
         raise errors.ValidationError(f"{name}: {count} tasks; one job runs at most {MAX_TASKS}: split the items "
                                      "into several maps")
@@ -924,7 +962,7 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
             code_notes = {code_snapshot.CODE_SHA256: stored_code["sha256"], code_snapshot.CODE_BASE: taken.commit,
                           code_snapshot.CODE_DIRTY: "true" if taken.dirty else "false"}
         pinned = {CALL_SHA256_ENV: stored_code["sha256"],
-                  RUNNER_PACKAGES_ENV: " ".join(p for p in runner_packages(prefix) if not p.startswith("cloudpickle"))}
+                  RUNNER_PACKAGES_ENV: " ".join(runner_packages(prefix, pickled=False))}
         command = [python or current.python, "-m", "zenthros.remote", "snapshot", stored_code["uri"], "--", *argv]
         # Only the SDK's core rides inline, for the runner to start.
         code = bundle.pack_code(None, ship_sdk=True) if current.ship_sdk else None
@@ -934,8 +972,16 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
         # unpacked where it runs, so they ride inline.
         code = base64.b64decode(same["inline"]) if same.get("inline") else \
             None if same else bundle.pack_code(code_dir, ship_sdk=False) if code_dir else None
+        if not same:
+            _say_left_out(name, code_dir)
     else:
         pickled = bundle.dumps(fn, body)
+        if not no_bucket and len(pickled) > uploads.KEEP_FROM:
+            # Its large arguments go apart, by their digest: sent once, not
+            # in each call, whose digest has its time.
+            kept = uploads.keep_arguments(body, lambda value: bundle.dumps(fn, value), root,
+                                          blob_store(root, current, client))
+            pickled = bundle.dumps(fn, kept)
         if len(pickled) > bundle.WARN_CALL_BYTES:
             print(f"zenthros: the call to {_fn_name(fn)} pickles to {len(pickled) >> 20} MiB; "
                   "pass large data by reference (an s3:// URI) instead", file=sys.stderr)
@@ -945,6 +991,7 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
             project = same.get("project") and _rehomed(same["project"], same, store, root)
         else:
             project = bundle.store_project(code_dir, store, root)
+            _say_left_out(_fn_name(fn), code_dir)
         if project:
             # So that cleaning the store keeps the code of a job still here.
             code_notes = {code_snapshot.CODE_SHA256: project["sha256"]}
@@ -957,7 +1004,7 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
             envelope["contracts"] = contracts
         if note is not None and note.mode:
             envelope["outs"] = True
-        stored = pickle.dumps(envelope, protocol=4)
+        stored = payload.dump(envelope)
         digest = hashlib.sha256(stored).hexdigest()
         # Named by its digest: a second run(name=...) refused for the taken
         # name leaves the live job's call as it was (SDK-6).
@@ -986,7 +1033,7 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
         # sealed to the machine, which the hub never sees.
         from zenthros import userstore
 
-        access_env, access_secrets = userstore.machine_access(current.store, backend, current.workspace)
+        access_env, access_secrets = userstore.machine_access(current.store, backend, current.workspace, no_role=no_role)
     # The core apart from the call's own files: the same on every call, a hub
     # keeps it by its digest (S.Code), and only the call's files travel.
     parts = S.Code(base=code) if code else None
@@ -994,7 +1041,11 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
         files = {**store.files, **({call_uri: stored} if call_uri else {})}
         if code and files:
             parts = S.Code(base=code, overlay=carried.pack(None, files, bundle.MAX_CODE_BYTES))
-        code = carried.pack(code, files, bundle.MAX_CODE_BYTES)
+            # The whole, for a client that takes it as one (local, the fake);
+            # a hub gets the core by its digest and the overlay inline.
+            code = carried.pack(code, files, None)
+        else:
+            code = carried.pack(code, files, bundle.MAX_CODE_BYTES)
     # The whole log, saved by the machine's agent (savedlogs); a local
     # call's stays whole on this computer.
     wanted = savedlogs.chosen(current.logs if logs is None else logs)
@@ -1014,7 +1065,10 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
         distribution=S.Distribution(mode="Independent", count=count) if count > 1 else None,
         service=service,
     )
-    annotations = {**(annotations or {}), **code_notes}
+    function = _fn_name(fn) if fn is not None else " ".join(argv or [])
+    if len(function) > FUNCTION_MAX:
+        function = function[:FUNCTION_MAX - 1] + "…"
+    annotations = {**(annotations or {}), **code_notes, FUNCTION: function}
     labels = dict(labels or {})
     if note is not None:
         from zenthros import cache as entries
@@ -1062,6 +1116,7 @@ def _submit(kind, name, fn, body=None, argv=None, count=0, backoff=0, upstream=(
     submitted = time.time()
     handle = client.submit(job)
     call = RemoteCall(name, prefix, handle, client, store, submitted, kind=kind, count=count, call_uri=call_uri)
+    call.function = function
     call.cache_note = note
     call.cache_key = note.key if note is not None else ""
     call.why = note.why if note is not None else ""
@@ -1170,9 +1225,13 @@ def _rerun(call, on, resume, upload, name, changes):
         body = pickle.loads(envelope["call"])
         same.update(project=envelope.get("code"), sys_path=envelope.get("sys_path"),
                     environment=envelope.get("environment"), contracts=envelope.get("contracts"))
-        started = run(body["fn"], *body["args"], on=place, name=new_name, upload=upload, python=command[0],
+        # Its arguments kept apart go as they are, renewed for the new job; to
+        # a place of another store, their values, kept again there or carried.
+        kept = (tuple(body["args"]), body["kwargs"])
+        args, kwargs = uploads.renewed(kept, fresh._store) if ours else uploads.opened(kept, fresh._store)
+        started = run(body["fn"], *args, on=place, name=new_name, upload=upload, python=command[0],
                       retries=body.get("retries", 0), retry_on=body.get("retry_on", ()), _same=same, _resume=ref,
-                      **options, **body["kwargs"])
+                      **options, **kwargs)
     started.why = why
     return started
 
@@ -1408,6 +1467,8 @@ class RemoteCall:
         self.handle = handle
         self.kind = kind
         self.count = count
+        # What it runs (FUNCTION), when this process submitted it.
+        self.function = ""
         self._client = client
         self._store = blob_store
         self.timings = {"submitted": submitted_at} if submitted_at else {}
@@ -1558,7 +1619,7 @@ class RemoteCall:
 
     def reports(self):
         """What the code published with zenthros.report, oldest first."""
-        return self.handle.reports()
+        return user_reports(self.handle.reports())
 
     def replace(self, new, timeout=600, poll_seconds=2.0, health=None, keep_failed=False):
         """Swap this Service for new (another serve(), already started):
@@ -1625,10 +1686,12 @@ class RemoteCall:
         map's list, a command's 0. Only a job that ended Succeeded returns;
         see RemoteError and errors.JobFailed for the rest. Ctrl-C while it
         waits cancels the job and releases the machine made for it, unless
-        cancel_on_interrupt=False leaves it running."""
+        cancel_on_interrupt=False leaves it running. timeout is run()'s kind:
+        seconds, or "30m"."""
         if self.service:
             raise TypeError(f"{self.name} is a Service: it runs until cancelled and has no result; "
                             "use .url(), .logs() and .cancel()")
+        timeout = seconds(timeout)
         if self._outcome is None:
             follower = progress = None
             # A log followed with logs(follow=True) was seen: this goes on
@@ -1905,7 +1968,7 @@ class RemoteCall:
             raise RemoteError(f"{self.name}: refusing to unpickle {', '.join(unvouched)}: {detail}; whoever "
                               "wrote it could run code here", job=self.name)
         self._verified = {uri: (wanted[uri], len(raws[uri])) for uri in raws}
-        return [self._record(pickle.loads(raws[uri])) if uri in raws else None for uri in uris]
+        return [self._record(payload.load(raws[uri])) if uri in raws else None for uri in uris]
 
     def _reported_digests(self, fresh=False):
         """(uri -> the SHA-256s the job's runners reported for it, every
@@ -1959,9 +2022,12 @@ class RemoteCall:
         return self._ended_reports
 
     def _record(self, record):
-        for key in ("started", "finished"):
+        # A map's records: its code ran from the first task's start to the last one's end.
+        for key, pick in (("started", min), ("finished", max)):
             if key in record.get("timings", {}):
-                self.timings.setdefault("remote_" + key, record["timings"][key])
+                seen = self.timings.get("remote_" + key)
+                value = record["timings"][key]
+                self.timings["remote_" + key] = value if seen is None else pick(seen, value)
         self.machine = self.machine or record.get("machine", {})
         if record.get("attempts") is not None:
             self.attempts = max(self.attempts or 0, record["attempts"])
@@ -1976,7 +2042,7 @@ class RemoteCall:
         except (errors.ZenthrosError, OSError):  # the log only adds to the message
             pass
         err = RemoteError(f"{self.name}: {detail}" + (f"\n--- last log lines ---\n{tail}" if tail else ""),
-                          job=self.name)
+                          job=self.name, reason=failure.reason)
         err.__cause__ = failure
         return err
 
@@ -2056,8 +2122,8 @@ def _why_not(status, error):
 def _platform(failure):
     """A job the platform failed (image, quota, admission, the machine lost
     past the limit), not the code: its reasons name no process failure."""
-    codes = [str(r.get("code") or "") for r in getattr(failure, "reasons", []) if isinstance(r, dict)]
-    return bool(codes) and PROCESS_FAILED not in codes
+    codes = {str(r.get("code") or "") for r in getattr(failure, "reasons", []) if isinstance(r, dict)}
+    return bool(codes) and not codes & PROCESS_FAILURES
 
 
 def user_reports(reports):
@@ -2193,25 +2259,38 @@ class CloudFunction:
     def local(self, *args, **kwargs):
         return self.fn(*args, **kwargs)
 
-    def submit(self, *args, on=None, params=None, keep=False, dry_run=False, **kwargs):
+    def _options(self, method, takes, kwargs):
+        """The decorator's options under the call's, as method takes them. One
+        of the decorator's that method cannot honor is refused by name, never
+        dropped: a map is not cached, a Service is not a call."""
+        refused = sorted(name for name, value in self.options.items()
+                         if name not in takes and value != _RUN_DEFAULTS[name])
+        if refused:
+            off = ", ".join(f"{name}={_RUN_DEFAULTS[name]!r}" for name in refused)
+            raise errors.ValidationError(f"{self.__name__}.{method}: the decorator's {refused} do not apply to {method}; "
+                                         f"{self.__name__}.with_options({off}).{method}(...)")
+        return {**{k: v for k, v in self.options.items() if k in takes}, **kwargs}
+
+    def submit(self, *args, on=None, params=None, keep=None, dry_run=False, **kwargs):
         """Start fn on Zenthros and return its RemoteCall at once. on= is
-        where: a machine (zenthros.create), its name, "local" for a container
-        made for this call, removed once its result is read unless
-        keep=True, or a template for a new machine (keep=True: a machine made
-        from it that stays). Without on=, configure(on=) or ZENTHROS_ON, else
-        this computer ("local"). params are fn's keyword arguments.
-        dry_run=True sends nothing and makes nothing: it returns where the
-        call would run (zenthros.targetlist.Plan), against what fn asks."""
+        where: a machine (zenthros.create), its name, a template for a new
+        machine (keep=True: a machine made from it that stays), or "local"
+        for a container made for this call. Without on=, the decorator's,
+        configure(on=) or ZENTHROS_ON, else this computer ("local"). params
+        are fn's keyword arguments, over the decorator's. dry_run=True sends
+        nothing and makes nothing: it returns where the call would run
+        (zenthros.targetlist.Plan), against what fn asks."""
         options = {**self.options, **kwargs}
-        options.pop("on", None)
-        options.pop("keep", None)
+        on = _or(on, options.pop("on", None))
+        keep = bool(_or(keep, options.pop("keep", False)))
+        params = {**(options.pop("params", None) or {}), **(params or {})} or None
         if dry_run:
             planned = {name: options.get(name, default) for name, default in _OPTIONS.items()}
             return _plan_of_call(self.fn, args, {**(params or {})}, on, planned, keep, options.get("cache", False),
                                  options.get("deps"), options.get("inputs"), options.get("outputs"))
         return run(self.fn, *args, on=on, params=params, keep=keep, **options)
 
-    def remote(self, *args, on=None, params=None, keep=False, dry_run=False, **kwargs):
+    def remote(self, *args, on=None, params=None, keep=None, dry_run=False, **kwargs):
         """fn on Zenthros, waited for: its value. See submit."""
         if dry_run:
             return self.submit(*args, on=on, params=params, keep=keep, dry_run=True, **kwargs)
@@ -2237,12 +2316,15 @@ class CloudFunction:
         order of items. dry_run=True: how many each would take, and where."""
         from zenthros.remote import spread
 
-        items, shared = list(items), dict(shared or {})
+        options = self._options("map", _MAP_TAKES | {"on", "params"}, kwargs)
+        on = _or(on, options.pop("on", None))
+        # The decorator's params are every task's keyword arguments, under shared.
+        items, shared = list(items), {**(options.pop("params", None) or {}), **(shared or {})}
         spread.check(items, shared)
-        options = {**self.options, **kwargs}
         if not isinstance(on, (list, tuple)):
             if dry_run:
                 return self._spread_plan(items, [on], options)
+            items, shared = _items_in_reach(items, shared, on, options)
             return _placed_call(on, options, False, lambda where, placed: map(self.fn, items, _shared=shared,
                                                                               _where=where, **placed),
                                 python=bundle.python_version())
@@ -2253,6 +2335,7 @@ class CloudFunction:
         if dry_run:
             return self._spread_plan(items, on, options)
         where = self._split(items, on)
+        upload = options.pop("upload", False)
         name, parts = options.pop("name", None) or _job_name(self.fn), []
         if not _LABEL_VALUE.fullmatch(name) or len(name) > 60:
             raise errors.ValidationError(f"map name={name!r}: lowercase letters, digits and '-', at most 60 "
@@ -2265,9 +2348,11 @@ class CloudFunction:
                     continue
                 tags = {MAP_INDICES: ",".join(str(i) for i in indices), MAP_ON: spread.name_of(destination),
                         MAP_SIZE: str(len(items))}
+                mine, shared_here = _items_in_reach([items[i] for i in indices], shared, destination,
+                                                    {**options, "upload": upload})
                 # _placed_call calls start at once, in this iteration.
                 call = _placed_call(destination, options, False, lambda where, placed: map(
-                    self.fn, [items[i] for i in indices], _shared=shared, _annotations=tags, name=f"{name}-{k}",  # noqa: B023
+                    self.fn, mine, _shared=shared_here, _annotations=tags, name=f"{name}-{k}",  # noqa: B023
                     _where=where, **placed), python=bundle.python_version())
                 parts.append((spread.name_of(destination), indices, call))
                 if call.runlog is not None:
@@ -2319,7 +2404,7 @@ class CloudFunction:
 
     def serve(self, *args, **kwargs):
         """Run fn as a Service; see zenthros.serve."""
-        return serve(self.fn, *args, **{**self.options, **kwargs})
+        return serve(self.fn, *args, **self._options("serve", _SERVE_TAKES, kwargs))
 
     def with_options(self, **overrides):
         """A copy with other options: train.with_options(cpu="16").remote(x)."""
@@ -2334,20 +2419,40 @@ def is_output(key):
     return not (CALL_OBJECT.fullmatch(key) or key == RESULT or _MAP_RESULT.fullmatch(key) or checkpoint.is_object(key))
 
 
-def runner_packages(store_uri):
-    """What the runner needs where it runs, for a call in store_uri:
-    cloudpickle at this process's version, and the store's client."""
-    try:
-        import cloudpickle
-
-        packages = [f"cloudpickle=={cloudpickle.__version__}"]
-    except ImportError:
-        packages = ["cloudpickle"]
+def runner_packages(store_uri, pickled=True):
+    """What the runner needs where it runs, for a call in store_uri: the
+    store's client and, for a call it unpickles, cloudpickle and zstd's
+    backport (payload) at this process's versions. Such a machine runs this
+    Python's minor, which cloudpickle needs: from 3.14 zstd is its own."""
+    packages = []
+    if pickled:
+        packages.append(_as_here("cloudpickle"))
+        if sys.version_info < (3, 14):
+            packages.append(_as_here("backports.zstd"))
     if str(store_uri).startswith("s3://"):
         packages.append("boto3")
     elif str(store_uri).startswith("gs://"):
         packages.append("google-cloud-storage")
     return packages
+
+
+def _say_left_out(who, code_dir):
+    """Once a process: the notebooks and data of code_dir a call leaves home."""
+    left = bundle.left_out_once(code_dir)
+    if left:
+        more = f" and {len(left) - LEFT_OUT_SHOWN} more" if len(left) > LEFT_OUT_SHOWN else ""
+        print(f"zenthros: {who}: left out of the code: {', '.join(left[:LEFT_OUT_SHOWN])}{more} "
+              "(notebooks and data; !NAME in .zenthrosignore sends one)", file=sys.stderr)
+
+
+def _as_here(package):
+    """package pinned to the version this process has, if it has it."""
+    from importlib import metadata
+
+    try:
+        return f"{package}=={metadata.version(package)}"
+    except metadata.PackageNotFoundError:
+        return package
 
 
 def _pickled(target):
@@ -2422,6 +2527,9 @@ def _placed_call(on, options, keep, start, python=None, ports=None, fresh=False)
     # start runs one destination: its call is a RemoteCall, named where
     # place() sent it.
     call.where = placed.name
+    # Its name, once: what zenthros jobs, logs and get() take (observaciones 16).
+    many = f" ×{call.count}" if call.kind == MAP_KIND else ""
+    print(f"zenthros: {call.function}{many} → {call.name} on {placed.name}", file=sys.stderr)
     if call.runlog is not None:
         call.runlog.note(on=placed.name, made=placed.made.name if placed.made else None)
     return call
@@ -2429,8 +2537,10 @@ def _placed_call(on, options, keep, start, python=None, ports=None, fresh=False)
 
 def cloud(fn=None, **options):
     """@zenthros.cloud(gpu=..., packages=[...]) marks fn as runnable on
-    Zenthros; see CloudFunction. Options are run()'s; where it runs is each
-    call's on=."""
+    Zenthros; see CloudFunction. Options are run()'s, the defaults of each
+    call: on= is where it runs unless the call says another. A name that is
+    not one of run()'s options is refused here, not passed to fn."""
+    refuse_unknown("cloud", options)
     if fn is not None:
         return CloudFunction(fn, options)
 

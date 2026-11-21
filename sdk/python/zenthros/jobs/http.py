@@ -34,7 +34,7 @@ from zenthros.jobs import spec as S
 from zenthros.jobs.client import JobClient, parse_report_body, require_job
 from zenthros.jobs.handle import JobHandle, status_from_object
 from zenthros.jobs.hubconn import Hub
-from zenthros.jobs.wire import HEADERS
+from zenthros.jobs.wire import HEADERS, RELEASE_HEADER
 from zenthros.logging import create_logger
 
 logger = create_logger("zenthros.jobs", user=True)
@@ -174,6 +174,8 @@ class HTTPJobClient(JobClient):
         self._token = token if callable(token) else (lambda: token)
         self.poll_seconds = poll_seconds
         self.timeout = timeout
+        # The hub's release, as its last answer said (Zenthros-Release).
+        self.hub_release = ""
         self._ssl = None
         if self.server.startswith("https://"):
             self._ssl = ssl.create_default_context(cadata=ca_data.decode() if isinstance(ca_data, bytes) else ca_data) \
@@ -252,6 +254,7 @@ class HTTPJobClient(JobClient):
     def _call(self, method, path, body=None, query=None, idempotent=None, timeout=None, lane="calls", gzip=False,
               accept=None):
         with self._open(method, self._url(path, query), body, timeout, idempotent, lane, gzip, accept) as resp:
+            self.hub_release = resp.getheader(RELEASE_HEADER) or self.hub_release
             # The network's errors are this client's to name, while the
             # answer is read as when it was asked.
             try:
@@ -302,15 +305,15 @@ class HTTPJobClient(JobClient):
                 # Sent twice, by its nonce, it is one job.
                 self._json("POST", "/jobs", manifest, idempotent=True)
                 break
-            except errors.Conflict:
+            except errors.Conflict as exc:
                 if attempt == 1:
-                    raise
+                    raise errors.name_taken(name) from exc
                 try:
                     mine = self._submitted(name, nonce)
-                except errors.TransientError as exc:
-                    raise _maybe_created(name, exc) from exc
+                except errors.TransientError as lost:
+                    raise _maybe_created(name, lost) from lost
                 if not mine:
-                    raise
+                    raise errors.name_taken(name) from exc
                 break
             except errors.TransientError as exc:
                 if attempt == SUBMIT_ATTEMPTS:
@@ -373,6 +376,13 @@ class HTTPJobClient(JobClient):
         """The backends the Workspace may use, as the Gateway describes them
         (the proto's JSON: unset fields are left out)."""
         return list(self._json("GET", "/backends").get("backends") or [])
+
+    def backends_with_offline(self):
+        """The backends the Workspace may use, those whose agent is not
+        connected now too (offline), and whether the answer says it holds
+        them: only such a list says a machine is gone."""
+        answer = self._json("GET", "/backends", query={"offline": "true"})
+        return list(answer.get("backends") or []), bool(answer.get("includesOffline"))
 
     def join_backend(self, name="", kind="", runtime="", python=""):
         """A one-use join (POST /backends): its backend ID and the two steps

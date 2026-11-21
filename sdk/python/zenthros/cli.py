@@ -106,6 +106,7 @@ def _select_arrows(label, options, index):
 
 def parser():
     p = argparse.ArgumentParser(prog="zenthros", description="Run your code on your machines.")
+    p.add_argument("--version", action="store_true", help="this SDK's version, and the hub's")
     sub = p.add_subparsers(dest="cmd", metavar="<command>")
 
     login = sub.add_parser("login", help="log in")
@@ -124,6 +125,8 @@ def parser():
     a.add_argument("--ssh", metavar="USER@HOST", help="run the lines over ssh")
     a.add_argument("--key", metavar="FILE", help="ssh key")
     a.add_argument("--no-test", dest="test", action="store_false", help="skip the test run")
+    a.add_argument("--cpus", type=float, help="This computer only: its CPUs (an existing one changes size in place)")
+    a.add_argument("--memory", metavar="SIZE", help="This computer only: its memory, as 6g or 6Gi")
 
     tg = sub.add_parser("targets", help="where you can run")
     tg.add_argument("--json", action="store_true")
@@ -175,7 +178,8 @@ def parser():
     c.add_argument("--json", action="store_true")
 
     cl = sub.add_parser("clean", help="this project's local containers; what you name besides")
-    cl.add_argument("--results", action="store_true", help="also what jobs past their keep_for left, but for their outputs")
+    cl.add_argument("--results", action="store_true", help="also what jobs past their keep_for left, but for their outputs, and "
+                                                         "what data/ holds for 30 days or more")
     cl.add_argument("--outputs", action="store_true", help="with --results, their outputs too")
     cl.add_argument("--envs", action="store_true", help="also the cached Python of images no container has")
     cl.add_argument("--images", action="store_true", help="also the images zenthros env build made here, and the builder and its cache")
@@ -200,6 +204,60 @@ def parser():
     u.add_argument("--port", type=int, default=0, help="default: any free one")
     u.add_argument("--no-open", dest="open", action="store_false", help="print the address, do not open a browser")
     return p
+
+
+JOB_COLUMNS = ("NAME", "STATE", "MACHINE", "CREATED", "FUNCTION")
+
+
+def _ago(stamp, now):
+    from zenthros.jobs.handle import seconds_at
+
+    at = seconds_at(stamp)
+    if at is None:
+        return ""
+    seconds = max(0, int(now - at))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit} ago"
+    return f"{seconds}s ago"
+
+
+def jobs_table(rows, now=None):
+    """zenthros jobs for a person (tools.jobs' rows): a column each, newest
+    first, a map spread over machines on a line of its own with its jobs
+    under it. "" for no rows."""
+    import time
+
+    now = time.time() if now is None else now
+
+    def state(row):
+        why = f"exit {row['exit_code']}" if row["exit_code"] not in (None, 0) else \
+            row["reason"] if row["state"] == "failed" and row["reason"] else ""
+        return f"{row['state']} ({why})" if why else row["state"]
+
+    def function(row, tasks):
+        return f"{row['function']} ×{tasks}" if tasks > 1 else row["function"]
+
+    def line(row, indent=""):
+        return (indent + row["job"], state(row), row["machine"], _ago(row["created"], now), function(row, row["tasks"]))
+
+    lines, shown = [], set()
+    for row in rows:
+        group = row.get("map")
+        if not group:
+            lines.append(line(row))
+        elif group not in shown:
+            shown.add(group)
+            parts = [part for part in rows if part.get("map") == group]
+            machines = len({part["machine"] for part in parts})
+            lines.append((group, "", f"{machines} machine{'s' if machines > 1 else ''}", _ago(row["created"], now),
+                          function(row, row["map_size"])))
+            lines += [line(part, "  ") for part in parts]
+    if not lines:
+        return ""
+    widths = [max(len(cell) for cell in column) for column in zip(JOB_COLUMNS, *lines)]
+    return "\n".join("  ".join(cell.ljust(width) for cell, width in zip(each, widths)).rstrip()
+                     for each in (JOB_COLUMNS, *lines))
 
 
 def _show(args, answer, text, out):
@@ -302,10 +360,33 @@ def _run_env(args, out):
             _show(args, entry, "", out)
 
 
+def _version(out):
+    """This SDK's version and wire, and with a hub set, what the hub runs."""
+    from importlib import metadata
+
+    from zenthros import config, signin
+    from zenthros.jobs.wire import WIRE
+
+    print(f"zenthros {metadata.version('zenthros')} (wire {WIRE})", file=out)
+    found = config.load_context()
+    server = (os.environ.get(config.SERVER_ENV, "") or found.get("server", "")).rstrip("/")
+    if not server:
+        return
+    try:
+        said = signin.hub_version(server, found.get("ca-data", ""))
+    except errors.ZenthrosError as err:
+        # 426 says what to install; no answer says so.
+        print(f"hub {server}: {err}", file=out)
+        return
+    print(f"hub {server}: {said['release']} (wire {said['wire']})", file=out)
+
+
 def run(args, out):
     import zenthros
 
-    if args.cmd == "login":
+    if args.version:
+        _version(out)
+    elif args.cmd == "login":
         if args.key:
             ws = zenthros.login(key=sys.stdin.readline().strip() if args.key == "-" else args.key)
         elif args.server or args.google:
@@ -318,7 +399,7 @@ def run(args, out):
         print("✓ Logged out", file=out)
     elif args.cmd == "attach":
         zenthros.attach(args.name, type=args.kind, runtime=args.runtime, host=args.ssh, key=args.key,
-                        wait=not args.print_only, test=args.test, out=out)
+                        wait=not args.print_only, test=args.test, out=out, cpus=args.cpus, memory=args.memory)
         if args.print_only:
             print("Then check with: zenthros targets", file=out)
     elif args.cmd == "targets":
@@ -327,6 +408,9 @@ def run(args, out):
 
             _show(args, tools.targets(), "", out)
         else:
+            from zenthros import machines
+
+            machines.sweep(out=sys.stderr)
             print(zenthros.targets(), file=out)
     elif args.cmd == "install":
         zenthros.install(args.name, requirements=args.requirements, packages=args.packages, out=out)
@@ -350,7 +434,9 @@ def run(args, out):
         print(f"✓ {args.name} detached", file=out)
         # No target has it: a join no machine used yet, so nothing runs there.
         kind = rows[args.name].type if args.name in rows else None
-        if kind in ("vm", "container"):
+        if args.name in rows and rows[args.name].kind == "Local":
+            print("Its container on this computer is removed, with the environments in it.", file=out)
+        elif kind in ("vm", "container"):
             print("Its agent stops. The machine itself is yours and keeps running.", file=out)
         elif kind == "k8s" and rows[args.name].detail.get("id"):
             release = f"zenthros-{rows[args.name].detail['id']}"
@@ -361,9 +447,7 @@ def run(args, out):
         from zenthros import tools
 
         answer = tools.jobs(limit=args.limit)
-        text = "\n".join(f"{row['job']}  {row['state']}" + (f"  exit {row['exit_code']}" if row["exit_code"] is not None else "")
-                         for row in answer["jobs"]) or "no jobs"
-        _show(args, answer, text, out)
+        _show(args, answer, jobs_table(answer["jobs"]) or "no jobs", out)
     elif args.cmd == "status":
         from zenthros import tools
 
@@ -467,10 +551,13 @@ def _skill(args, out):
 
     from zenthros import ui
 
-    path = Path(args.to) / "zenthros" / "SKILL.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(ui.skill_text())
-    print(f"✓ {path}: your agents can read how to use Zenthros (and zenthros mcp, if you add it)", file=out)
+    folder = Path(args.to) / "zenthros"
+    for name, text in ui.skill_files().items():
+        path = folder / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    print(f"✓ {folder / 'SKILL.md'} and its reference/: your agents can read how to use Zenthros "
+          "(and zenthros mcp, if you add it)", file=out)
 
 
 def _clean(args, out):

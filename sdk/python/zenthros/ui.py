@@ -6,7 +6,11 @@ and keeps nothing of its own.
 
 It listens on 127.0.0.1, and other programs of this computer and other sites a
 browser visits can reach that: so it answers only to its token, printed once, and
-only by this address's own names. What a job prints reaches the page as text.
+only by this address's own names, on any port (a terminal that opens the
+link may forward it to a port of its own: VS Code's Ctrl+click). What keeps
+a page of another site out, through a name of its own for this address
+(DNS rebinding), is the name and the token, not the port. What a job prints
+reaches the page as text.
 """
 
 import hmac
@@ -22,15 +26,28 @@ from zenthros import errors, tools
 
 ADDRESS = "127.0.0.1"
 TOKEN_HEADER = "X-Zenthros-Token"
+# The names of this computer a browser may ask by.
+HERE = frozenset({ADDRESS, "localhost"})
 
 
 def _data(name):
     return resources.files("zenthros").joinpath("_data", name).read_text(encoding="utf-8")
 
 
+def skill_files():
+    """What an agent reads to use Zenthros (zenthros agent skill): SKILL.md
+    and its reference/*.md, by their path under the skill's folder."""
+    root = resources.files("zenthros").joinpath("_data", "skill")
+    found = {"SKILL.md": root.joinpath("SKILL.md").read_text(encoding="utf-8")}
+    for item in root.joinpath("reference").iterdir():
+        if item.name.endswith(".md"):
+            found[f"reference/{item.name}"] = item.read_text(encoding="utf-8")
+    return found
+
+
 def skill_text():
-    """What an agent reads to use Zenthros (zenthros agent skill)."""
-    return _data("SKILL.md")
+    """The skill's SKILL.md."""
+    return skill_files()["SKILL.md"]
 
 
 def _number(query, name, default):
@@ -88,7 +105,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _allowed(self, query):
         owner = self.server.owner
         given = self.headers.get(TOKEN_HEADER) or query.get("token", [""])[0]
-        return self.headers.get("Host") in owner.hosts and hmac.compare_digest(given.encode(), owner.token.encode())
+        try:
+            name = urlsplit(f"//{self.headers.get('Host') or ''}").hostname
+        except ValueError:  # a Host that is no host[:port]
+            return False
+        return name in HERE and hmac.compare_digest(given.encode(), owner.token.encode())
 
     def _page(self):
         nonce = secrets.token_urlsafe(16)
@@ -131,7 +152,6 @@ class Server:
         self._http.daemon_threads = True
         self._http.owner = self
         self.port = self._http.server_address[1]
-        self.hosts = {f"{ADDRESS}:{self.port}", f"localhost:{self.port}"}
         self.url = f"http://{ADDRESS}:{self.port}/?token={self.token}"
         self._thread = threading.Thread(target=self._http.serve_forever, daemon=True)
         self._thread.start()

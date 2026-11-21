@@ -65,6 +65,13 @@ def python_version():
     return "%d.%d" % sys.version_info[:2]
 
 
+def same_minor(there):
+    """What to do about a call pickled by another minor than `there`'s, where
+    it runs (cloudpickle unpickles with the minor it was pickled by): a
+    template refused before it is made, and a machine that finds it after."""
+    return f"run this from Python {there} (a venv: uv venv --python {there}), or run a command"
+
+
 @functools.cache
 def _owners():
     """Top-level module -> its distributions, read once per process: a
@@ -198,20 +205,28 @@ def _ignore_rules(folder, here):
 
 
 def _ignored(relative, is_dir, rules):
-    """The last rule that matches relative decides."""
-    ignored = False
-    for pattern, negated, directory_only, anchored, here in rules:
+    """The rule that leaves relative out, or None: the last rule that
+    matches it decides."""
+    deciding = None
+    for rule in rules:
+        pattern, negated, directory_only, anchored, here = rule
         if (directory_only and not is_dir) or not relative.startswith(here):
             continue
         inside = relative[len(here):]
         if fnmatch.fnmatchcase(inside if anchored else inside.rsplit("/", 1)[-1], pattern):
-            ignored = not negated
-    return ignored
+            deciding = None if negated else rule
+    return deciding
 
 
-def _project_files(root):
-    """{path in the bundle: file} for the files under root that travel."""
-    rules = [(pattern, False, False, False, "") for pattern in ignore.CREDENTIALS]
+# Rules every project starts with; an ignore file's "!" takes one back.
+_CREDENTIAL_RULES = [(pattern, False, False, False, "") for pattern in ignore.CREDENTIALS]
+_NOT_CODE_RULES = [(pattern, False, False, False, "") for pattern in ignore.NOT_CODE]
+
+
+def _project_files(root, left_out=None):
+    """{path in the bundle: file} for the files under root that travel.
+    left_out, a list, gets the notebooks and data the defaults kept home."""
+    rules = [*_CREDENTIAL_RULES, *_NOT_CODE_RULES]
     found = {}
     for current, dirs, names in os.walk(root):
         here = os.path.relpath(current, root).replace(os.sep, "/")
@@ -224,7 +239,12 @@ def _project_files(root):
             and (d not in DATA_DIRS or os.path.isfile(os.path.join(current, d, "__init__.py"))))
         for filename in sorted(names):
             path = os.path.join(current, filename)
-            if filename.startswith(".") or not os.path.isfile(path) or _ignored(here + filename, False, rules):
+            if filename.startswith(".") or not os.path.isfile(path):
+                continue
+            rule = _ignored(here + filename, False, rules)
+            if rule:
+                if left_out is not None and rule in _NOT_CODE_RULES:
+                    left_out.append(here + filename)
                 continue
             if os.path.islink(path) and not os.path.realpath(path).startswith(os.path.realpath(root) + os.sep):
                 continue  # a link out of the project is not the project's
@@ -269,6 +289,21 @@ def sdk_files():
 def project_files(root):
     """{path in the bundle: file} for root's files that travel; {} without root."""
     return _project_files(os.path.abspath(root)) if root else {}
+
+
+def left_out_once(root):
+    """The notebooks and data under root a call leaves out of its code, the
+    first time this process asks about root; [] after, and without root."""
+    if not root or os.path.abspath(root) in _TOLD:
+        return []
+    _TOLD.add(os.path.abspath(root))
+    left_out = []
+    _project_files(os.path.abspath(root), left_out)
+    return left_out
+
+
+# The roots whose left-out files this process already said.
+_TOLD = set()
 
 
 def pack_code(root=None, ship_sdk=True, limit=MAX_CODE_BYTES):

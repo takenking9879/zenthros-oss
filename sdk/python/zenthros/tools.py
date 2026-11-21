@@ -24,6 +24,7 @@ from zenthros.pipeline import PIPELINE_LABEL, STEP_LABEL
 from zenthros.remote import call as remote_call
 from zenthros.remote import snapshot as code_snapshot
 from zenthros.remote.options import blob_store, job_client, local_client, local_client_of, settings
+from zenthros.view import Backend
 
 # An agent's run ends even if the agent forgets it, and its record lasts while
 # it works on what the run said.
@@ -234,12 +235,18 @@ def jobs(limit=DEFAULT_LIMIT, cursor=0):
     clients = [job_client()]
     if local_client() is not clients[0]:
         clients.append(local_client())
-    found, unreachable = [], []
+    found, unreachable, machine_of = [], [], {}
     for client in clients:
         try:
-            found += client.list_jobs()
+            listed = client.list_jobs()
+            names = _machine_names(client)
         except errors.ZenthrosError as err:
             unreachable.append(f"{client.transport}: {err}")
+            continue
+        found += listed
+        for obj in listed:
+            backend = ((obj.get("status") or {}).get("lease") or {}).get("backendID") or ""
+            machine_of[id(obj)] = names.get(backend, backend) if names is not None else client.place_name
     found.sort(key=lambda obj: str((obj.get("metadata") or {}).get("creationTimestamp") or ""), reverse=True)
     if any(cache.PARTS_ANNOTATION in ((obj.get("metadata") or {}).get("annotations") or {}) for obj in found):
         # A job sent with cache= and read by nobody enters when it is seen.
@@ -247,12 +254,28 @@ def jobs(limit=DEFAULT_LIMIT, cursor=0):
     rows = []
     for obj in found[cursor:cursor + limit]:
         read = status_from_object(obj)
-        labels = (obj.get("metadata") or {}).get("labels") or {}
-        rows.append({"job": (obj.get("metadata") or {}).get("name"), "state": _state(read.phase), "exit_code": read.exit_code,
-                     "reason": read.reason, "created": (obj.get("metadata") or {}).get("creationTimestamp"),
+        meta = obj.get("metadata") or {}
+        labels, notes = meta.get("labels") or {}, meta.get("annotations") or {}
+        template = ((obj.get("spec") or {}).get("workload") or {}).get("template") or {}
+        rows.append({"job": meta.get("name"), "state": _state(read.phase), "exit_code": read.exit_code,
+                     "reason": read.reason, "created": meta.get("creationTimestamp"), "machine": machine_of[id(obj)],
+                     "function": notes.get(remote_call.FUNCTION, ""),
+                     "tasks": int((template.get("distribution") or {}).get("count") or 1),
+                     **({"map": labels[remote_call.MAP_GROUP], "map_size": int(notes.get(remote_call.MAP_SIZE) or 0)}
+                        if labels.get(remote_call.MAP_GROUP) else {}),
                      **({"pipeline": labels[PIPELINE_LABEL], "step": labels.get(STEP_LABEL, "")} if labels.get(PIPELINE_LABEL) else {})})
     answer = {"jobs": rows, "total": len(found), "next_cursor": cursor + limit if cursor + limit < len(found) else None}
     return {**answer, "unreachable": unreachable} if unreachable else answer
+
+
+def _machine_names(client):
+    """Each machine's name by its backend ID, from one read of the
+    Workspace's backends, the stopped ones too (a job's machine may be off
+    now); None for a client that runs on one place of its own (on="local")."""
+    if client.transport == "local":
+        return None
+    listed, _ = client.backends_with_offline()
+    return {b.id: b.name or b.id for b in (Backend.from_api(info) for info in listed)}
 
 
 def logs(name, tail=DEFAULT_TAIL, grep=None, limit=DEFAULT_LIMIT, cursor=0):

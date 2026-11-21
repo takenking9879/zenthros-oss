@@ -42,6 +42,7 @@ from zenthros.jobs.handle import (
     CANCELLED,
     FAILED,
     PENDING,
+    PROCESS_FAILURES,
     SUCCEEDED,
     TERMINAL_PHASES,
     JobHandle,
@@ -61,6 +62,10 @@ CONFIG_LABEL = "zenthros.ai/local-config"
 MOUNTS_LABEL = "zenthros.ai/local-mounts"
 AGENT_PATH = "/usr/local/bin/zenthros-agent"
 STATE_DIR = "/tmp/zenthros"
+# The agent's socket: off the state's mount (a unix socket on a mount of
+# macOS's engine may not be made).
+LOCAL_SOCKET_ENV = "ZENTHROS_LOCAL_SOCKET"
+LOCAL_SOCKET = "/tmp/zenthros-socket/agent.sock"
 HOME_DIR = "/home/zenthros"
 # Where Python keeps the code it compiled, kept with HOME: an image's own
 # Python (python:3.x) ships none, and the job's user cannot write beside it,
@@ -68,7 +73,8 @@ HOME_DIR = "/home/zenthros"
 PYCACHE_DIR = f"{HOME_DIR}/.cache/pycache"
 ENDPOINT_TEMPLATE = "ZENTHROS_ENDPOINT_TEMPLATE={scheme}://127.0.0.1:{port};scope=Private"
 AGENT_READY_SECONDS = 60
-_OUT_OF_MEMORY = "it ran out of the container's memory, or something killed it: raise memory= (zenthros.configure(local_memory=...))"
+# Where the memory the agent says a job ran out of is set, here.
+_LOCAL_MEMORY = "\nHere the container's memory is zenthros.configure(local_memory=...)."
 # What the store holds that is no job's: code by digest, and later the cache
 # and uploaded data.
 _NOT_JOBS = {"code", "cache", "data"}
@@ -283,7 +289,6 @@ class LocalJobClient(JobClient):
     poll_seconds = 0.5
     # A process that failed is sent again from here; a cluster retries its own.
     reruns_here = True
-    out_of_memory = _OUT_OF_MEMORY
 
     def __init__(self, root=None, engine=None):
         self.project = project_root(root)
@@ -394,13 +399,13 @@ class LocalJobClient(JobClient):
     def _inspect(self, name):
         code, out, err = self.engine.run(
             ["inspect", "--format", '{{.State.Status}}|{{index .Config.Labels "' + CONFIG_LABEL +
-             '"}}|{{index .Config.Labels "' + MOUNTS_LABEL + '"}}|{{.State.OOMKilled}}', name], timeout=60)
+             '"}}|{{index .Config.Labels "' + MOUNTS_LABEL + '"}}', name], timeout=60)
         if code != 0:
             if "No such" in err or "no such" in err:
                 return None
             raise errors.TransientError(f"{self.engine.name} inspect {name}: {err.strip()}")
-        state, config, mounts, oom = (out.strip().split("|") + ["", "", ""])[:4]
-        return {"state": state, "config": config, "mounts": _decode_mounts(mounts), "oom": oom == "true"}
+        state, config, mounts = (out.strip().split("|") + ["", ""])[:3]
+        return {"state": state, "config": config, "mounts": _decode_mounts(mounts)}
 
     def _running_jobs(self, container=None):
         """The names of this project's jobs in a container and not finished,
@@ -479,20 +484,27 @@ class LocalJobClient(JobClient):
             raise errors.TransientError(f"{self.engine.name} start {name}: {err.strip()}")
 
     def _create(self, name, box, mounts):
+        """The container, gone once it exits (--rm): what it keeps for the
+        next one (HOME with its environments, the agent's state: spool,
+        checkpoints, logs) is mounted from this computer."""
         agent = self._agent_binary(box.image)
         home = cache_root() / "home" / hashlib.sha256(box.image.encode()).hexdigest()[:12]
         home.mkdir(parents=True, exist_ok=True)
+        state = cache_root() / "state" / name
+        state.mkdir(parents=True, exist_ok=True)
         store = self.root / "store"
         store.mkdir(parents=True, exist_ok=True)
-        args = ["run", "-d", "--name", name, *self.engine.user_flags,
+        args = ["run", "-d", "--rm", "--name", name, *self.engine.user_flags,
                 "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                 "--label", f"{LOCAL_LABEL}={self.id}", "--label", f"{CONFIG_LABEL}={box.config()}",
                 "--label", f"{MOUNTS_LABEL}={_encode_mounts(mounts)}",
                 "-e", "ZENTHROS_LOCAL=1", "-e", "ZENTHROS_AGENT_MODE=container",
-                "-e", f"ZENTHROS_STATE_DIR={STATE_DIR}", "-e", f"ZENTHROS_CONTAINER_IMAGE={box.image}",
+                "-e", f"ZENTHROS_STATE_DIR={STATE_DIR}", "-e", f"{LOCAL_SOCKET_ENV}={LOCAL_SOCKET}",
+                "-e", f"ZENTHROS_CONTAINER_IMAGE={box.image}",
                 "-e", f"HOME={HOME_DIR}", "-e", "PYTHONUNBUFFERED=1", "-e", f"PYTHONPYCACHEPREFIX={PYCACHE_DIR}",
                 "-e", f"ZENTHROS_LOCAL_IDLE_EXIT={os.environ.get(IDLE_ENV, '30m')}",
-                "-v", f"{agent}:{AGENT_PATH}:ro", "-v", f"{home}:{HOME_DIR}", "-v", f"{self.root}:{self.root}"]
+                "-v", f"{agent}:{AGENT_PATH}:ro", "-v", f"{home}:{HOME_DIR}", "-v", f"{state}:{STATE_DIR}",
+                "-v", f"{self.root}:{self.root}"]
         if box.output:
             os.makedirs(box.output, exist_ok=True)
             args += ["-v", f"{box.output}:{box.output}"]
@@ -643,7 +655,7 @@ class LocalJobClient(JobClient):
     def submit(self, job):
         job = require_job(job)
         if self.knows(job.name):
-            raise errors.Conflict(f"job {job.name} already exists here: name another, or zenthros.get({job.name!r})")
+            raise errors.name_taken(job.name)
         self._collect_old()
         manifest = job.to_manifest()
         manifest["metadata"]["uid"] = str(uuid.uuid4())
@@ -852,13 +864,8 @@ class LocalJobClient(JobClient):
             code, out, err = self._exec(record["container"], "status", stdin=json.dumps(record["local"]), timeout=60)
             if code != 0:
                 if self._gone(record["container"]):
-                    # The kernel may take the agent itself for a job's memory:
-                    # the job is still what ran the container out of it.
-                    found = self._inspect(record["container"])
-                    if found and found["oom"]:
-                        self._end(name, FAILED, "OOM_KILLED", self.out_of_memory)
-                    else:
-                        self._end(name, FAILED, "WORKER_LOST", "the local container went away: run it again")
+                    # Run with --rm, it left nothing to say why.
+                    self._end(name, FAILED, "WORKER_LOST", "the local container went away: run it again")
                     return self._read(name)
                 raise errors.TransientError(f"job {name}: {err.strip()}")
             status = json.loads(out)
@@ -934,7 +941,7 @@ class LocalJobClient(JobClient):
         """The job ended: what the agent holds of it comes here, for the
         agent to let it go. Its record outlives the container."""
         if status.get("phase") == FAILED:
-            status = _explained(status, record["container"], self)
+            status = _explained(status, self)
         status.setdefault("completionTime", _now())
 
         def kept():
@@ -1099,11 +1106,14 @@ class LocalJobClient(JobClient):
     def clean_results(self, dry_run=False, outputs=False):
         """Removes from the store what jobs whose record is gone (past keep_for)
         leave besides their outputs; outputs=True, those too. What a good cache
-        entry pins stays; a forged one protects nothing. Returns the jobs that
-        lost something."""
+        entry pins stays; a forged one protects nothing. data/ (arguments kept
+        apart, upload=) loses what it holds for LIFECYCLE_DAYS or more, as a
+        bucket's rule takes it. Returns the jobs that lost something, and
+        "data" when it did."""
         from zenthros import cache as entries
         from zenthros.core.storage import FileBlobStore
         from zenthros.remote.call import is_output
+        from zenthros.upload import LIFECYCLE_DAYS
 
         store = self.store_dir
         removed = []
@@ -1126,6 +1136,13 @@ class LocalJobClient(JobClient):
                     path.rmdir()
             if not any(folder.iterdir()):
                 folder.rmdir()
+        data = store / "data"
+        cutoff = time.time() - LIFECYCLE_DAYS * 86400
+        old = [path for path in data.iterdir() if path.is_file() and path.stat().st_mtime < cutoff] if data.is_dir() else []
+        if old:
+            removed.append("data")
+            for path in [] if dry_run else old:
+                path.unlink()
         return removed
 
     def clean_envs(self, dry_run=False):
@@ -1165,7 +1182,7 @@ def _process_failed(status):
     """A failure of the process, not of what it ran in (processFailed in the
     controller): only that is run again."""
     return status.get("phase") == FAILED and any(
-        (reason or {}).get("code") in ("PROCESS_FAILED", "SERVICE_ENDED") for reason in status.get("reasons") or [])
+        (reason or {}).get("code") in PROCESS_FAILURES for reason in status.get("reasons") or [])
 
 
 def _encode_mounts(mounts):
@@ -1211,23 +1228,15 @@ def _offline_hint(text):
     return ""
 
 
-def _explained(status, container, client):
-    """A job the container's memory limit killed says so: the agent sees a
-    signal, the engine knows why."""
+def _explained(status, client):
+    """What the agent said of a failed job, with how to act on it here. The
+    agent alone says whether the job ran out of memory, and how sure it is
+    (its container's count of kills for memory, before and after): a SIGKILL
+    is no memory by itself, and the engine's flag counts the container's
+    whole life. Here is only where this machine's memory is set."""
     message = status.get("message", "")
-    if "SIGKILL" in message or "signal killed" in message or status.get("exitCode") == 137:
-        status = {**status, "reason": "OOM_KILLED", "message": client.out_of_memory,
-                  "reasons": [{"code": "OOM_KILLED", "detail": message}]}
-    elif client.pull_hint(message):
-        status = {**status, "message": f"{message}{client.pull_hint(message)}"}
-    else:
-        # What the kernel killed may be a child the job only saw fail. The
-        # engine's flag lasts as long as the container: it says may.
-        found = client._inspect(container)
-        if found and found["oom"]:
-            status = {**status, "message": f"{message}\nThis container has run out of memory, which may be why: raise "
-                                           "memory= (zenthros.configure(local_memory=...))"}
-    return status
+    hint = client.pull_hint(message) or (_LOCAL_MEMORY if "ran out of memory" in message else "")
+    return {**status, "message": message + hint} if hint else status
 
 
 def _noting(proc, lines):

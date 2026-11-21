@@ -126,8 +126,8 @@ class CodeAbsent(NotFound):
 
 class JobNotFound(NotFound):
     """The job does not exist: never created, deleted, or collected after
-    its TTL (1 h by default). Not a TransientError: waiting does not bring
-    it back."""
+    it was kept (a call's keep_for=, 7 days by default). Not a
+    TransientError: waiting does not bring it back."""
 
 
 class WorkspaceForbidden(ZenthrosError, PermissionError):
@@ -208,6 +208,12 @@ def login_expired(message):
     return LoginRequired(f"{message}: the token expired or was revoked. "
                          "zenthros.login() starts a new session; an API key is renewed by an admin "
                          "with `zctl user token`")
+
+
+def name_taken(name):
+    """Conflict for a job whose name another job holds, on a hub or on this
+    computer: a script rerun with the same name= after a failed run."""
+    return Conflict(f"job {name} already exists here: name another, or zenthros.get({name!r})")
 
 
 def login_needed(message):

@@ -88,10 +88,11 @@ func (r Recorded) State() backend.JobState {
 	if r.Code == "killed" || r.Code == "dumped" {
 		detail = fmt.Sprintf("process %s by signal %s (result=%s)", r.Code, r.Status, r.Result)
 	}
+	detail = resultDetail(r.Result, detail)
 	return backend.JobState{
 		Phase:    v1.PhaseFailed,
 		Message:  detail,
-		Reasons:  []v1.Reason{{Code: v1.ReasonProcessFailed, Detail: detail}},
+		Reasons:  []v1.Reason{{Code: ReasonOf(r.Result), Detail: detail}},
 		ExitCode: exitCode,
 	}
 }

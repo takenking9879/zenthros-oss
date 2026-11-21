@@ -121,7 +121,7 @@ class ImageTest(Env):
         lb = local.LocalBackend(SimpleNamespace(workspace="risk"), "ct-1", "zenthros-mi-pc", created=True)
         with self.assertRaises(errors.ValidationError):
             machines.place(lb, {"image": "img:1"})
-        self.assertEqual(machines.place(lb, {}).options, {"backend": "ct-1"})
+        self.assertEqual(machines.place(lb, {}).options, {"backend": "ct-1", "no_role": True})
 
 
 class NameTest(Env):
@@ -132,6 +132,26 @@ class NameTest(Env):
         with self.assertRaises(errors.ValidationError) as caught:
             machines.place("aws-spot", {})
         self.assertIn("is a machine and a template", str(caught.exception))
+
+    def test_a_machine_whose_agent_is_away_is_said_so_not_unknown(self):
+        # A call right after an update met the VM's agent restarting: "nothing
+        # called that; it has [..., 'taxi-vm']" (wave 7). A VM off or a This
+        # computer stopped reads the same way.
+        self.listed = [[{**vm("taxi-vm", "vm-1"), "offline": True}]]
+        self.api.routes[("GET", "/v1/workspaces/risk/machines")] = (200, {"templates": [], "machines": []})
+        self.api.routes[("GET", "/v1/workspaces/risk/pools")] = (200, {"pools": []})
+        with self.assertRaises(errors.ValidationError) as caught:
+            machines.place("taxi-vm", {})
+        said = str(caught.exception)
+        self.assertIn("taxi-vm's agent is not connected now", said)
+        self.assertNotIn("nothing called that", said)
+        from zenthros import targetlist
+
+        # The hub's targets list only connected machines (observaciones 27).
+        self.api.routes[("GET", "/v1/workspaces/risk/targets")] = (200, {"targets": [], "can": {}})
+        with self.assertRaises(errors.ValidationError) as planned:
+            targetlist.plan_call("taxi-vm", {})
+        self.assertEqual(str(planned.exception), said, "a dry run says the same")
 
 
 if __name__ == "__main__":

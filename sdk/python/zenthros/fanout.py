@@ -194,7 +194,10 @@ def map(fn, items, name=None, blob_store=None, env=None):  # noqa: A001 - zenthr
     items = list(items)
     if not items:
         raise errors.ValidationError("map needs at least one item")
-    encoded = json.dumps(items, sort_keys=True).encode("utf-8")
+    try:
+        encoded = json.dumps(items, sort_keys=True).encode("utf-8")
+    except TypeError as err:
+        raise errors.ValidationError(f"inside a job, map's items travel as JSON: {err}") from None
     target = list(fn) if isinstance(fn, (list, tuple)) else _fn_ref(fn)
     if name is None:
         digest = hashlib.sha256(json.dumps(target).encode("utf-8") + b"\0" + encoded).hexdigest()[:10]

@@ -9,7 +9,11 @@ was. result(cancel_on_interrupt=False) leaves the job running and says how
 to come back to it. A map over several destinations cancels all its jobs."""
 import contextlib
 import io
+import signal
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
 from zenthros.remote.call import RemoteCall
 from zenthros.remote.spread import MapCalls
@@ -80,6 +84,21 @@ class InterruptTest(unittest.TestCase):
             calls.result(stream_logs=False)
         self.assertEqual([c.handle.cancelled for c in calls.calls], [1, 1])
         self.assertEqual([c.released for c in calls.calls], [1, 1])
+
+
+E2E = Path(__file__).resolve().parent / "e2e"
+
+
+@unittest.skipUnless((E2E / "ctrl_c.py").is_file(), "no E2E here (the public tree)")
+class TheE2ECtrlCTest(unittest.TestCase):
+    def test_it_arrives_in_a_process_started_with_sigint_ignored(self):
+        # The full suite of 2026-11-21 ran from `( ... & )`: SIGINT ignored,
+        # and test_serve_flow's Ctrl-C never stopped its 600 s wait.
+        code = (f"import sys, time; sys.path.insert(0, {str(E2E)!r}); from ctrl_c import ctrl_c_in; "
+                "ctrl_c_in(0.2); time.sleep(30)")
+        done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=10,
+                              preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
+        self.assertIn("KeyboardInterrupt", done.stderr)
 
 
 if __name__ == "__main__":

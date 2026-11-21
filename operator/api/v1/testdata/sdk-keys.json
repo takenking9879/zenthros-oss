@@ -17,6 +17,7 @@
     {"key": "zenthros.ai/agent-target", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.agents.TARGET"},
     {"key": "zenthros.ai/machine-backend", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "k8s backend", "go": "LabelMachineBackend", "sdk": "zenthros.machines.POD_LABEL"},
     {"key": "zenthros.ai/submission", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.jobs.http.SUBMISSION"},
+    {"key": "zenthros.ai/function", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.remote.call.FUNCTION"},
     {"key": "zenthros.ai/remote", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "people", "go": null, "sdk": "zenthros.remote.call.REMOTE_LABEL"},
     {"key": "zenthros.ai/map", "on": "ZenthrosJob label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.remote.call.MAP_GROUP"},
     {"key": "zenthros.ai/map-indices", "on": "ZenthrosJob annotation", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.remote.call.MAP_INDICES"},
@@ -28,6 +29,7 @@
     {"key": "zenthros.ai/local-mounts", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.jobs.local.MOUNTS_LABEL"},
     {"key": "zenthros.ai/workspace", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": "LabelWorkspace", "sdk": "zenthros.local.WORKSPACE_LABEL"},
     {"key": "zenthros.ai/name", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.local.NAME_LABEL"},
+    {"key": "zenthros.ai/hub", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.local.HUB_LABEL"},
     {"key": "zenthros.ai/ports", "on": "docker container label", "set_by": "sdk", "read_by": "sdk", "go": null, "sdk": "zenthros.local.PORTS_LABEL"}
   ]
 }

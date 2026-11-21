@@ -41,7 +41,7 @@ func MapState(props map[string]string) backend.JobState {
 		state.Phase = v1.PhaseRunning
 	case "failed":
 		state.Phase = v1.PhaseFailed
-		state.Reasons = []v1.Reason{{Code: v1.ReasonProcessFailed, Detail: failureDetail(props)}}
+		state.Reasons = []v1.Reason{{Code: ReasonOf(props["Result"]), Detail: failureDetail(props)}}
 		state.Message = failureDetail(props)
 		if props["Result"] == "exit-code" {
 			state.ExitCode = Recorded{Code: "exited", Status: props["ExecMainStatus"]}.exitCode()
@@ -75,13 +75,38 @@ func UnitMissing(props map[string]string) bool {
 	return props["LoadState"] == "not-found"
 }
 
+// resultOOMKill is systemd's Result for a unit a process of which the kernel
+// killed for memory. The unit is the job's own cgroup: the evidence is the
+// job's.
+const resultOOMKill = "oom-kill"
+
+// ReasonOf is a failed unit's reason by its Result: OOM_KILLED when the
+// kernel killed it for memory, else PROCESS_FAILED.
+func ReasonOf(result string) string {
+	if result == resultOOMKill {
+		return v1.ReasonOOMKilled
+	}
+	return v1.ReasonProcessFailed
+}
+
 // failureDetail summarizes why a unit failed, from systemd's own fields.
 func failureDetail(props map[string]string) string {
-	result := props["Result"]
-	if result == "" {
-		result = "unknown"
+	return resultDetail(props["Result"], fmt.Sprintf("process failed (result=%s, exitCode=%s)", orUnknown(props["Result"]), props["ExecMainStatus"]))
+}
+
+// resultDetail is detail, and for a unit killed for memory what to do.
+func resultDetail(result, detail string) string {
+	if result == resultOOMKill {
+		return "it ran out of memory: the kernel killed it (" + detail + "); " + v1.OutOfMemoryAdvice
 	}
-	return fmt.Sprintf("process failed (result=%s, exitCode=%s)", result, props["ExecMainStatus"])
+	return detail
+}
+
+func orUnknown(result string) string {
+	if result == "" {
+		return "unknown"
+	}
+	return result
 }
 
 // systemdTime parses a systemd timestamp, returning nil for empty or "n/a" values.

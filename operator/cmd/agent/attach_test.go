@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -419,5 +420,117 @@ func TestAttachTakesTheJoinFlagsAndHidesThem(t *testing.T) {
 	}
 	if got := environHoldsPID(supervisorPID(t, state), handoffMarker); got != "clean" {
 		t.Errorf("the supervisor's environ %s", got)
+	}
+}
+
+// A container restarted runs its own command, not the agent. Its command
+// runs `attach --resume`, which attaches again as the last attach did,
+// with the certificate it got: none of the join's secrets is kept for it,
+// and the token, spent, is not needed (observaciones, 2026-11-20: This
+// computer stayed down after Docker restarted).
+func TestAttachResumesAfterTheContainerRestarts(t *testing.T) {
+	if _, err := os.Stat("/proc/self/cmdline"); err != nil {
+		t.Skip("no /proc")
+	}
+	state := t.TempDir()
+	stopAttach(t, state)
+	var base []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "ZENTHROS_") {
+			base = append(base, kv)
+		}
+	}
+	env := append(append([]string(nil), base...), "ZENTHROS_TEST_ATTACH=run", "ZENTHROS_STATE_DIR="+state,
+		envAttachRestartDelay+"=50ms")
+	if out, err := attachCmd(env, "--controller", "gw.example:9443", "--token", "token-"+handoffMarker,
+		"--backend-id", "ct-0a1b2c3d", "--image", "zenthros-python:3.13"); err != nil {
+		t.Fatalf("attach: %v\n%s\n%s", err, out, readAttachLog(state))
+	}
+	saved, err := os.ReadFile(filepath.Join(state, attachSavedName))
+	if err != nil {
+		t.Fatalf("attach kept nothing to resume: %v", err)
+	}
+	if strings.Contains(string(saved), handoffMarker) {
+		t.Fatalf("%s holds a secret of the join:\n%s", attachSavedName, saved)
+	}
+	if info, _ := os.Stat(filepath.Join(state, attachSavedName)); info.Mode().Perm() != 0o600 {
+		t.Errorf("%s is %v, want 0600", attachSavedName, info.Mode().Perm())
+	}
+	// The container stops: its processes go, the state directory stays.
+	pid := supervisorPID(t, state)
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	waitFor(t, "the supervisor gone", 5*time.Second, func() bool { return !alive(pid) }, func() string { return "" })
+	// The container's command, with the container's own environment (and
+	// what makes this test binary main's attach).
+	restarted := append(append([]string(nil), base...), "ZENTHROS_STATE_DIR="+state, "ZENTHROS_TEST_ATTACH=run")
+	out, err := attachCmd(restarted, "--resume")
+	if err != nil || !strings.Contains(out, "attached as backend") {
+		t.Fatalf("attach --resume: %v\n%s\n%s", err, out, readAttachLog(state))
+	}
+	log := readAttachLog(state)
+	if n := strings.Count(log, attachRegistered); n != 2 {
+		t.Fatalf("the agent registered %d times, want 2:\n%s", n, log)
+	}
+	last := log[strings.LastIndex(log, "CHILD_TOKEN"):]
+	if !strings.HasPrefix(last, "CHILD_TOKEN \n") || !strings.Contains(last,
+		"ZENTHROS_AGENT_MODE=container ZENTHROS_CONTROLLER_ADDR=gw.example:9443 ZENTHROS_BACKEND_ID=ct-0a1b2c3d") {
+		t.Errorf("the resumed agent's join:\n%s", last)
+	}
+	if out, err := attachCmd(restarted, "--resume"); err != nil || !strings.Contains(out, "already attached") {
+		t.Errorf("--resume while attached: %v\n%s", err, out)
+	}
+	// A container that never attached has nothing to resume, and says so.
+	out, err = attachCmd(append(append([]string(nil), base...), "ZENTHROS_STATE_DIR="+t.TempDir(), "ZENTHROS_TEST_ATTACH=run"), "--resume")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != attachNothingToResume || !strings.Contains(out, "nothing to resume") {
+		t.Errorf("--resume with nothing attached before: %v\n%s", err, out)
+	}
+}
+
+// An agent updated in place (install-container.sh again, then attach --stop
+// and zenadm join --resume) is resumed with the new release's installer
+// settings, which zenadm passes, and keeps them for the container's next
+// restart, whose command passes none.
+func TestAttachResumedAfterAReinstallKeepsItsRelease(t *testing.T) {
+	if _, err := os.Stat("/proc/self/cmdline"); err != nil {
+		t.Skip("no /proc")
+	}
+	state := t.TempDir()
+	stopAttach(t, state)
+	var base []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "ZENTHROS_") {
+			base = append(base, kv)
+		}
+	}
+	container := append(append([]string(nil), base...), "ZENTHROS_TEST_ATTACH=run", "ZENTHROS_STATE_DIR="+state,
+		envAttachRestartDelay+"=50ms")
+	installed := append(append([]string(nil), container...), "ZENTHROS_INSTALL_BASE=https://dl.example/r1",
+		"ZENTHROS_SHA256SUMS_SHA256="+strings.Repeat("1", 64))
+	if out, err := attachCmd(installed, "--controller", "gw.example:9443", "--token", "token-"+handoffMarker,
+		"--backend-id", "ct-0a1b2c3d", "--image", "zenthros-python:3.13"); err != nil {
+		t.Fatalf("attach: %v\n%s\n%s", err, out, readAttachLog(state))
+	}
+	pid := supervisorPID(t, state)
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	waitFor(t, "the supervisor gone", 5*time.Second, func() bool { return !alive(pid) }, func() string { return "" })
+	reinstalled := append(append([]string(nil), container...), "ZENTHROS_INSTALL_BASE=https://dl.example/r2",
+		"ZENTHROS_SHA256SUMS_SHA256="+strings.Repeat("2", 64))
+	if out, err := attachCmd(reinstalled, "--resume"); err != nil || !strings.Contains(out, "attached as backend") {
+		t.Fatalf("attach --resume after a reinstall: %v\n%s\n%s", err, out, readAttachLog(state))
+	}
+	saved, err := os.ReadFile(filepath.Join(state, attachSavedName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), "ZENTHROS_INSTALL_BASE=https://dl.example/r2") || strings.Contains(string(saved), "/r1") ||
+		!strings.Contains(string(saved), strings.Repeat("2", 64)) {
+		t.Fatalf("%s after the reinstall's resume:\n%s", attachSavedName, saved)
+	}
+	if strings.Contains(string(saved), handoffMarker) {
+		t.Fatalf("%s holds a secret of the join:\n%s", attachSavedName, saved)
+	}
+	if left, _ := filepath.Glob(filepath.Join(state, attachSavedName+".*")); len(left) > 0 {
+		t.Fatalf("writes left behind: %v", left)
 	}
 }

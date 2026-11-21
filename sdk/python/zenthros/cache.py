@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 
 from zenthros import config, errors, identity
 from zenthros.artifact import Artifact
-from zenthros.remote import bundle, carried
+from zenthros.remote import bundle, carried, payload
 
 KEY_LABEL = "zenthros.ai/cache-key"
 PARTS_ANNOTATION = "zenthros.ai/cache-parts"
@@ -600,7 +600,7 @@ class CachedCall:
             print(f"✓ {self.cache_note.parts['fn']} reused from {self.name} ({made.get('at', '')}, on {self.where}, it took "
                   f"{made.get('took_s', 0):.0f}s): same bytes, signed by you", file=sys.stderr)
         # Its signature and its bytes were checked in lookup(); only now is it opened.
-        record = pickle.loads(self.found.raw)
+        record = payload.load(self.found.raw)
         return pickle.loads(record["value"])
 
     def status(self):

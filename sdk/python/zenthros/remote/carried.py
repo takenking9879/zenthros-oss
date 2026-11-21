@@ -33,7 +33,7 @@ root = carried_on_this_machine
 
 def too_large(size):
     """What a result over the limit ends its call with."""
-    return (f"the result weighs {size >> 10} KiB, and with no bucket a call brings back {MAX_RESULT_BYTES >> 10} KiB at most. "
+    return (f"the result packs to {size >> 10} KiB, and with no bucket a call brings back {MAX_RESULT_BYTES >> 10} KiB at most. "
             f"Give it a bucket ({NEEDS_A_BUCKET}), return less, or write it where it runs "
             "and return its path")
 
@@ -106,7 +106,9 @@ def _reported(views, uri):
 
 
 def pack(code, files, limit):
-    """code, the job's gzipped tar, with files in it. The whole has to fit a job."""
+    """code, the job's gzipped tar, with files in it, up to limit bytes (None:
+    no limit). What counts is what a job carries inline: a call's own files
+    and arguments, its overlay. The SDK's core goes to a hub by its digest."""
     raw = io.BytesIO(gzip.decompress(code) if code else b"")
     out = io.BytesIO()
     with tarfile.open(fileobj=out, mode="w", format=tarfile.PAX_FORMAT) as tar:
@@ -119,8 +121,8 @@ def pack(code, files, limit):
             info.size, info.mode, info.mtime = len(files[uri]), 0o644, 0
             tar.addfile(info, io.BytesIO(files[uri]))
     packed = gzip.compress(out.getvalue(), mtime=0)
-    if len(packed) > limit:
-        raise errors.ValidationError(f"this call and its project pack to {len(packed) >> 10} KiB, and with no bucket a job "
-                                     f"carries {limit >> 10} KiB at most. Give it a bucket ({NEEDS_A_BUCKET}), or pass "
-                                     "code_dir= a smaller directory and large data by URI")
+    if limit is not None and len(packed) > limit:
+        raise errors.ValidationError(f"this call's own files and arguments pack to {len(packed) >> 10} KiB, and with no "
+                                     f"bucket a job carries {limit >> 10} KiB of them at most. Give it a bucket "
+                                     f"({NEEDS_A_BUCKET}), or pass code_dir= a smaller directory and large data by URI")
     return packed

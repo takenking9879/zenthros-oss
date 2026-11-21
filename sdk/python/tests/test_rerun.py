@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from zenthros import errors, remote
+from zenthros import upload as uploads
 from zenthros.artifact import Sent
 from zenthros.core.storage import MemoryBlobStore
 from zenthros.remote import runner
@@ -211,6 +212,21 @@ class Paths(Base):
                 remote.run(read_it, path, on="gpu", upload=True)
         self.assertFalse([args for args, _ in put.call_args_list if "/data/" in args[0]])
 
+    def test_a_big_file_is_said_as_it_goes_and_not_when_it_is_there(self):
+        # The taxi train (2.2 GB) took 3 minutes to send, and nothing was
+        # said: it looked hung (wave 7, 2026-11-20).
+        path = self.data()
+        with mock.patch.object(uploads, "SAY_FROM", 2):
+            remote.run(read_it, path, on="gpu", upload=True)
+            self.assertIn(f"zenthros: sending {os.path.basename(path)} (2 bytes) to your store", self.stderr.getvalue())
+            said = self.stderr.getvalue().count("zenthros: sending")
+            remote.run(read_it, path, on="gpu", upload=True)
+            self.assertEqual(self.stderr.getvalue().count("zenthros: sending"), said, "there already: nothing to say")
+        small = self.root / "small.txt"
+        small.write_text("b")
+        remote.run(read_it, str(small), on="gpu", upload=True)
+        self.assertNotIn("small.txt", self.stderr.getvalue())
+
     def test_a_folder_goes_whole_and_its_list_last(self):
         folder = self.root / "tabla"
         (folder / "a").mkdir(parents=True)
@@ -220,6 +236,23 @@ class Paths(Base):
             return sorted(os.path.relpath(os.path.join(top, name), path).replace(os.sep, "/")
                           for top, _, files in os.walk(path) for name in files)
         self.assertEqual(sorted(remote.run(names, str(folder), on="gpu", upload=True).result()), ["a/uno.txt", "dos.txt"])
+
+    def test_a_map_sends_its_items_and_shared_arguments_too(self):
+        # The skill's way: one Parquet, a model a task (observaciones 25, wave 7).
+        path = self.data()
+        with self.assertRaisesRegex(errors.ValidationError, "only on this computer.*upload=True"):
+            remote.map(read_it, [path], on="gpu")
+        self.assertEqual(self.client._jobs, {}, "stopped before anything is made")
+        self.assertEqual(remote.map(read_it, [path, path], on="gpu", upload=True).result(), ["a\n", "a\n"])
+        digest = hashlib.sha256(b"a\n").hexdigest()
+        self.assertEqual(self.store.data[f"{STORE}/data/{digest}"], b"a\n")
+
+        @remote.cloud
+        def first_line(path, model):
+            with open(path) as fh:
+                return f"{model}:{fh.readline()}"
+        got = first_line.map([{"model": "xgb"}, {"model": "lgbm"}], on="gpu", shared={"path": path}, upload=True)
+        self.assertEqual(got.result(), ["xgb:a\n", "lgbm:a\n"])
 
     def test_a_credential_is_refused_before_anything_is_sent(self):
         path = self.data(".env", "KEY=1\n")

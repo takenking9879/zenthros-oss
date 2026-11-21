@@ -103,9 +103,16 @@ class CommandRetriesTest(Env):
 
     def test_what_the_process_did_not_fail_is_not_run_again(self):
         self.client.submit(self.retrying())
-        self.engine.statuses[self.client._read("j")["local"]["id"]] = {"phase": FAILED, "reasons": [{"code": "OOM_KILLED"}]}
+        self.engine.statuses[self.client._read("j")["local"]["id"]] = {"phase": FAILED, "reasons": [{"code": "IMAGE_PULL_FAILED"}]}
         self.assertEqual(self.client.job_object("j")["status"]["phase"], FAILED)
         self.assertEqual(self.engine.jobs, 1)
+
+    def test_a_process_killed_for_memory_runs_again_as_on_a_machine(self):
+        # The controller's v1.ProcessFailure: OOM_KILLED is the process's.
+        self.client.submit(self.retrying())
+        self.engine.statuses[self.client._read("j")["local"]["id"]] = {"phase": FAILED, "reasons": [{"code": "OOM_KILLED"}]}
+        self.assertEqual(self.client.job_object("j")["status"]["phase"], "Running")
+        self.assertEqual(self.engine.jobs, 2)
 
     def test_a_job_with_no_retries_does_not_keep_its_code(self):
         from zenthros.jobs import spec as S
@@ -115,25 +122,10 @@ class CommandRetriesTest(Env):
 
 
 class FailuresTest(Env):
-    def test_the_agent_killed_for_memory_is_the_jobs_memory(self):
-        self.client.submit(job())
-        name = self.client._read("j")["container"]
-        self.engine.containers[name]["state"] = "exited"
-        self.engine.containers[name]["oom"] = "true"
-        status = self.client.job_object("j")["status"]
-        self.assertEqual(status["reasons"][0]["code"], "OOM_KILLED")
-        self.assertIn("raise memory=", status["message"])
-
     def test_no_network_says_so(self):
         self.client.submit(job())
         self.finish(phase=FAILED, message="Temporary failure in name resolution: pypi.org")
         self.assertIn("run this once with network", self.client.job_object("j")["status"]["message"])
-
-    def test_a_child_killed_for_memory_may_be_why(self):
-        self.client.submit(job())
-        self.engine.containers[self.client._read("j")["container"]]["oom"] = "true"
-        self.finish(phase=FAILED, message="process exited with code 1")
-        self.assertIn("raise memory=", self.client.job_object("j")["status"]["message"])
 
     def test_the_output_is_a_folder_a_script_can_open(self):
         path = self.client.output_for("j")

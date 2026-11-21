@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zenthros"
-version = "0.2.3"
+version = "0.2.4"
 description = "Run a Python function on a machine of yours (any cloud, a GPU pod, your other computer) from a notebook, and get its value back"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -46,7 +46,7 @@ seal = ["cryptography>=40"]
 include = ["zenthros*"]
 
 [tool.setuptools.package-data]
-zenthros = ["_data/*"]
+zenthros = ["_data/*", "_data/skill/*.md", "_data/skill/reference/*.md"]
 
 [tool.ruff]
 line-length = 120

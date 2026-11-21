@@ -113,6 +113,8 @@ class Target:
     price: dict = None
     reason: str = ""
     detail: dict = field(default_factory=dict)
+    # The release its agent was built for; "" for what has no agent of its own.
+    agent_version: str = ""
 
     @classmethod
     def from_api(cls, row):
@@ -121,7 +123,8 @@ class Target:
                    total=int(row.get("total") or 0), milli_cpu=int(row.get("milliCPU") or 0),
                    max_milli_cpu=int(row.get("maxMilliCPU") or 0), memory_bytes=int(row.get("memoryBytes") or 0),
                    max_memory_bytes=int(row.get("maxMemoryBytes") or 0), gpu_model=row.get("gpuModel", ""),
-                   gpu_count=int(row.get("gpuCount") or 0), price=row.get("price"), reason=row.get("reason", ""), detail=row)
+                   gpu_count=int(row.get("gpuCount") or 0), price=row.get("price"), reason=row.get("reason", ""), detail=row,
+                   agent_version=str(row.get("agentVersion") or ""))
 
     @property
     def template(self):
@@ -268,10 +271,12 @@ class Targets:
     """zenthros.targets()'s answer: a table, [name] for one target's
     detail, to_pandas() to filter."""
 
-    def __init__(self, rows, can=None, docker="docker"):
+    def __init__(self, rows, can=None, docker="docker", hub_release=""):
         self.rows = list(rows)
         self.can = dict(can or {})
         self.docker = docker
+        # The hub's release, from the answer the rows came in.
+        self.hub_release = hub_release
 
     def __iter__(self):
         return iter(self.rows)
@@ -293,9 +298,10 @@ class Targets:
 
     def _sections(self):
         """(title, header, rows): the machines, then the templates that make them."""
-        machines = [t.cells() for t in self.rows if not t.template]
+        agents = any(t.agent_version for t in self.rows if not t.template)
+        machines = [t.cells() + ([t.agent_version or "-"] if agents else []) for t in self.rows if not t.template]
         templates = [t.cells() for t in self.rows if t.template]
-        out = [("", COLUMNS, machines)]
+        out = [("", COLUMNS + (["AGENT"] if agents else []), machines)]
         if templates:
             out.append(("Templates: zenthros.create(name) makes a machine", TEMPLATE_COLUMNS, templates))
         return out
@@ -308,10 +314,24 @@ class Targets:
             return ""
         return f"On this computer: local, with no hub; {', '.join(attached)}, through the hub (jobs reach it from anywhere)."
 
+    def _updates(self):
+        """A line for each machine whose agent is of another release than
+        the hub's, with how to update it."""
+        lines = []
+        for t in self.rows:
+            if not (t.agent_version and self.hub_release and t.agent_version != self.hub_release):
+                continue
+            how = (f"zenthros attach {t.name} --type local updates it, with its environments" if t.kind == "Local"
+                   else f"zenthros attach {t.name} gives the line that updates it" if t.kind == "External"
+                   else "")
+            lines.append(f"{t.name}'s agent is {t.agent_version}, the hub's {self.hub_release}" + (f": {how}." if how else "."))
+        return "\n".join(lines)
+
     def __str__(self):
         parts = [(title + "\n" if title else "") + _table(header, rows) for title, header, rows in self._sections()]
-        if self._here():
-            parts[0] += "\n\n" + self._here()
+        for note in (self._here(), self._updates()):
+            if note:
+                parts[0] += "\n\n" + note
         return "\n\n".join(parts)
 
     __repr__ = __str__
@@ -324,8 +344,9 @@ class Targets:
                            + "</tr>" for row in rows)
             caption = f"<p>{html.escape(title)}</p>" if title else ""
             parts.append(f"{caption}<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>")
-        if self._here():
-            parts.insert(1, f"<p>{html.escape(self._here())}</p>")
+        for note in (self._updates(), self._here()):
+            if note:
+                parts.insert(1, "".join(f"<p>{html.escape(line)}</p>" for line in note.splitlines()))
         return "".join(parts)
 
     def to_pandas(self):
@@ -337,6 +358,7 @@ class Targets:
             "memory_gib": t.memory_bytes / GIB or None, "max_memory_gib": t.max_memory_bytes / GIB or None,
             "gpu": t.gpu_count, "gpu_model": t.gpu_model or None,
             "price_per_hour": (t.price or {}).get("hourlyRate"), "reason": t.reason or None,
+            "agent": t.agent_version or None,
         } for t in self.rows])
 
 
@@ -436,7 +458,7 @@ def targets(docker="docker"):
     for target in rows:
         if target.detail.get("id") in held:
             target.kind = "Local"
-    return Targets(sorted([local, *rows], key=_sort_key), can, docker)
+    return Targets(sorted([local, *rows], key=_sort_key), can, docker, hub_release=client.hub_release)
 
 
 @dataclass
@@ -603,8 +625,10 @@ def python_problem(name, pinned, python):
         return ""
     if ".".join(parts[:2]) == python:
         return ""
+    from zenthros.remote.bundle import same_minor
+
     return (f"{name} runs Python {pinned} and this Python is {python}: a call pickled here is unpickled there "
-            f"with the same minor; run this from Python {'.'.join(parts[:2])} (a venv), or run a command")
+            f"with the same minor; {same_minor('.'.join(parts[:2]))}")
 
 
 def plan_call(on, options, keep=False, docker="docker", python=None):
@@ -631,6 +655,12 @@ def plan_call(on, options, keep=False, docker="docker", python=None):
         return _check(plan, current if asks_milli or asks_memory else None, joins=False)
     found = current.get(name)
     if found is None:
+        from zenthros.local import _api
+        from zenthros.machines import not_there
+        from zenthros.remote.options import _through_api
+
+        if _through_api():
+            raise not_there(_api(), name, [t.name for t in current])
         raise errors.ValidationError(f"on={name!r}: the Workspace has nothing called that; it has {[t.name for t in current]}")
     action = "create" if found.template else "use"
     plan = Plan(action, found, found.milli_cpu, found.memory_bytes, asks_milli, asks_memory,

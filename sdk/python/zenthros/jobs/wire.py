@@ -12,7 +12,7 @@ import platform
 import sys
 from importlib import metadata
 
-WIRE = 7
+WIRE = 8
 
 
 def sdk_version():
@@ -28,3 +28,5 @@ USER_AGENT = (f"zenthros-sdk/{sdk_version()} python/{sys.version_info.major}.{sy
 
 # What every request to a hub carries.
 HEADERS = {"User-Agent": USER_AGENT, "Zenthros-Wire": str(WIRE)}
+# What every answer of a hub carries: its release (pkg/apiwire ReleaseHeader).
+RELEASE_HEADER = "Zenthros-Release"

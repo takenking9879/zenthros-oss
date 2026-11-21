@@ -25,6 +25,8 @@ type fakeSystemd struct {
 	mu     sync.Mutex
 	files  map[string]string
 	active map[string]bool
+	// failed is a unit's Result once it failed, killed by SIGKILL.
+	failed map[string]string
 }
 
 var (
@@ -69,6 +71,9 @@ func (s *fakeSystemd) Run(_ context.Context, cmd string) (string, error) {
 		if s.active[name] {
 			return "LoadState=loaded\nActiveState=active\nSubState=running\n", nil
 		}
+		if result, ok := s.failed[name]; ok {
+			return "LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=" + result + "\nExecMainStatus=9\n", nil
+		}
 		return "LoadState=loaded\nActiveState=inactive\nSubState=dead\n", nil
 	case strings.Contains(cmd, "test -e"):
 		return "", errors.New("test: no such file")
@@ -89,16 +94,29 @@ func (s *fakeSystemd) end(unit string) {
 	delete(s.active, unit)
 }
 
+// fail is the unit's process killed by SIGKILL, with systemd's Result:
+// oom-kill when the kernel killed it for memory, signal when another did.
+func (s *fakeSystemd) fail(unit, result string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.active, unit)
+	s.failed[unit] = result
+}
+
 func TestSystemdKeepsTheExecutorContract(t *testing.T) {
 	var machine *fakeSystemd
 	executortest.Contract(t, executortest.Harness{
 		New: func(t *testing.T) executortest.Executor {
-			machine = &fakeSystemd{files: map[string]string{}, active: map[string]bool{}}
+			machine = &fakeSystemd{files: map[string]string{}, active: map[string]bool{}, failed: map[string]string{}}
 			cfg := systemd.Config{Scope: systemd.ScopeSystem}
 			return SystemdExecutor{Manager: systemd.NewManager(cfg, machine, logr.Discard()), Secrets: awssecret.Config{Root: t.TempDir()}}
 		},
 		Spec:    vmTestSpec(),
 		End:     func(_ *testing.T, _ executortest.Executor, handle string) { machine.end(handle) },
 		Missing: systemd.UnitName("never-submitted"),
+		// The unit is the job's cgroup: systemd's Result is its own evidence.
+		KilledForMemory: func(_ *testing.T, _ executortest.Executor, handle string) { machine.fail(handle, "oom-kill") },
+		Killed:          func(_ *testing.T, _ executortest.Executor, handle string) { machine.fail(handle, "signal") },
+		Confirms:        true,
 	})
 }

@@ -76,6 +76,13 @@ const (
 	// (KubeRay AppFailed). Reflected from the backend, never computed by Zenthros.
 	ReasonProcessFailed = "PROCESS_FAILED"
 
+	// ReasonOOMKilled reports a job the kernel killed for memory, on
+	// evidence of the job's own: its systemd unit's Result (oom-kill), its
+	// pod's container (the kubelet's OOMKilled). Where the evidence is a
+	// cgroup the job shares (a container's processes), the job is
+	// PROCESS_FAILED and its message says it probably was (procagent).
+	ReasonOOMKilled = "OOM_KILLED"
+
 	// ReasonCheckpointIncomplete reports a process that exited 0 while a phase
 	// it checkpointed never acked its COMPLETE: its work may be unfinished.
 	ReasonCheckpointIncomplete = "CHECKPOINT_INCOMPLETE"
@@ -197,7 +204,21 @@ const (
 	// ReasonServiceEnded reports a Service (a job that runs until cancelled)
 	// that its backend reported finished on its own.
 	ReasonServiceEnded = "SERVICE_ENDED"
+)
 
+// OutOfMemoryAdvice is what a job that ran out of memory says to do, after
+// how it is known.
+const OutOfMemoryAdvice = "use less memory (read the data in parts, smaller types) or a machine with more"
+
+// ProcessFailure reports a reason of the job's own process ending, as
+// opposed to its machine, its lease or its image: what a restartPolicy runs
+// again. A Service's process that exited at all (SERVICE_ENDED, even with
+// code 0) failed.
+func ProcessFailure(code string) bool {
+	return code == ReasonProcessFailed || code == ReasonOOMKilled || code == ReasonServiceEnded
+}
+
+const (
 	// ReasonDeadlineExceeded reports a job that stayed active past
 	// spec.activeDeadlineSeconds. The worker-lost lease does not extend it.
 	ReasonDeadlineExceeded = "DEADLINE_EXCEEDED"

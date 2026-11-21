@@ -47,7 +47,7 @@
       "case": "an SDK of another wire",
       "means": "other-wire",
       "code": 426,
-      "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"zenthros 0.1.0 speaks wire 0; this hub speaks 7: pip install -U 'https://dl.example/zenthros-0.2.0-py3-none-any.whl'\",\"reason\":\"UpgradeRequired\",\"code\":426}\n"
+      "body": "{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"zenthros 0.1.0 speaks wire 0; this hub speaks 8: pip install -U 'https://dl.example/zenthros-0.2.0-py3-none-any.whl'\",\"reason\":\"UpgradeRequired\",\"code\":426}\n"
     }
   ]
 }

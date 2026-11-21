@@ -13,8 +13,12 @@ the runner installs what its Python lacks into a venv it keeps, before
 anything is read from the store, and starts again inside it, once.
 """
 import io
+import json
 import os
+import sys
 import unittest
+from importlib import metadata
+from pathlib import Path
 from unittest import mock
 
 import cloudpickle
@@ -30,6 +34,7 @@ from test_where import vm
 
 SLIM = "python:3.12-slim-bookworm"
 RUNNER_ENV = envs.runner_env
+WIRE = Path(__file__).resolve().parents[3] / "operator" / "pkg" / "jobcli" / "testdata" / "wire.json"
 
 
 def images_by_default(name, backend_id):
@@ -88,14 +93,39 @@ class RunnerPackagesTest(unittest.TestCase):
 
     def test_a_functions_job_names_what_its_runner_needs(self):
         env = self.env(remote.run(double, 1, code_dir=None))
-        self.assertEqual(env[remote_call.RUNNER_PACKAGES_ENV], f"cloudpickle=={cloudpickle.__version__} boto3")
+        # The machine runs this minor (cloudpickle needs it), whose records pack with zstd: its backport before 3.14.
+        zstd = [] if sys.version_info >= (3, 14) else [f"backports.zstd=={metadata.version('backports.zstd')}"]
+        self.assertEqual(env[remote_call.RUNNER_PACKAGES_ENV].split(), [f"cloudpickle=={cloudpickle.__version__}", *zstd, "boto3"])
+
+    def test_a_machine_zenthros_makes_has_what_its_runner_needs(self):
+        # A This computer of 3.13 had cloudpickle and boto3 but not zstd's
+        # backport: each call started its runner, found it missing and started
+        # again in a venv of its own, 0.2 s a call (wave 7).
+        wanted = remote_call.runner_packages("s3://b/p")
+        built = []
+
+        def docker(_, args, stdin=None, timeout=None):
+            built.append(stdin)
+            return (1, "") if args[:2] == ["image", "inspect"] else (0, "")
+
+        with mock.patch.object(machines, "_docker", docker):
+            machines.local_image()
+        for package in wanted:
+            self.assertIn(package, machines._runner_packages())
+            self.assertIn(package, built[-1], "the image of a This computer")
+            self.assertIn(package, machines.pod_script("true\n"), "a pod of a cluster")
+        # One table with the agent's side, a VM's and a container's toolchain
+        # (backendjoin.TestRunnerPackagesAreTheSDKsTable).
+        table = json.loads(WIRE.read_text())["runner_packages"]
+        names = sorted(package.split("==")[0] for package in machines._runner_packages())
+        self.assertEqual(names, sorted(table["%d.%d" % sys.version_info[:2]]))
 
     def test_a_commands_job_names_nothing(self):
         self.assertNotIn(remote_call.RUNNER_PACKAGES_ENV, self.env(remote.run(["echo", "hi"], code_dir=None)))
 
     def test_the_stores_client_follows_the_store(self):
-        self.assertEqual(remote_call.runner_packages("gs://b/p")[1:], ["google-cloud-storage"])
-        self.assertEqual(remote_call.runner_packages("file:///tmp/p")[1:], [])
+        self.assertEqual(remote_call.runner_packages("gs://b/p", pickled=False), ["google-cloud-storage"])
+        self.assertEqual(remote_call.runner_packages("file:///tmp/p", pickled=False), [])
 
     def test_the_image_place_chose_reaches_the_job(self):
         placed = machines.Placement({"backend": "vm-1", "image": SLIM})

@@ -288,7 +288,8 @@ clave y mientras exista el job de origen; si no, corre desde cero y lo dice.
 | Otra vez, en otro lugar | `call.rerun(on=, resume=, upload=, name=, **opciones)`. `.why` dice por qué no retomó. Los secretos se piden de nuevo |
 | Retomar | `spec.resumeFrom: {job, uid}`: nombra un job terminado del namespace, nunca un lugar. El controller lee su último cursor confirmado, y el runner comprueba cada blob contra su digest |
 | Subir lo local | `upload=True`, por contenido, a `<store>/data/<sha256>`. Nunca por defecto: sin él, una ruta que ese lugar no ve se frena antes de crear nada |
-| Sin bucket | La llamada viaja en los archivos del job, y el resultado en su reporte final, hasta ~189 KiB (`remote/carried.py`). `GET /jobs/{name}/source` devuelve el código con el que corrió, también si la API lo movió a un ConfigMap |
+| Argumentos grandes | Con bucket, cada argumento de nivel superior (posicional, por nombre, la tarea de un `map`, los compartidos y cada valor de un config) cuyo pickle pasa de 1 MiB va aparte, por su SHA-256, a `<store>/data/<sha256>` (`upload.keep_arguments`), y la llamada lleva un `artifact.Kept`. El runner lo comprueba contra su digest antes de abrirlo. Lo de `<store>/data/` lo borra la regla de ciclo de vida del propio bucket a los 30 días (`zenthros store` da la línea); Zenthros no borra nada, y `upload._is_there` vuelve a subir lo que lleva 15 días o más. Un rerun renueva los suyos |
+| Sin bucket | La llamada viaja en los archivos del job, hasta 360 KiB propios (los archivos del proyecto y los argumentos; el núcleo del SDK va aparte, por su digest), y el resultado en su reporte final, hasta ~189 KiB ya comprimido con zstd (`remote/carried.py`, `remote/payload.py`). `GET /jobs/{name}/source` devuelve el código con el que corrió, también si la API lo movió a un ConfigMap |
 | Vida máxima | `create(plantilla, max_lifetime="24h")`, su default sin `idle=`; `None` la deja hasta borrarla. `spec.scaling.maxLifetime` en el `VMPool`. Razón: `MACHINE_LIFETIME` |
 | Sin moverse | `resilient=False`: el job termina con su máquina (`WORKER_LOST`), sin reemplazo |
 | Bucket `gs://` | `set_store("gs://...")`: `gcloud` en tu computadora, el rol en una VM de GCP, y en RunPod o Vast la clave de una cuenta hecha para ese prefijo, sellada a la máquina; `set_store(None)` la acaba |
@@ -307,7 +308,10 @@ lo mismo que `--json` y MCP, y no guarda nada. Comprueba el `Host` y el token, y
 imprime un job llega a la página como texto.
 
 `zenthros agent skill [--to CARPETA]` escribe `<carpeta>/zenthros/SKILL.md`: cuándo usar
-Zenthros, cómo leer un resultado, y que permitir lo que cuesta es decisión de la persona.
+Zenthros, cómo leer un resultado, que permitir lo que cuesta es decisión de la persona, y
+cómo escribir código con el SDK. A su lado, `<carpeta>/zenthros/reference/*.md` explica cada
+nombre público del SDK, con cada parámetro. `tests/test_skill_reference.py` falla si uno queda
+sin su sección, o si un ejemplo usa un parámetro que no existe.
 
 ## 3. Errores: tres dueños, una regla cada uno
 
@@ -392,6 +396,7 @@ En un **comando** no hay excepciones que mirar. Ahí `retries` se traduce en `re
     - los `.py`, y los archivos pequeños a su lado (≤ 256 KiB: un `run.sh`, un `conf/train.yaml`);
     - no viaja lo que excluyen `.gitignore` o `.zenthrosignore` (sintaxis de gitignore, con `!` para reincluir), los archivos y directorios ocultos, los entornos (`venv`, `node_modules`, …), ni un `data/` que no sea un paquete de Python;
     - tampoco viajan las credenciales (`*.env`, `*.pem`, `*.key`, `id_rsa*`, `kubeconfig`, …), salvo que un archivo de exclusión las reincluya con `!`: el bundle lo lee quien lea el store;
+    - ni los notebooks (`*.ipynb`) ni los datos, modelos y salidas (`*.csv`, `*.parquet`, `*.pkl`, `*.pt`, `*.png`, …: `ignore.NOT_CODE`), salvo con `!` en un archivo de exclusión. La función de un notebook ya viaja en el pickle, y los datos van con `upload=`. La llamada dice una vez por proceso qué dejó fuera;
     - las entradas de `sys.path` que caen dentro de `code_dir` (`python src/train.py` pone `src/` en `sys.path`) viajan como rutas relativas, y el runner las inserta antes de deserializar (SDK-1).
 14. **`call.logs()`** es el final del log: su último 0.5 MB desde el inicio de una línea, con una primera línea que dice cuánto se omitió; `call.logs(tail=N)`, sus últimas N líneas. `call.logs(follow=True)` da eso y luego cada línea según se escribe, hasta que el job termina (`with` o `.close()` lo detienen). Si la conexión se corta, sigue justo después de lo que ya dio, sin repetir ni perder líneas; si el job pasa a otro intento, una línea lo dice. El `RemoteError` de un comando fallido muestra el final del log, donde está el error (SDK-10). Por la red el log viaja en zstd, un frame por bloque; tú ves siempre texto.
 15. **El SDK ya no escribe `spec.tenant`**, que está deprecado y el controller ignora (SDK-12).

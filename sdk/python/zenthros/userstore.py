@@ -68,7 +68,13 @@ def _gcs():
         from google.cloud import storage
     except ImportError:
         raise errors.ValidationError('a gs:// bucket needs google-cloud-storage here: pip install "zenthros[gcs]"') from None
-    return storage.Client()
+    from google.auth import exceptions
+
+    try:
+        return storage.Client()
+    except exceptions.DefaultCredentialsError:
+        raise errors.ValidationError("a gs:// bucket needs your Google credentials here, and there are none: "
+                                     "gcloud auth application-default login") from None
 
 
 def _google(store):
@@ -117,6 +123,7 @@ def set_store(uri, out=None):
         config.update_context({STORE_KEY: store, REGION_KEY: None})
         console.show(f"✓ your bucket: {store}. Calls and results go there; the hub keeps none of them. A VM of GCP "
                      "reaches it with its service account; a host with no role gets a key that reaches only this prefix", out)
+        print(lifecycle_advice(store), file=out or sys.stdout)
         return store
     store = f"s3://{bucket}" + (f"/{prefix}" if prefix else "")
     s3 = _boto3().client("s3")
@@ -131,11 +138,35 @@ def set_store(uri, out=None):
         raise errors.ValidationError(f"{store} does not answer to your AWS credentials here: {_said(exc)}") from None
     config.update_context({STORE_KEY: store, REGION_KEY: region})
     console.show(f"✓ your bucket: {store} ({region}). Calls and results go there; the hub keeps none of them", out)
+    print(lifecycle_advice(store), file=out or sys.stdout)
     if _boto3().session.Session().get_credentials().get_frozen_credentials().token:
         # credentials() cannot narrow these (GetFederationToken refuses them).
         print(f"  your AWS credentials here are temporary (SSO or a role): a machine gets them as they are, "
               f"for all they reach, not only {store}, until they end", file=out or sys.stdout)
     return store
+
+
+def lifecycle_advice(store):
+    """How to have store's bucket delete what upload= and large arguments
+    leave under <store>/data/: a line the person runs. Zenthros changes no
+    bucket's settings, and deletes nothing there itself."""
+    from zenthros import upload
+
+    bucket, prefix = parse(store)
+    data, days = (f"{prefix}/" if prefix else "") + "data/", upload.LIFECYCLE_DAYS
+    if _google(store):
+        rule = json.dumps({"lifecycle": {"rule": [{"action": {"type": "Delete"},
+                                                   "condition": {"age": days, "matchesPrefix": [data]}}]}})
+        line = (f"echo '{rule}' > zenthros-lifecycle.json && "
+                f"gcloud storage buckets update gs://{bucket} --lifecycle-file=zenthros-lifecycle.json")
+    else:
+        rule = json.dumps({"Rules": [{"ID": "zenthros-data", "Status": "Enabled", "Filter": {"Prefix": data},
+                                      "Expiration": {"Days": days}}]})
+        line = f"aws s3api put-bucket-lifecycle-configuration --bucket {bucket} --lifecycle-configuration '{rule}'"
+    return (f"  What upload= and large arguments leave in {store}/data/ stays until a rule of the bucket deletes it. "
+            f"To delete it after {days} days (a call sends again what is {upload.FRESH_DAYS} days old):\n"
+            f"    {line}\n"
+            "  That replaces the bucket's lifecycle rules: if it has its own, add this one to them.")
 
 
 def _probe_google(bucket, prefix, store):

@@ -32,6 +32,13 @@ WORKER_LOST = "WORKER_LOST"
 PREEMPTED = "PREEMPTED"
 MACHINE_LIFETIME = "MACHINE_LIFETIME"
 RESCHEDULE_REASONS = frozenset({WORKER_LOST, PREEMPTED, MACHINE_LIFETIME})
+# A failure of the job's own process, not of what it ran on (the
+# controller's v1.ProcessFailure): what retries= runs again, and what is the
+# code's to explain. OOM_KILLED: the agent saw the kernel kill it for memory.
+PROCESS_FAILED = "PROCESS_FAILED"
+OOM_KILLED = "OOM_KILLED"
+SERVICE_ENDED = "SERVICE_ENDED"
+PROCESS_FAILURES = frozenset({PROCESS_FAILED, OOM_KILLED, SERVICE_ENDED})
 
 
 @dataclass

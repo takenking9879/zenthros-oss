@@ -8,7 +8,7 @@ your other computer) from a notebook, and get its value back.
 All you need is Docker Desktop, OrbStack or Podman (on Windows, inside WSL2):
 
 ```bash
-pip install "zenthros[seal] @ https://github.com/takenking9879/zenthros-oss/releases/download/v0.2.3/zenthros-0.2.3-py3-none-any.whl"
+pip install "zenthros[seal] @ https://github.com/takenking9879/zenthros-oss/releases/download/v0.2.4/zenthros-0.2.4-py3-none-any.whl"
 ```
 
 ```python

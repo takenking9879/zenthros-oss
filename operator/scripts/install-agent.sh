@@ -931,6 +931,17 @@ main() {
     ok "Base ready; the runtime installs in the background. The agent may join now."
   else
     run_runtime
+    finished_line
+  fi
+}
+
+# finished_line: what comes next. The agent's unit exists only once zenadm
+# join made it: a machine whose unit runs was updated (mark_runtime_ready
+# restarted its agent into the new binary) and stays joined.
+finished_line() {
+  if systemctl is-active --quiet zenthros-agent 2>/dev/null; then
+    ok "Agent updated and restarted; this machine stays joined (zenthros targets shows its release)."
+  else
     ok "Host ready. Next: paste your one-time 'zenadm join ...' command."
   fi
 }

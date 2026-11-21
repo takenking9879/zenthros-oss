@@ -37,9 +37,13 @@ def main() -> int:
         out = pathlib.Path(tmp)
         run(sys.executable, "-m", "build", "--wheel", "--outdir", str(out / "dist"), str(SDK), stdout=subprocess.DEVNULL)
         (wheel,) = (out / "dist").glob("zenthros-*.whl")
-        shipped = {n for n in zipfile.ZipFile(wheel).namelist() if n.endswith(".py")}
+        names = set(zipfile.ZipFile(wheel).namelist())
+        shipped = {n for n in names if n.endswith(".py")}
         source = {p.relative_to(SDK).as_posix() for p in (SDK / "zenthros").rglob("*.py") if "__pycache__" not in p.parts}
-        missing = sorted(source - shipped)
+        # What the code reads beside itself: the skill and its reference too.
+        data = {p.relative_to(SDK).as_posix() for p in (SDK / "zenthros" / "_data").rglob("*")
+                if p.is_file() and "__pycache__" not in p.parts}
+        missing = sorted((source - shipped) | (data - names))
         if missing:
             print("the wheel lacks:", *missing, sep="\n  ")
             return 1
@@ -49,7 +53,14 @@ def main() -> int:
         run(UV, "pip", "install", "--quiet", "--python", python, f"{wheel}[s3,gcs,seal]")
         run(python, "-I", "-c", PROBE, str(SDK), cwd=tmp)
         run(str(venv / "bin" / "zenthros"), "--help", cwd=tmp, stdout=subprocess.DEVNULL)
-        print(f"{wheel.name}: {len(shipped)} files, every module imports, zenthros --help runs")
+        skills = out / "skills"
+        run(str(venv / "bin" / "zenthros"), "agent", "skill", "--to", str(skills), cwd=tmp, stdout=subprocess.DEVNULL)
+        written = sorted(p.relative_to(skills / "zenthros").as_posix() for p in (skills / "zenthros").rglob("*.md"))
+        if "SKILL.md" not in written or not any(name.startswith("reference/") for name in written):
+            print("zenthros agent skill from the wheel wrote:", *written, sep="\n  ")
+            return 1
+        print(f"{wheel.name}: {len(shipped)} modules and {len(data)} data files, every module imports, "
+              f"zenthros --help runs, zenthros agent skill writes {len(written)} files")
     return 0
 
 

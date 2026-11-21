@@ -40,8 +40,7 @@ func Read(ctx context.Context, src Sources) capability.Host {
 		src.Getenv = os.Getenv
 	}
 	host := capability.Host{Arch: runtime.GOARCH}
-	host.CPU, host.MilliCPU = cpuLimit(src.Root, runtime.NumCPU())
-	host.MemoryBytes = memoryLimit(src.Root)
+	host.CPU, host.MilliCPU, host.MemoryBytes = Limits(src)
 	host.OSID, host.OSVersion = OSRelease(filepath.Join(src.Root, "/etc/os-release"))
 	if out, err := src.Command(ctx, "nvidia-smi", "--query-gpu=name", "--format=csv,noheader"); err == nil {
 		var models []string
@@ -61,6 +60,13 @@ func Read(ctx context.Context, src Sources) capability.Host {
 	host.PeerAddr = src.Getenv("ZENTHROS_PEER_ADDR")
 	host.ContainerImage = src.Getenv("ZENTHROS_CONTAINER_IMAGE")
 	return host
+}
+
+// Limits are the cgroup's CPUs (whole and in thousandths) and memory: what
+// `docker update` changes in place, read again on each declaration.
+func Limits(src Sources) (cpu, milliCPU int32, memoryBytes int64) {
+	cpu, milliCPU = cpuLimit(src.Root, runtime.NumCPU())
+	return cpu, milliCPU, memoryLimit(src.Root)
 }
 
 // cpuLimit is the cgroup's CPU quota rounded up to whole CPUs, and exactly
@@ -117,6 +123,27 @@ func memoryLimit(root string) int64 {
 		return limit
 	}
 	return total
+}
+
+// OOMKills is how many processes the kernel has killed for memory in this
+// container's cgroup (memory.events' oom_kill; cgroup v1's
+// memory.oom_control). A counter of a cgroup the agent and every job share:
+// a job's evidence is how much it grew while the job ran, never its total.
+// 0 where neither file is readable.
+func OOMKills(src Sources) int64 {
+	for _, file := range []string{"/sys/fs/cgroup/memory.events", "/sys/fs/cgroup/memory/memory.oom_control"} {
+		raw, err := os.ReadFile(filepath.Join(src.Root, file))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if value, ok := strings.CutPrefix(line, "oom_kill "); ok {
+				n, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 func readInt(path string) (int64, error) {

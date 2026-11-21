@@ -202,6 +202,31 @@ class TableTest(Targets):
         self.assertEqual(frame.set_index("name").loc["mi-pc", "cpu"], 1.5)
 
 
+class AgentTest(Targets):
+    """observaciones P11: targets says each machine's agent, and how to
+    update one of another release than the hub's (Zenthros-Release)."""
+
+    def test_each_agent_and_how_to_update_one_of_another_release(self):
+        rows = [dict(r, agentVersion={"mi-pc": "v0.2.3", "mi-ec2": "v0.2.3", "viejo": "v0.2.4"}[r["name"]])
+                if r["name"] in ("mi-pc", "mi-ec2", "viejo") else r for r in ROWS]
+        self.api.routes[("GET", "/v1/workspaces/risk/targets")] = (*answer(rows), {"Zenthros-Release": "v0.2.4"})
+        table = targets.targets()
+        self.assertEqual(table.hub_release, "v0.2.4")
+        text = str(table)
+        self.assertEqual(text.splitlines()[0].split()[-1], "AGENT")
+        rows = self.lines(table)
+        self.assertEqual((rows["mi-pc"][-1], rows["local"][-1], rows["viejo"][-1]), ("v0.2.3", "-", "v0.2.4"))
+        self.assertIn("mi-pc's agent is v0.2.3, the hub's v0.2.4: zenthros attach mi-pc --type local updates it, "
+                      "with its environments.", text)
+        self.assertIn("mi-ec2's agent is v0.2.3, the hub's v0.2.4: zenthros attach mi-ec2 gives the line that "
+                      "updates it.", text)
+        self.assertNotIn("viejo's agent", text)
+        self.assertIn("mi-ec2&#x27;s agent is v0.2.3", table._repr_html_())
+
+    def test_no_agent_known_no_column(self):
+        self.assertNotIn("AGENT", str(targets.targets()).splitlines()[0])
+
+
 class LocalRowTest(Targets):
     def test_without_docker_local_is_unavailable_and_says_why(self):
         self.docker.fail = {"info": (1, "Cannot connect to the Docker daemon")}

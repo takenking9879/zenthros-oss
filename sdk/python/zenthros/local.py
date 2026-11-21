@@ -27,6 +27,12 @@ boto3: the job reads its call from the Workspace's s3:// store.
 The agent is not the container's first process (sleep is, under docker's
 init): stopping the container ends its jobs as a lost machine, and the
 Controller sends them elsewhere. remove() retires the backend first.
+
+A container create() starts comes back when Docker does (--restart
+unless-stopped), as a VM's agent comes back with its machine: its command
+attaches the agent again as it was (zenthros-agent attach --resume), with
+its files and environments. One stopped by hand stays stopped until
+zenthros attach NAME starts it (revive()).
 """
 
 import re
@@ -48,6 +54,19 @@ AGENT = "/tmp/zenthros/bin/zenthros-agent"
 BACKEND_LABEL = "zenthros.ai/backend"
 WORKSPACE_LABEL = "zenthros.ai/workspace"
 NAME_LABEL = "zenthros.ai/name"
+# The hub it joined (its address, as the SDK reached it): only that hub's
+# list says whether its machine is still there.
+HUB_LABEL = "zenthros.ai/hub"
+# The container's command. In one that never attached (its first start)
+# the resume finds nothing to resume, and sleep runs.
+COMMAND = f'"{AGENT}" attach --resume --wait 0 >/dev/null 2>&1; exec sleep infinity'
+# How long revive() waits for the agent to say it is attached again.
+REVIVE_WAIT = "120s"
+# A container's agent after its installer ran again: stopped (a job gets
+# its grace), then attached again by the zenadm the installer wrote, which
+# checks the new agent against its release's pin (attach --resume, with
+# the certificate it has).
+RESTART_AGENT = f'"{AGENT}" attach --stop && zenadm join --resume --wait {REVIVE_WAIT}'
 # ports= of create: published on this computer's loopback only, and the
 # agent says that address (agent/endpoints.go reads the template), not the
 # container's own, which this computer may not reach.
@@ -111,13 +130,14 @@ class LocalBackend:
         backend_id = str(join.get("backendId") or "")
         container = name or f"zenthros-{backend_id}"
         lb = cls(client, backend_id, container, created=True, docker=docker)
-        run = ["run", "-d", "--init", "--name", container,
+        run = ["run", "-d", "--init", "--name", container, "--restart", "unless-stopped",
                "--cpus", str(cpus), "--memory", str(memory), "--memory-swap", str(memory),
                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                "--label", f"{BACKEND_LABEL}={backend_id}", "--label", f"{WORKSPACE_LABEL}={lb.workspace}",
+               "--label", f"{HUB_LABEL}={client.server}",
                *(["--label", f"{NAME_LABEL}={backend_name}"] if backend_name else []),
                *_published(ports),
-               image, "sleep", "infinity"]
+               image, "sh", "-c", COMMAND]
         code, out = _docker(docker, run)
         if code != 0:
             lb._undo(remove_container=False)
@@ -201,6 +221,52 @@ class LocalBackend:
                                          f"see zenthros.targets()")
             _sleep(interval)
             waited += interval
+
+    def resize(self, cpus=None, memory=None):
+        """The container's limits, changed in place (docker update): its
+        files and environments stay. memory as docker reads it ("6g"); swap
+        stays equal to it, so the limit is still hard. The agent declares the
+        new size on its next heartbeat."""
+        args = ["update"]
+        if cpus is not None:
+            args += ["--cpus", f"{float(cpus):g}"]
+        if memory is not None:
+            args += ["--memory", memory, "--memory-swap", memory]
+        code, out = _docker(self.docker, [*args, self.container])
+        if code != 0:
+            raise errors.ValidationError(f"docker update {self.container}: {out.strip()}")
+
+    def revive(self):
+        """The agent of a container create() made, attached again as it was:
+        the container started if it was stopped, then attach --resume, which
+        says "already attached" when it is. Raises with what the agent said
+        when it does not come back."""
+        code, out = _docker(self.docker, ["start", self.container], timeout=120)
+        if code == 0:
+            code, out = _docker(self.docker, ["exec", self.container, AGENT, "attach", "--resume", "--wait", REVIVE_WAIT],
+                                timeout=180)
+        if code != 0:
+            raise errors.BackendJoinError(f"{self.container}: its agent did not come back: {out.strip()[-600:]}")
+
+    def update(self, install, packages=()):
+        """The agent of a container create() made, updated in place: packages
+        (what its runner needs) installed as root, as its image did, then
+        install (a join's installScript, no secret in it) run again in it, and
+        the agent restarted (RESTART_AGENT). Its files and environments stay."""
+        code, out = 0, ""
+        if packages:
+            code, out = _docker(self.docker, ["exec", "-u", "0", self.container, "python3", "-m", "pip", "install",
+                                              "--no-cache-dir", "--quiet", "--disable-pip-version-check", *packages],
+                                timeout=300)
+        if code == 0:
+            code, out = _docker(self.docker, ["exec", "-i", self.container, "sh"], stdin="exec 2>&1\n" + install)
+        if code == 0:
+            hint = _PATH_HINT.search(out)
+            code, out = _docker(self.docker, ["exec", "-i", self.container, "sh"],
+                                stdin=(hint.group(1) + "\n" if hint else "") + "exec 2>&1\n" + RESTART_AGENT + "\n",
+                                timeout=300)
+        if code != 0:
+            raise errors.BackendJoinError(f"updating the agent in {self.container}: {out.strip()[-600:]}")
 
     def remove(self):
         """Retire the backend at the API (revoked, its access gone), then

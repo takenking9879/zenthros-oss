@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from zenthros import cache as entries
 from zenthros import contracts, errors, reach, upload
-from zenthros.remote.call import RESUME, CloudFunction, RemoteCall, get, run
+from zenthros.remote.call import RESUME, CloudFunction, RemoteCall, get, refuse_unknown, run
 
 PIPELINE_LABEL = "zenthros.ai/pipeline"
 STEP_LABEL = "zenthros.ai/step"
@@ -251,6 +251,7 @@ class Pipeline:
         what comes before it, and upstream={step: value} gives what it leaves: a
         path, a URI, a zenthros.get(...) or a zenthros.cache.find(...). A reference
         a step's place cannot reach stops it before anything is made."""
+        refuse_unknown(self.name, options, own=STEP_KWARGS)
         self._check_params(params)
         index, first = self._start(args, start_at, upstream)
         first_step = self.steps[index]
@@ -265,7 +266,7 @@ class Pipeline:
         started.resuming = _resuming or {}
         started.steps += [StepRun(step.name, SKIP, f"you start from {first_step.name}") for step in self.steps[:index]]
         self._go(started, index, first, on, cache, params, options)
-        self._record(started, args, on, cache, params, options, start_at)
+        self._record(started, args, on, cache, params, options, start_at, upstream)
         return started
 
     def _go(self, started, index, first, on, cache, params, options):
@@ -309,7 +310,7 @@ class Pipeline:
             record.error, record.why = err, str(err).splitlines()[0]
             return None, step.name
 
-    def _record(self, started, args, on, cache, params, options, start_at):
+    def _record(self, started, args, on, cache, params, options, start_at, upstream):
         try:
             arguments = json.dumps(list(args))
         except (TypeError, ValueError):
@@ -320,6 +321,7 @@ class Pipeline:
         (folder / f"{started.id}.json").write_text(json.dumps({
             "run": started.id, "args": None if arguments is None else json.loads(arguments), "on": on if _is_json(on) else None,
             "cache": cache, "params": params if _is_json(params) else None, "options": plain, "start_at": start_at,
+            "upstream": {name: _kept(value) for name, value in (upstream or {}).items()},
             "steps": [{"step": s.name, "action": s.action, "job": s.job} for s in started.steps]}, indent=1))
         (folder / "last").write_text(started.id)
 
@@ -337,7 +339,9 @@ class Pipeline:
         well are reused by their job, checked as any upstream is. A step cut short,
         with the same code, inputs and environment, goes on from its last confirmed
         checkpoint in a new job; if anything differs it starts over, and says why."""
+        refuse_unknown(self.name, options, own=STEP_KWARGS)
         last = self._last()
+        start_at, upstream = last["start_at"], None if args else _restored(last)
         args = args or tuple(last["args"] or ())
         on = on if on is not None else last["on"]
         params = params if params is not None else last["params"]
@@ -345,23 +349,25 @@ class Pipeline:
         before = {step["step"]: step for step in last["steps"]}
         resuming = {name: step["job"] for name, step in before.items() if step.get("job")}
         if last["cache"]:
-            return self.run(*args, on=on, cache=last["cache"], params=params, start_at=last["start_at"],
+            return self.run(*args, on=on, cache=last["cache"], params=params, start_at=start_at, upstream=upstream,
                             _resuming=resuming, **options)
         started = PipelineRun(self.name, uuid.uuid4().hex[:6], [])
         started.resuming = resuming
-        index, value = 0, None
-        for index, step in enumerate(self.steps):  # noqa: B007 - index is the step it stopped at, read below
+        begin = self._index(start_at) if start_at else 0
+        started.steps += [StepRun(step.name, SKIP, f"you start from {start_at}") for step in self.steps[:begin]]
+        index, value = begin, None
+        for index, step in enumerate(self.steps[begin:], start=begin):  # noqa: B007 - index is the step it stopped at, read below
             was = before.get(step.name) or {}
             done = _finished_job(was.get("job"))
-            if was.get("action") == SKIP or done is None:
+            if done is None:
                 break
             started.steps.append(StepRun(step.name, REUSE, f"{was['job']} of the last run ended well", was["job"], done))
             value = done
         else:
             return started
-        first = args if index == 0 else (value,)
+        first = self._start(args, start_at, upstream)[1] if index == begin else (value,)
         self._go(started, index, first, on, False, params, options)
-        self._record(started, args, on, False, params, options, None)
+        self._record(started, args, on, False, params, options, start_at, upstream)
         return started
 
     def plan(self, *args, on=None, cache=False, params=None, start_at=None, upstream=None, probe=False, resume=False,
@@ -370,6 +376,7 @@ class Pipeline:
         nothing and moves nothing. probe=True asks a place that is already up to
         look at what no rule can answer; it never starts one. resume=True: what
         resume would do."""
+        refuse_unknown(self.name, options, own=STEP_KWARGS)
         before = {}
         if resume:
             last = self._last()
@@ -378,6 +385,7 @@ class Pipeline:
             on = on if on is not None else last["on"]
             params = params if params is not None else last["params"]
             cache, start_at = last["cache"], last["start_at"]
+            upstream = upstream if upstream or args else _restored(last)
             options = {**last["options"], **options}
         self._check_params(params)
         index, first = self._start(args, start_at, upstream)
@@ -455,6 +463,34 @@ def _finished_job(name):
         return call if call.handle.job_status().phase == "Succeeded" else None
     except errors.ZenthrosError:
         return None
+
+
+# Where a step's own keyword arguments go, as the refusal of an option says.
+STEP_KWARGS = 'params={"step": {...}}'
+
+
+def _kept(value):
+    """An upstream= value as the run's record keeps it: a call by its job's
+    name, a path or URI as it is, any other value if it is JSON. None: it
+    cannot be kept, and resume asks for it again."""
+    if isinstance(value, RemoteCall) or getattr(value, "cached", False):
+        return {"job": value.name}
+    if isinstance(value, str):
+        return {"value": os.path.abspath(value) if os.path.exists(value) else value}
+    return {"value": value} if _is_json(value) else None
+
+
+def _restored(last):
+    """The upstream= a run on record was given, as run takes it again."""
+    kept = last["upstream"]
+    if not kept:
+        return None
+    lost = [name for name, value in kept.items() if value is None]
+    if lost:
+        raise errors.ValidationError(
+            f"the last run started from {last['start_at']} with upstream {lost} that its record cannot keep (not a "
+            f"path, a URI, a call or JSON): run(start_at={last['start_at']!r}, upstream=...) again")
+    return {name: get(value["job"]) if "job" in value else value["value"] for name, value in kept.items()}
 
 
 def _given(value):

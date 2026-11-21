@@ -10,12 +10,14 @@ the lines and does not wait; the questions read a number where there is no
 terminal (a notebook, a pipe); login --key - reads the key from stdin.
 """
 import io
+import os
 import unittest
 from unittest import mock
 
 from zenthros import cli, machines
+from zenthros.jobs.wire import WIRE
 
-from test_attach import MI_EC2, Attach
+from test_attach import MI_EC2, MI_PC, Attach
 
 
 def calls(events):
@@ -32,7 +34,9 @@ class TwinTest(Attach):
         self.listed = [[], [MI_EC2]]
         machines.attach("mi-ec2", type="vm", runtime="containerd", host="ubuntu@h")
         self.assertEqual(calls(self.events), by_cli)
-        self.assertEqual(by_cli[:3], ["api GET /backends", "ssh check", "api POST /backends"])
+        # The name, looked up among the machines not connected now too: one
+        # stopped is still that machine.
+        self.assertEqual(by_cli[:3], ["api GET /backends?offline=true", "ssh check", "api POST /backends"])
 
     def test_print_gives_the_lines_and_does_not_wait(self):
         out = io.StringIO()
@@ -82,6 +86,20 @@ class DetachTest(Attach):
                                          "Its agent stops. The machine itself is yours and keeps running.\n")
         self.assertIn("api DELETE /backends/vm-1a2b3c4d", self.events)
 
+    def test_detaching_this_computer_says_its_container_goes_not_that_it_keeps_running(self):
+        # A This computer is a container here: detach removes it, and the
+        # environments installed in it go with it.
+        self.api.routes[("GET", "/v1/workspaces/risk/targets")] = (200, {"targets": [
+            {"name": "mi-pc", "type": "VM", "status": "Ready", "id": "ct-1", "backendType": "container"}], "can": {}})
+        self.listed = [[MI_PC]]
+        self.docker.answers["ps"] = (0, "zenthros-mi-pc\n")
+        out = io.StringIO()
+        with mock.patch("zenthros.targetlist._local_containers", return_value={"ct-1": (2000, 4 << 30)}):
+            self.assertEqual(cli.main(["detach", "mi-pc"], out=out), 0)
+        self.assertIn(["rm", "-f", "zenthros-mi-pc"], self.docker_args())
+        self.assertEqual(out.getvalue(), "✓ mi-pc detached\n"
+                                         "Its container on this computer is removed, with the environments in it.\n")
+
     def test_detaching_a_cluster_says_how_to_take_its_agent_off(self):
         # A Deployment restarts an agent that exits: helm uninstall removes
         # the release zenthros attach installed (E-06).
@@ -93,6 +111,83 @@ class DetachTest(Attach):
         self.assertEqual(cli.main(["detach", "mi-k3s"], out=out), 0)
         self.assertEqual(out.getvalue(), "✓ mi-k3s detached\nIts agent stops. To take it off the cluster: "
                                          "helm uninstall zenthros-k8s-1a2b3c4d -n zenthros-k8s-1a2b3c4d\n")
+
+
+class VersionTest(unittest.TestCase):
+    """zenthros --version: this SDK and its wire, and what the hub set runs
+    (observaciones 10), asked with no key and briefly."""
+
+    def setUp(self):
+        import tempfile
+
+        from support import FakeAPI
+
+        self.api = FakeAPI()
+        self.addCleanup(self.api.close)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.env = {"ZENTHROS_CONFIG": os.path.join(folder.name, "config")}
+
+    def version(self, **env):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {**self.env, **env}, clear=True):
+            self.assertEqual(cli.main(["--version"], out=out), 0)
+        return out.getvalue()
+
+    def test_with_no_hub_it_is_this_sdk_alone(self):
+        from importlib import metadata
+
+        self.assertEqual(self.version(), f"zenthros {metadata.version('zenthros')} (wire {WIRE})\n")
+
+    def test_with_a_hub_it_says_what_the_hub_runs_with_no_key(self):
+        self.api.routes[("GET", "/v1/version")] = (200, {"release": "v0.2.4", "wire": WIRE, "sdkInstall": "x"})
+        said = self.version(ZENTHROS_SERVER=self.api.url).splitlines()
+        self.assertEqual(said[1], f"hub {self.api.url}: v0.2.4 (wire {WIRE})")
+        self.assertIsNone(self.api.requests[0]["auth"], "no key goes to ask it")
+
+    def test_a_hub_of_another_wire_says_what_to_install(self):
+        said = "this SDK speaks wire 9; this hub speaks 8: pip install -U 'zenthros==0.2.4'"
+        self.api.routes[("GET", "/v1/version")] = (426, {"kind": "Status", "reason": "UpgradeRequired", "message": said})
+        self.assertIn(said, self.version(ZENTHROS_SERVER=self.api.url).splitlines()[1])
+
+    def test_a_hub_that_does_not_answer_says_so_in_seconds(self):
+        import socket
+        import time
+
+        quiet = socket.socket()
+        quiet.bind(("127.0.0.1", 0))
+        quiet.listen()
+        self.addCleanup(quiet.close)
+        started = time.monotonic()
+        said = self.version(ZENTHROS_SERVER=f"http://127.0.0.1:{quiet.getsockname()[1]}").splitlines()
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertTrue(said[1].startswith("hub http://127.0.0.1:"), said)
+
+
+class NamedCommandsTest(unittest.TestCase):
+    def test_every_command_a_message_names_is_one_the_cli_has(self):
+        """What the SDK tells someone to run, "zenthros X", is a command
+        this CLI has: revive's way out said "zenthros delete", which it
+        never had (detach is). Docstrings are prose, not what to run."""
+        import ast
+        import re
+        from pathlib import Path
+
+        import zenthros
+
+        commands = set(next(a for a in cli.parser()._actions if a.dest == "cmd").choices)
+        named = re.compile(r"(?<!from )\bzenthros ([a-z][a-z-]*)")
+        wrong = []
+        for path in sorted(Path(zenthros.__file__).parent.rglob("*.py")):
+            tree = ast.parse(path.read_text())
+            prose = {id(n.body[0].value) for n in ast.walk(tree)
+                     if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                     and n.body and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in prose:
+                    wrong += [f"{path.name}:{node.lineno}: zenthros {c}" for c in named.findall(node.value)
+                              if c not in commands]
+        self.assertEqual(wrong, [], f"commands the CLI does not have (it has {sorted(commands)})")
 
 
 class SelectTest(unittest.TestCase):

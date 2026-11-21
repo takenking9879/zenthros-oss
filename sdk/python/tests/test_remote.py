@@ -24,6 +24,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import cloudpickle
@@ -46,6 +47,10 @@ STORE = "s3://zr-test/calls"
 
 def double(x):
     return 2 * x
+
+
+def scaled(x, by=1):
+    return x * by
 
 
 def frozen():
@@ -347,6 +352,16 @@ class RunTest(unittest.TestCase):
         self.assertEqual(handle.machine["python"].rsplit(".", 1)[0], remote.python_version())
         self.assertGreaterEqual(handle.overhead()["compute"], 0)
 
+    def test_a_maps_compute_spans_its_first_start_to_its_last_finish(self):
+        # A map of three trainers took 189 s and overhead() said compute 33 s,
+        # the first task's (wave 7, 2026-11-20): each record's timings were
+        # kept only if none was there yet.
+        call = SimpleNamespace(timings={"submitted": 100.0}, machine={}, attempts=None)
+        for started, finished in ((103.0, 134.0), (139.0, 188.0), (101.5, 102.0)):
+            remote.RemoteCall._record(call, {"timings": {"started": started, "finished": finished}})
+        call.timings["finished"] = 190.0
+        self.assertEqual(remote.RemoteCall.overhead(call), {"queue_and_start": 1.5, "compute": 86.5, "total": 90.0})
+
     def test_remote_exception_is_raised_here_with_its_traceback(self):
         handle, client, _ = call(explode, "boom")
         with self.assertRaises(remote.RemoteError) as caught:
@@ -390,9 +405,16 @@ class RunTest(unittest.TestCase):
             self.assertEqual(execute(uri, store, out=out), remote.EXIT_MISMATCH)
         self.assertFalse(marker.exists(), "the function ran under another Python")
         self.assertIn("Python 3.99", out.getvalue())
+        # What to do, in the machine's minor: a person with Ubuntu's 3.12 and a
+        # This computer of 3.13 read only "needs the same minor" (A2, wave 7).
+        from zenthros.remote import bundle
+
+        there = bundle.python_version()
+        self.assertIn(f"run this from Python {there} (a venv: uv venv --python {there})", out.getvalue())
         with self.assertRaises(remote.RemoteError) as caught:
             handle.result(stream_logs=False)
         self.assertEqual(caught.exception.remote_type, "PythonVersionMismatch")
+        self.assertIn(f"uv venv --python {there}", str(caught.exception))
 
     def test_a_superseded_attempt_writes_no_result(self):
         store = MemoryBlobStore()
@@ -579,6 +601,33 @@ class RunTest(unittest.TestCase):
         self.assertEqual(pending.result(), 10)
         self.assertEqual(f.__name__, "double")
         self.assertEqual(f.with_options(cpu="4").options["cpu"], "4")
+
+    def test_the_decorators_options_are_each_calls_unless_it_says_another(self):
+        store = MemoryBlobStore()
+        client = ExecutingClient(store)
+        f = zenthros.cloud(code_dir=None, on="demo-llm", params={"by": 3})(scaled)
+        with remote.configure(store=STORE, client=client, blob_store=store, on="demo-ml"):
+            one = f.submit(4)
+            other = f.submit(4, on="demo-ml", params={"by": 5})
+            # Its params are every task's, as shared's: a config gives the others.
+            mapped = f.map([1, {"x": 2}])
+            self.assertEqual((one.result(), other.result(), mapped.result()), (12, 20, [3, 6]))
+        self.assertEqual(client.submitted(one.name).spec.pool_ref, "demo-llm", "the decorator's on= was dropped")
+        self.assertEqual(client.submitted(other.name).spec.pool_ref, "demo-ml")
+        self.assertEqual(client.submitted(mapped.name).spec.pool_ref, "demo-llm")
+
+    def test_a_decorator_option_that_is_not_runs_is_refused_where_it_is_written(self):
+        with self.assertRaisesRegex(errors.ValidationError, r"\['gpux'\] are not run\(\)'s options.*params="):
+            zenthros.cloud(gpux=1)(double)
+
+    def test_a_decorator_option_a_map_cannot_honor_is_refused_by_name(self):
+        f = zenthros.cloud(code_dir=None, cache=True)(double)
+        store = MemoryBlobStore()
+        with remote.configure(store=STORE, client=ExecutingClient(store), blob_store=store, on="demo-ml"):
+            with self.assertRaisesRegex(errors.ValidationError, r"double\.map: the decorator's \['cache'\].*"
+                                                                r"with_options\(cache=False\)"):
+                f.map([1])
+            self.assertEqual(f.with_options(cache=False).map([1, 2]).result(), [2, 4])
 
 
 class FakeProc:
@@ -790,7 +839,7 @@ class PackTest(unittest.TestCase):
         Path(root, "pkg").mkdir()
         Path(root, "main.py").write_text("print('main')\n")
         Path(root, "pkg", "mod.py").write_text("X = 1\n")
-        Path(root, "data.csv").write_text("a,b\n1,2\n")
+        Path(root, "params.yaml").write_text("lr: 0.1\n")
         for skipped in (".venv", ".git", "__pycache__", ".ipynb_checkpoints"):
             Path(root, skipped).mkdir()
             Path(root, skipped, "x.py").write_text("skip\n")
@@ -800,11 +849,11 @@ class PackTest(unittest.TestCase):
             return sorted(tar.getnames())
 
     def test_project_files_without_tool_directories(self):
-        # Small files beside the code travel too (SDK-5); environments,
-        # caches and hidden directories do not.
+        # Small files beside the code travel too (SDK-5), but not data
+        # (BundleTest); environments, caches and hidden directories do not.
         with tempfile.TemporaryDirectory() as root:
             self.tree(root)
-            self.assertEqual(self.names(remote.pack_code(root, ship_sdk=False)), ["data.csv", "main.py", "pkg/mod.py"])
+            self.assertEqual(self.names(remote.pack_code(root, ship_sdk=False)), ["main.py", "params.yaml", "pkg/mod.py"])
             shipped = self.names(remote.pack_code(root))
             self.assertIn("main.py", shipped)
             self.assertIn("zenthros/remote/runner.py", shipped)
@@ -873,6 +922,33 @@ class BundleTest(unittest.TestCase):
             self.assertEqual(names(remote.pack_code(project, ship_sdk=False)),
                              ["pkg/__init__.py", "pkg/data/__init__.py", "pkg/data/load.py", "train.py"])
 
+
+    def test_notebooks_and_data_stay_home_unless_named(self):
+        # A notebook's function travels pickled, and data goes by upload=:
+        # code_dir="." of a notebook's folder carried the notebook and its
+        # outputs (observaciones P17, P20). Configs and scripts still go.
+        with tempfile.TemporaryDirectory() as project:
+            tree(project, {"train.py": "", "analisis.ipynb": "{}", "salidas/x.csv": "a,b\n", "salidas/model.pkl": "p",
+                           "fig.png": "p", "conf/train.yaml": "lr: 0.1\n", "run.sh": "python train.py\n"})
+            self.assertEqual(names(remote.pack_code(project, ship_sdk=False)), ["conf/train.yaml", "run.sh", "train.py"])
+            tree(project, {".zenthrosignore": "!salidas/x.csv\n"})
+            self.assertEqual(names(remote.pack_code(project, ship_sdk=False)),
+                             ["conf/train.yaml", "run.sh", "salidas/x.csv", "train.py"])
+
+    def test_a_call_says_once_what_it_left_out(self):
+        with tempfile.TemporaryDirectory() as project:
+            tree(project, {"train.py": "", "analisis.ipynb": "{}", "salidas/x.csv": "a,b\n", ".gitignore": "*.log\n",
+                           "run.log": "x"})
+            store = MemoryBlobStore()
+            client = ExecutingClient(store)
+            said = io.StringIO()
+            with remote.configure(store=STORE, client=client, blob_store=store, on="demo-ml"), \
+                    contextlib.redirect_stderr(said):
+                remote.run(double, 1, code_dir=project)
+                remote.run(double, 2, code_dir=project)
+        lines = [line for line in said.getvalue().splitlines() if "left out" in line]
+        self.assertEqual(lines, ["zenthros: double: left out of the code: analisis.ipynb, salidas/x.csv "
+                                 "(notebooks and data; !NAME in .zenthrosignore sends one)"])
 
     def test_credentials_stay_home_unless_named(self):
         # A small file travels now (SDK-5): a demo.env or a key would too.

@@ -38,6 +38,9 @@ CACHE_ENV = "ZENTHROS_ENV_CACHE"
 # Set in the runner that runs inside the environment: the key it was built
 # for, so it does not build again.
 READY_ENV = "ZENTHROS_FUNCTION_ENV"
+# In a venv that sees the machine's packages: the site-packages of the
+# interpreter it was made from, and of those that one was made from.
+PARENT_PTH = "zenthros-parent.pth"
 INSTALL_TIMEOUT = 1800
 
 # install/upstream.lock's java rows (PinsTest keeps them equal).
@@ -99,8 +102,19 @@ def _arch():
 
 
 def _parent_site():
-    """The site-packages of the interpreter the runner was started with."""
-    return [p for p in site.getsitepackages() if os.path.isdir(p)]
+    """The site-packages the interpreter the runner was started with sees, in
+    its order: its own and those of the venvs it was made from. A container's
+    agent venv holds the store's client and the runner's venv made from it
+    only what that lacked: a venv made from the runner's sees both."""
+    found = []
+    for directory in (p for p in site.getsitepackages() if os.path.isdir(p)):
+        found.append(directory)
+        try:
+            with open(os.path.join(directory, PARENT_PTH)) as fh:
+                found += [line.strip() for line in fh if line.strip() and os.path.isdir(line.strip())]
+        except FileNotFoundError:
+            pass
+    return list(dict.fromkeys(found))
 
 
 def _parent_key():
@@ -169,7 +183,7 @@ def _venv(root, name, requirements, out, run, note="", isolated=False):
             if made.returncode != 0:
                 raise EnvironmentFailed(f"python -m venv: {_tail(made.stdout + made.stderr)}")
             for directory in (os.path.join(lib, "site-packages") for lib in _glob_lib(target)) if not isolated else ():
-                with open(os.path.join(directory, "zenthros-parent.pth"), "w") as fh:
+                with open(os.path.join(directory, PARENT_PTH), "w") as fh:
                     fh.write("".join(p + "\n" for p in _parent_site()))
             listed = os.path.join(target, "requirements.txt")
             with open(listed, "w") as fh:

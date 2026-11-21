@@ -12,6 +12,7 @@ call goes after its result is collected, unless keep=True.
 import json
 import os
 import unittest
+import urllib.parse
 from unittest import mock
 
 from zenthros import errors, local, machines
@@ -52,14 +53,18 @@ class Env(unittest.TestCase):
 
         def backends(_body):
             listed = self.listed.pop(0) if len(self.listed) > 1 else self.listed[0]
-            return 200, {"backends": listed}
+            # As the hub answers: a machine not connected now only when
+            # asked for (?offline=true), and that answer says it holds them.
+            if self.api.requests[-1]["path"].endswith("?offline=true"):
+                return 200, {"backends": listed, "includesOffline": True}
+            return 200, {"backends": [b for b in listed if not b.get("offline")]}
 
         self.api.routes[("GET", "/v1/workspaces/risk/backends")] = backends
         original = HTTPJobClient._call
 
-        def recorded(client, method, path, *args, **kwargs):
-            self.events.append(f"api {method} {path}")
-            return original(client, method, path, *args, **kwargs)
+        def recorded(client, method, path, body=None, query=None, *args, **kwargs):
+            self.events.append(f"api {method} {path}" + (f"?{urllib.parse.urlencode(query)}" if query else ""))
+            return original(client, method, path, body, query, *args, **kwargs)
         patcher = mock.patch.object(HTTPJobClient, "_call", recorded)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -118,7 +123,7 @@ class CreateLocalTest(Env):
         self.assertIn(f"FROM python:{machines.python_minor()}-slim", build[1])
         self.assertIn("cloudpickle", build[1])
         run = next(args for args in self.docker_args() if args[0] == "run")
-        self.assertEqual(run[-3], tag)
+        self.assertEqual(run[-4], tag)
 
     def test_sizes_are_what_docker_reads(self):
         self.assertEqual([machines.docker_memory(m) for m in ("8Gi", "512Mi", "4g", 2, "1.5Gi")],
@@ -159,6 +164,14 @@ class DeleteTest(Env):
             machines.create("aws-spot", ports=[8000])
         self.assertIn("ports= is only for create('local')", str(caught.exception))
 
+    def test_a_size_or_image_for_a_template_is_refused_not_dropped(self):
+        # A template's machines are its size and run its image: a size asked
+        # here would be one the machine never has.
+        for asked in ({"cpus": 8}, {"memory": "64g"}, {"image": "img:1"}):
+            with self.assertRaisesRegex(errors.ValidationError, f"{next(iter(asked))}=.*zenthros.targets", msg=asked):
+                machines.create("aws-spot", **asked)
+        self.assertEqual([r for r in self.api.requests if r["method"] == "POST"], [])
+
     def test_a_machine_there_already_must_publish_the_ports_asked(self):
         self.listed = [[MI_PC]]
         self.docker.answers["ps"] = (0, "ports=9000\n")
@@ -187,9 +200,10 @@ class PlaceTest(Env):
     def test_on_a_machine_or_its_name_is_that_backend(self):
         self.listed = [[MI_PC]]
         m = machines.Machine(name="mi-pc", id="ct-1", target="local")
-        self.assertEqual(machines.place(m, {}).options, {"backend": "ct-1"})
-        self.assertEqual(machines.place("mi-pc", {}).options, {"backend": "ct-1"})
-        self.assertEqual(machines.place("ct-1", {}).options, {"backend": "ct-1"})
+        # mi-pc is a container: no cloud role of its own reads your bucket.
+        self.assertEqual(machines.place(m, {}).options, {"backend": "ct-1", "no_role": True})
+        self.assertEqual(machines.place("mi-pc", {}).options, {"backend": "ct-1", "no_role": True})
+        self.assertEqual(machines.place("ct-1", {}).options, {"backend": "ct-1", "no_role": True})
 
     def test_on_a_pool_is_that_pool(self):
         self.listed = [[]]
@@ -214,12 +228,12 @@ class PlaceTest(Env):
             self.assertIn("create('local', name='mi-pc', ports=[8000])", str(caught.exception))
         self.assertIn("label=zenthros.ai/backend=ct-1", self.docker_args()[-1])
         self.docker.answers["ps"] = (0, "ports=8000\n")
-        self.assertEqual(machines.place("mi-pc", {}, ports=[8000]).options, {"backend": "ct-1"})
+        self.assertEqual(machines.place("mi-pc", {}, ports=[8000]).options, {"backend": "ct-1", "no_role": True})
         # A machine that is not a container here (a VM, a pod) is the
         # controller's to check.
         self.docker.answers["ps"] = (0, "")
-        self.assertEqual(machines.place("mi-pc", {}, ports=[8000]).options, {"backend": "ct-1"})
-        self.assertEqual(machines.place("mi-pc", {}).options, {"backend": "ct-1"})
+        self.assertEqual(machines.place("mi-pc", {}, ports=[8000]).options, {"backend": "ct-1", "no_role": True})
+        self.assertEqual(machines.place("mi-pc", {}).options, {"backend": "ct-1", "no_role": True})
 
     def test_nowhere_named_is_said_with_the_names_there_are(self):
         self.listed = [[MI_PC]]

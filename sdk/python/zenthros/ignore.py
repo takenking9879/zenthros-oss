@@ -4,6 +4,10 @@
 carries, what a snapshot takes, what a local container mounts and what an
 upload sends. Credentials stay home unless an ignore file names them with
 "!": whatever carries a file makes it readable by whoever reads the store.
+
+A call's code (code_dir) leaves notebooks and data out too (NOT_CODE): a
+notebook's function travels pickled, and data goes by upload= or a bucket.
+"!" in an ignore file sends one.
 """
 
 import fnmatch
@@ -14,6 +18,12 @@ from zenthros import errors
 CREDENTIALS = (
     "*.env", ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "kubeconfig", "*.kubeconfig",
     "*.tfvars", "*.tfstate", "*credentials*.json", "*service-account*.json", "client_secret*.json",
+)
+
+NOT_CODE = (
+    "*.ipynb", "*.csv", "*.tsv", "*.parquet", "*.feather", "*.arrow", "*.pkl", "*.pickle", "*.joblib", "*.npy",
+    "*.npz", "*.pt", "*.pth", "*.ckpt", "*.safetensors", "*.onnx", "*.h5", "*.hdf5", "*.png", "*.jpg", "*.jpeg",
+    "*.webp", "*.gif", "*.xlsx", "*.xls", "*.zip", "*.tar", "*.gz",
 )
 
 

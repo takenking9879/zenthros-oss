@@ -102,6 +102,16 @@ class HereTest(unittest.TestCase):
         self.assertEqual(self.puts(), {"/zenthros/risk/out/m.pkl": b"m"})
         self.assertTrue(all(r["auth"] is None for r in self.s3.requests), "the token reached the store")
 
+    def test_an_artifact_in_the_bucket_is_read_by_its_uri(self):
+        # What a call returns as zenthros.Artifact: os.fspath() of one in a
+        # bucket raises, and that error says to read it here.
+        from zenthros import Artifact
+
+        stored = Artifact("s3://calls/zenthros/risk/in.csv")
+        self.assertEqual(files.read_bytes(stored), b"a,b")
+        with files.open(stored) as fh:
+            self.assertEqual(fh.read(), b"a,b")
+
     def test_a_file_opened_to_write_goes_when_closed_and_not_after_an_error(self):
         with files.open("s3://calls/zenthros/risk/out/a.txt", "w") as fh:
             fh.write("uno ")

@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import pickle
 import tarfile
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from zenthros.jobs.fake import FakeJobClient
 from zenthros.remote import carried
 
 from test_cache import _placed
+from test_payload import a_table
 from test_remote import ExecutingClient
 
 
@@ -40,7 +42,10 @@ def double(x):
 
 
 def large(n):
-    return b"x" * n
+    """n bytes that do not pack: a result packs before it is weighed."""
+    import os as random
+
+    return random.urandom(n)
 
 
 def reporting(x):
@@ -154,6 +159,23 @@ class Carried(unittest.TestCase):
         self.assertIn("return less", said)
         self.assertIn("return its path", said)
 
+    def test_a_table_that_packs_small_comes_back(self):
+        """The limit weighs the result packed: a table like the houses'
+        (744 KiB pickled) packs to well under it (observaciones P20)."""
+        rows = 36_000
+        self.assertGreater(len(pickle.dumps(a_table(rows), protocol=4)), 700 << 10)
+        call = self.run_call(a_table, rows)
+        self.assertEqual(call.result(stream_logs=False), a_table(rows))
+
+    def test_a_packed_result_is_kept_in_the_cache_and_read_from_it(self):
+        os.chdir(self.home.name)
+        self.addCleanup(os.chdir, os.path.dirname(os.path.abspath(__file__)))
+        first = self.run_call(a_table, 36_000, cache=True)
+        self.assertEqual(len(first.result(stream_logs=False)["zone"]), 36_000)
+        again = self.run_call(a_table, 36_000, cache=True)
+        self.assertEqual(again.action, "reuse")
+        self.assertEqual(again.result(stream_logs=False), a_table(36_000))
+
     def test_a_result_within_the_limit_comes_back_whole(self):
         size = carried.MAX_RESULT_BYTES - 1024
         self.assertEqual(len(self.run_call(large, size).result(stream_logs=False)), size)
@@ -260,6 +282,20 @@ class Carried(unittest.TestCase):
         whole, _ = self.inline_tar(first)
         self.assertEqual(whole, names(a.code.base) + own)
         self.assertEqual(first.result(stream_logs=False), 2)
+
+    def test_the_limit_counts_only_the_calls_own_files(self):
+        """The SDK's core goes by its digest and never counts: a call carries
+        360 KiB of its own. Counted with the core, it carried ~146 (P20)."""
+        own = os.urandom(300 << 10)  # does not compress
+        call = self.run_call(len, own)
+        sent = self.client.submitted(call.name)
+        self.assertLessEqual(len(sent.code.overlay), remote.MAX_CODE_BYTES)
+        self.assertGreater(len(sent.code.overlay), 300 << 10)
+        self.assertEqual(call.result(stream_logs=False), 300 << 10)
+
+    def test_a_call_over_its_own_limit_says_what_counts(self):
+        with self.assertRaisesRegex(errors.ValidationError, "own files and arguments pack to 400 KiB"):
+            self.run_call(len, os.urandom(400 << 10))
 
     def test_a_command_needs_none_of_it(self):
         call = remote.run(["echo", "hello"], code_dir=None)

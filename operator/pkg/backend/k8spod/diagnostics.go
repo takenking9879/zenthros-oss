@@ -74,7 +74,9 @@ func Enrich(ctx context.Context, cl client.Client, o Observed) backend.JobState 
 	case o.DetailOnly:
 		return withDetail(state, detail)
 	case state.Phase == v1.PhaseFailed:
-		if code != "" && !hasAuthoritativeReason(state) {
+		// A pod killed for memory says why a process failed: its code
+		// replaces PROCESS_FAILED.
+		if code != "" && (!hasAuthoritativeReason(state) || code == v1.ReasonOOMKilled && onlyProcessFailed(state)) {
 			state.Reasons = []v1.Reason{{Code: code, Detail: detail}}
 			state.Message = withDetail(backend.JobState{Message: state.Message}, detail).Message
 			return state
@@ -129,7 +131,16 @@ func diagnose(ctx context.Context, cl client.Client, o Observed) (code, detail s
 // nativeRetries is a diagnosis the native controller handles itself while
 // the workload runs: a container that exited, a pod that was evicted.
 func nativeRetries(code string) bool {
-	return code == v1.ReasonProcessFailed || code == v1.ReasonPodEvicted
+	return v1.ProcessFailure(code) || code == v1.ReasonPodEvicted
+}
+
+func onlyProcessFailed(state backend.JobState) bool {
+	for _, reason := range state.Reasons {
+		if reason.Code != v1.ReasonProcessFailed {
+			return false
+		}
+	}
+	return len(state.Reasons) > 0
 }
 
 func withDetail(state backend.JobState, detail string) backend.JobState {
@@ -147,7 +158,7 @@ func withDetail(state backend.JobState, detail string) backend.JobState {
 func hasAuthoritativeReason(state backend.JobState) bool {
 	for _, reason := range state.Reasons {
 		switch reason.Code {
-		case v1.ReasonProcessFailed, v1.ReasonPodEvicted, v1.ReasonImagePullFailed,
+		case v1.ReasonProcessFailed, v1.ReasonOOMKilled, v1.ReasonPodEvicted, v1.ReasonImagePullFailed,
 			v1.ReasonQuotaExceeded, v1.ReasonAdmissionRejected,
 			v1.ReasonInsufficientCPU, v1.ReasonInsufficientMemory, v1.ReasonInsufficientGPU,
 			v1.ReasonUnschedulable, v1.ReasonNodeResourceMissing,
@@ -178,6 +189,10 @@ func DiagnosePods(pods []corev1.Pod) (code, detail string) {
 				text := strings.TrimSpace(terminated.Reason + " " + terminated.Message)
 				if text == "" {
 					text = fmt.Sprintf("container exited with code %d", terminated.ExitCode)
+				}
+				if backend.OOMKilled(terminated.Reason) {
+					return v1.ReasonOOMKilled, fmt.Sprintf("pod %s: it ran out of memory: the kernel killed it (%s); %s",
+						pod.Name, text, v1.OutOfMemoryAdvice)
 				}
 				return v1.ReasonProcessFailed, fmt.Sprintf("pod %s: %s", pod.Name, text)
 			}

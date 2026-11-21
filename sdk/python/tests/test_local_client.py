@@ -61,7 +61,7 @@ class AnsweringEngine:
             found = self.containers.get(args[-1])
             if not found:
                 return 1, "", "Error: No such object"
-            return 0, f"{found['state']}|{found['config']}|{found['mounts']}|{found.get('oom', 'false')}\n", ""
+            return 0, f"{found['state']}|{found['config']}|{found['mounts']}\n", ""
         if verb == "ps":
             return 0, "\n".join(n for n, c in self.containers.items() if c["state"] == "running") + "\n", ""
         if verb == "run":
@@ -222,7 +222,8 @@ class ContainerTest(Env):
         self.assertIn("--memory 8g --memory-swap 8g", joined, "a job that needs more dies in the container, not this computer")
         self.assertIn("--cpus 4", joined)
         volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
-        self.assertEqual(len(volumes), 3, volumes)
+        # The agent, HOME, the agent's state and the project's own folder.
+        self.assertEqual(len(volumes), 4, volumes)
         self.assertTrue(any(v.endswith(f":{L.AGENT_PATH}:ro") for v in volumes), "a job cannot change the next start's agent")
         project = str(self.client.project)
         self.assertNotIn(f"{project}:{project}", volumes, "the project is never mounted whole")
@@ -273,6 +274,21 @@ class ContainerTest(Env):
             built.write("built again")
         self.client.submit(job("b"))
         self.assertEqual(sum(1 for c in self.engine.calls if c[0] == "run"), 2)
+
+    def test_it_leaves_no_container_behind_and_keeps_what_it_holds_on_this_computer(self):
+        """It goes away when it exits idle (--rm): a stopped one stayed for
+        good. Its state (spool, checkpoints, logs) is mounted from this
+        computer with HOME, so the next one finds them; its socket is not
+        on that mount (2026-11-20, observaciones: containers left lying)."""
+        self.client.submit(job())
+        args = self.created()
+        self.assertIn("--rm", args)
+        name = args[args.index("--name") + 1]
+        volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
+        state = next(v for v in volumes if v.endswith(f":{L.STATE_DIR}"))
+        self.assertEqual(state, f"{L.cache_root() / 'state' / name}:{L.STATE_DIR}")
+        socket = next(a for a in args if a.startswith(f"{L.LOCAL_SOCKET_ENV}="))
+        self.assertFalse(socket.split("=", 1)[1].startswith(L.STATE_DIR + "/"))
 
     def test_a_stopped_one_starts_again(self):
         self.client.submit(job("a"))
@@ -410,12 +426,25 @@ class JobTest(Env):
         self.assertEqual(obj["status"]["phase"], FAILED)
         self.assertEqual(obj["status"]["reasons"][0]["code"], "WORKER_LOST")
 
-    def test_killed_says_raise_the_memory(self):
+    def test_a_sigkill_is_no_memory_by_itself(self):
+        # The agent alone says whether it was memory (observaciones P25, 4d):
+        # a SIGKILL from elsewhere read as memory sent people after the wrong
+        # cause.
         self.client.submit(job())
-        self.finish(phase=FAILED, exitCode=137, message="signal: killed")
-        obj = self.client.job_object("j")
-        self.assertEqual(obj["status"]["reason"], "OOM_KILLED")
-        self.assertIn("memory=", obj["status"]["message"])
+        killed = "process was killed by signal killed"
+        self.finish(phase=FAILED, exitCode=137, message=killed, reasons=[{"code": "PROCESS_FAILED", "detail": killed}])
+        status = self.client.job_object("j")["status"]
+        self.assertEqual((status["reasons"][0]["code"], status["message"]), ("PROCESS_FAILED", killed))
+
+    def test_what_the_agent_says_of_memory_says_where_it_is_set_here(self):
+        self.client.submit(job())
+        said = ("process was killed by signal killed; it probably ran out of memory: the kernel killed a process "
+                "of this machine (4.0 GiB) for memory while it ran; use less memory")
+        self.finish(phase=FAILED, exitCode=137, message=said, reasons=[{"code": "PROCESS_FAILED", "detail": said}])
+        status = self.client.job_object("j")["status"]
+        self.assertEqual(status["reasons"][0]["code"], "PROCESS_FAILED")
+        self.assertTrue(status["message"].startswith(said), status["message"])
+        self.assertIn("zenthros.configure(local_memory=...)", status["message"])
 
     def test_a_timeout_ends_it(self):
         timed = job()

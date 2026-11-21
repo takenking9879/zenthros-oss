@@ -82,7 +82,16 @@ class OnlyForYou(Base):
 
     def test_a_name_that_points_here_from_elsewhere_gets_nothing(self):
         # A page of another site, through its own name for this address.
-        self.assertEqual(self.ask("/api/jobs", host="evil.example")[0], 403)
+        for host in ("evil.example", f"evil.example:{self.server.port}", "localhost.evil.example:5555", "[::1"):
+            self.assertEqual(self.ask("/api/jobs", host=host)[0], 403, host)
+
+    def test_this_computer_on_another_port_is_answered(self):
+        # A terminal that forwards the port to one of its own (VS Code's
+        # Ctrl+click) still says it is this computer (observaciones 14).
+        with mock.patch.object(tools, "jobs", return_value={"jobs": []}):
+            for host in ("localhost:5555", "127.0.0.1:8080", "localhost"):
+                self.assertEqual(self.ask("/api/jobs", host=host)[0], 200, host)
+                self.assertEqual(self.ask("/api/jobs", host=host, token="")[0], 403, host)
 
     def test_the_first_address_has_the_token_and_the_page_drops_it(self):
         self.assertIn(f"token={self.server.token}", self.server.url)
@@ -138,6 +147,7 @@ class Command(unittest.TestCase):
         job = {"metadata": {"name": "churn-train-1", "labels": {PIPELINE_LABEL: "churn", STEP_LABEL: "train"}}, "status": {"phase": "Running"}}
         client = mock.Mock()
         client.list_jobs.return_value = [job]
+        client.backends_with_offline.return_value = ([], True)
         with mock.patch.object(tools, "job_client", return_value=client), mock.patch.object(tools, "local_client", return_value=client):
             row = tools.jobs()["jobs"][0]
         self.assertEqual((row["pipeline"], row["step"]), ("churn", "train"))
@@ -165,6 +175,10 @@ class Skill(unittest.TestCase):
             written = Path(folder) / "zenthros" / "SKILL.md"
             self.assertEqual(written.read_text(), ui.skill_text())
             self.assertIn(str(written), out.getvalue())
+            # The reference the skill links, beside it.
+            for name, text in ui.skill_files().items():
+                self.assertEqual((Path(folder) / "zenthros" / name).read_text(), text, name)
+            self.assertTrue(any(name.startswith("reference/") for name in ui.skill_files()))
 
 
 class Dictionaries(unittest.TestCase):

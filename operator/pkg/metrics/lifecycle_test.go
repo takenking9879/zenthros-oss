@@ -135,3 +135,17 @@ func TestObservePendingAndBackendBusy(t *testing.T) {
 		t.Fatalf("backend_busy = %v, want +1", got)
 	}
 }
+
+// Each wait of a one-job unit's queue is counted under its reason, so a slow
+// turn shows why it was slow.
+func TestRecordExclusiveWaitCountsByReason(t *testing.T) {
+	before := testutil.ToFloat64(exclusiveWaitsTotal.WithLabelValues("conflict"))
+	occupied := testutil.ToFloat64(exclusiveWaitsTotal.WithLabelValues("occupied"))
+	RecordExclusiveWait("conflict")
+	if got := testutil.ToFloat64(exclusiveWaitsTotal.WithLabelValues("conflict")) - before; got != 1 {
+		t.Fatalf("conflict counted %v times, want 1", got)
+	}
+	if got := testutil.ToFloat64(exclusiveWaitsTotal.WithLabelValues("occupied")); got != occupied {
+		t.Fatalf("a conflict also counted as occupied: %v -> %v", occupied, got)
+	}
+}

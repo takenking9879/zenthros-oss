@@ -37,6 +37,10 @@ TEST_TIMEOUT = 600
 DISK_GB = {"containerd": 10, "systemd": 2}
 
 
+SIZE_IS_LOCAL = ("cpus and memory are This computer's (--type local): a VM or a container has the size it was "
+                 "made with, where it runs")
+
+
 def _kind(value):
     kind = _ALIASES.get(str(value or "").strip().lower())
     if kind is None:
@@ -190,7 +194,7 @@ def ssh_run(ssh, host, key, script, timeout):
 
 
 def attach(name=None, *, type=None, runtime=None, host=None, key=None, ssh="ssh", wait=False, test=True,
-           timeout=WAIT_TIMEOUT, ask=None, out=None):
+           timeout=WAIT_TIMEOUT, ask=None, out=None, cpus=None, memory=None):
     """Connect a machine of yours to the Workspace, as name. type is vm,
     container, kubernetes or local (this computer); runtime, for a VM, is
     where its jobs run: containerd (in images) or systemd (directly). What
@@ -201,18 +205,46 @@ def attach(name=None, *, type=None, runtime=None, host=None, key=None, ssh="ssh"
     (wait=True waits here, as the CLI does).
     With host ("user@address"), checks the machine over ssh, runs the lines
     there as root, and returns the Machine. type="local" starts a container
-    on this computer (zenthros.create). A name already attached is that
-    machine."""
+    on this computer (zenthros.create) with cpus and memory as its limits.
+    A name already attached is that machine; cpus= or memory= give a This
+    computer of this one that size in place, with its environments, and one
+    stopped is started again as it was. A This computer whose agent is of
+    another release than the hub's gets the hub's in place; a VM or a
+    container of another release, the lines that update it (out). First, a container here whose
+    machine the hub no longer has is removed (machines.sweep)."""
     from zenthros import machines
 
     if ask is None:
         from zenthros.cli import select as ask
     client = machines._api()
+    machines.sweep(out=out)
+    sized = cpus is not None or memory is not None
     if name:
-        found = machines._find(client, name)
+        found = machines._find(client, name, offline=True)
         if found is not None:
-            _say(out, f"✓ {name} is already attached")
-            return machines._machine(found, "external")
+            here = bool(machines._containers_here(found.id))
+            revived = not found.healthy and here
+            if revived:
+                found = machines.revive(found)
+            was = found.agent_version
+            updated = here and machines.agent_differs(found, client)
+            if updated:
+                found = machines.update_agent(found)
+                _say(out, f"✓ {name}: its agent updated from {was} to {found.agent_version}, its environments as they were")
+            if sized:
+                return machines.resize(found, cpus=cpus, memory=memory, out=out)
+            machine = machines._machine(found, "external")
+            if not here and found.type in ("vm", "container") and machines.agent_differs(found, client):
+                machine.update = tuple(machines.update_lines(client, found))
+                _say(out, f"{name}'s agent is {was}, the hub's {client.hub_release}. On {name}, run (the machine and "
+                          "its jobs stay):")
+                for line in machine.update:
+                    _say(out, line)
+            elif not updated:
+                _say(out, f"✓ {name} is back" if revived else f"✓ {name} is already attached")
+            return machine
+    if sized and type is not None and _kind(type) != "local":
+        raise errors.ValidationError(SIZE_IS_LOCAL)
     if host is not None and (not type or (_kind(type) == "vm" and not runtime)):
         # Over ssh there is nothing to answer: a VM unless type= says
         # otherwise, its jobs in containers unless runtime= does (the
@@ -221,6 +253,8 @@ def attach(name=None, *, type=None, runtime=None, host=None, key=None, ssh="ssh"
         if _kind(type) == "vm":
             _say(out, f"{name or host}: a VM, jobs in {runtime} (--type, --runtime to choose)")
     kind, runtime = ask_type(type, runtime, ask)
+    if sized and kind != "local":
+        raise errors.ValidationError(SIZE_IS_LOCAL)
     if kind == "kubernetes" and host:
         raise errors.ValidationError("host= is for a VM or a container; a cluster's lines run where kubectl reaches it")
     if kind == "local":
@@ -229,7 +263,7 @@ def attach(name=None, *, type=None, runtime=None, host=None, key=None, ssh="ssh"
         _say(out, f"This computer joins your Workspace{' as ' + name if name else ''}: jobs reach it from anywhere. "
                   "To run from this computer only, with no hub, you need no attach: on='local'.")
         # create checks Docker before it asks the hub for anything.
-        made = machines.create(machines.LOCAL, name=name)
+        made = machines.create(machines.LOCAL, name=name, cpus=cpus, memory=memory)
         _say(out, "✓ connected")
         if test:
             _say(out, f"✓ test run {seconds_text(test_run(made.name))}")

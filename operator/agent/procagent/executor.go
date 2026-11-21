@@ -104,7 +104,10 @@ type Config struct {
 	PathPrefix func() []string
 	// ExtraEnv returns variables every job gets (VIRTUAL_ENV). Nil adds none.
 	ExtraEnv func() map[string]string
-	Logger   logr.Logger
+	// Facts is where the container is observed (containerfacts). The zero
+	// value reads the container itself; tests point it at a fake tree.
+	Facts  containerfacts.Sources
+	Logger logr.Logger
 }
 
 // Executor runs jobs as child processes. It is safe for concurrent use.
@@ -137,7 +140,10 @@ type job struct {
 	pgid   int
 	signal syscall.Signal // preempt signal; 0 sends none
 	start  time.Time
-	done   chan struct{} // closed once result.json is written
+	// oomKills is the container's count of processes killed for memory
+	// when the job started (containerfacts.OOMKills).
+	oomKills int64
+	done     chan struct{} // closed once result.json is written
 	// res is how the process ended, set before done closes. Status reads
 	// it when result.json could not be written (a full disk): the job
 	// still ends.
@@ -151,6 +157,13 @@ type result struct {
 	Error      string    `json:"error,omitempty"`
 	StartedAt  time.Time `json:"startedAt"`
 	FinishedAt time.Time `json:"finishedAt"`
+	// OutOfMemory: SIGKILL ended it while the kernel killed a process of
+	// the container for memory. The container's cgroup is the agent's and
+	// every job's: probable, not the job's own evidence, so it stays
+	// PROCESS_FAILED and its message says so, with MemoryBytes, the
+	// container's.
+	OutOfMemory bool  `json:"outOfMemory,omitempty"`
+	MemoryBytes int64 `json:"memoryBytes,omitempty"`
 }
 
 // New builds an executor. The state directory must be writable.
@@ -178,9 +191,15 @@ func New(cfg Config) (*Executor, error) {
 	facts := sync.OnceValue(func() capability.Host {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return containerfacts.Read(ctx, containerfacts.Sources{})
+		return containerfacts.Read(ctx, cfg.Facts)
 	})
-	e.host = func(context.Context) capability.Host { return facts() }
+	e.host = func(context.Context) capability.Host {
+		// The rest once (nvidia-smi is slow); the limits each time: a
+		// container resized in place says so on its next heartbeat.
+		host := facts()
+		host.CPU, host.MilliCPU, host.MemoryBytes = containerfacts.Limits(cfg.Facts)
+		return host
+	}
 	return e, nil
 }
 
@@ -388,6 +407,7 @@ func (e *Executor) start(ctx context.Context, spec jobspec.JobSpec, env map[stri
 	// thread that started the job exits, so the start runs on a locked
 	// thread, which the runtime keeps after it is unlocked.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	oomKills := containerfacts.OOMKills(e.cfg.Facts)
 	started := time.Now()
 	runtime.LockOSThread()
 	err = cmd.Start()
@@ -402,6 +422,8 @@ func (e *Executor) start(ctx context.Context, spec jobspec.JobSpec, env map[stri
 		signal: signal,
 		start:  started,
 		done:   make(chan struct{}),
+
+		oomKills: oomKills,
 	}
 	go e.wait(j, cmd)
 	return j, nil
@@ -421,6 +443,10 @@ func (e *Executor) wait(j *job, cmd *exec.Cmd) {
 	res := result{ExitCode: cmd.ProcessState.ExitCode(), StartedAt: j.start, FinishedAt: time.Now()}
 	if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 		res.Signal = status.Signal().String()
+		if status.Signal() == syscall.SIGKILL && containerfacts.OOMKills(e.cfg.Facts) > j.oomKills {
+			_, _, res.MemoryBytes = containerfacts.Limits(e.cfg.Facts)
+			res.OutOfMemory = true
+		}
 	}
 	var exitErr *exec.ExitError
 	if err != nil && !errors.As(err, &exitErr) {
@@ -493,6 +519,10 @@ func stateOf(res result, lastLines string) backend.JobState {
 	switch {
 	case res.Error != "":
 		detail = res.Error
+	case res.OutOfMemory:
+		detail = fmt.Sprintf("process was killed by signal %s; it probably ran out of memory: the kernel killed a "+
+			"process of this machine (%.1f GiB) for memory while it ran; %s", res.Signal, float64(res.MemoryBytes)/(1<<30),
+			v1.OutOfMemoryAdvice)
 	case res.Signal != "":
 		detail = "process was killed by signal " + res.Signal
 	}

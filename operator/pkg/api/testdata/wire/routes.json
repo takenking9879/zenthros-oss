@@ -33,7 +33,7 @@
       "full": true
     },
     "GET /v1/version": {
-      "sdk": false,
+      "sdk": true,
       "answer": {
         "release": "x",
         "wire": 1,
@@ -144,6 +144,7 @@
             ]
           }
         ],
+        "includesOffline": true,
         "nextPageToken": "x",
         "refusedFull": [
           {
@@ -1117,6 +1118,7 @@
         "targets": [
           {
             "available": 1,
+            "agentVersion": "x",
             "backendType": "x",
             "capacityFrom": "x",
             "gpuCount": 1,

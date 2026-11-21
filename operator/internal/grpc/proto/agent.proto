@@ -973,6 +973,10 @@ message ListBackendsResponse {
   // next_page_token asks for the backends after this page; empty on the
   // last. refused_full comes on the first page only.
   string next_page_token = 3;
+
+  // includes_offline: the answer lists the backends with no session too, as
+  // include_offline asked. Only such a list says a backend is not there.
+  bool includes_offline = 4;
 }
 
 // RefusedBackend is a machine a full Gateway refused, after matching its

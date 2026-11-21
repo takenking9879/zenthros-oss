@@ -94,6 +94,23 @@ class Sent(Artifact):
         return into
 
 
+@dataclass(frozen=True)
+class Kept(Artifact):
+    """An argument the call stored apart, by its digest (upload.keep_arguments).
+    Where it runs, the function gets its value, opened only once its bytes
+    are the ones the call named: the call itself is pinned by its spec."""
+
+    def value(self, store):
+        from zenthros.remote import bundle, payload
+
+        raw = store.get(self.uri)
+        seen = hashlib.sha256(raw).hexdigest()
+        if seen != self.sha256:
+            raise errors.ValidationError(f"{self.uri} is not the argument the call stored: its SHA-256 is "
+                                         f"{seen[:12]}…, not {self.sha256[:12]}…; refusing to unpickle it")
+        return bundle.cloudpickle().loads(payload.load(raw)["value"])
+
+
 def _same(uri, seen, expected):
     if seen != expected:
         raise errors.ValidationError(f"{uri} hashes to {seen[:12]}…, not to the {expected[:12]}… that was sent: "

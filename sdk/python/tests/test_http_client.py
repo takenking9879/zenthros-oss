@@ -239,6 +239,20 @@ class HTTPJobClientTest(unittest.TestCase):
         with mock.patch.object(http, "_sleep"), self.assertRaises(errors.Conflict):
             self.client.submit(job())
 
+    def test_a_name_taken_says_what_to_do_as_on_this_computer(self):
+        # A script rerun after a failed run with name= (wave 7, 2026-11-20)
+        # got the hub's raw "zenthrosjobs ... already exists".
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = status(409, 'zenthrosjobs "j" already exists', "AlreadyExists")
+        with self.assertRaises(errors.Conflict) as caught:
+            self.client.submit(job())
+        self.assertEqual(str(caught.exception), "job j already exists here: name another, or zenthros.get('j')")
+        answers = [status(503, "busy", "ServiceUnavailable"), status(409, 'zenthrosjobs "j" already exists', "AlreadyExists")]
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = lambda _body: answers.pop(0)
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = (200, {"metadata": {"name": "j", "annotations": {http.SUBMISSION: "another"}}})
+        with mock.patch.object(http, "_sleep"), self.assertRaises(errors.Conflict) as caught:
+            self.client.submit(job())
+        self.assertIn("name another, or zenthros.get('j')", str(caught.exception))
+
     def test_a_name_that_could_not_be_read_back_is_no_conflict(self):
         # The read back of a name a lost answer may have taken did not
         # answer either: whose it is is unknown, not someone else's. A

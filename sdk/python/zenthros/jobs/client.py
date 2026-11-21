@@ -71,6 +71,11 @@ class JobClient:
         the Workspace has no store of its own."""
         return {}, []
 
+    def backends_with_offline(self):
+        """The Workspace's backends, the stopped ones too, and whether the
+        answer holds them all: none where there is no zenthros-api."""
+        return [], False
+
     def job_cost(self, name):
         """What the job cost so far, or None where nothing holds prices."""
         return None

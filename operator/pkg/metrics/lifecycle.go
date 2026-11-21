@@ -30,6 +30,11 @@ var (
 		Help: "Admissions refused because the target backend was BACKEND_BUSY.",
 	})
 
+	exclusiveWaitsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "zenthros_controller_exclusive_waits_total",
+		Help: "Jobs a one-job unit's queue kept waiting, by why: occupied (the cache shows it taken), ahead (older jobs first), claimant (another job claimed it at the same moment), conflict (the hold met a newer copy; decided again at once). Counted once per wait and reason, not per poll.",
+	}, []string{"reason"})
+
 	backendIdleSeconds = prometheus.NewDesc(
 		"zenthros_controller_backend_idle_seconds",
 		"Seconds an exclusive durable unit (dedicated VM, managed slot, or rayClusterRef) has been idle. Shared or ephemeral RayClusters are never emitted.",
@@ -42,7 +47,14 @@ func lifecycleCollectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		pendingSeconds,
 		backendBusyTotal,
+		exclusiveWaitsTotal,
 	}
+}
+
+// RecordExclusiveWait counts one wait of a job in a one-job unit's queue,
+// by its reason.
+func RecordExclusiveWait(reason string) {
+	exclusiveWaitsTotal.WithLabelValues(reason).Inc()
 }
 
 // ExclusiveIdleUnit is true only for a durable unit whose occupancy has a

@@ -105,12 +105,13 @@ class LocalBackendTest(unittest.TestCase):
         self.assertEqual(run[0], "run")
         flags = " ".join(run)
         for wanted in ("--cpus 2", "--memory 4g", "--memory-swap 4g", "--name zenthros-ct-1", "--cap-drop ALL",
-                       "--security-opt no-new-privileges", "--label zenthros.ai/backend=ct-1", "--init"):
+                       "--security-opt no-new-privileges", "--label zenthros.ai/backend=ct-1", "--init",
+                       "--restart unless-stopped", f"--label zenthros.ai/hub={self.api.url}"):
             self.assertIn(wanted, flags)
         for never in ("--privileged", "-v", "--volume", "--mount", "--cap-add", "--pid", "--network host",
                       "--network=host", "--device"):
             self.assertNotIn(never, run, "the container gets nothing of the host")
-        self.assertEqual(run[-3:], ["zenthros-pipeline:local", "sleep", "infinity"])
+        self.assertEqual(run[-4:], ["zenthros-pipeline:local", "sh", "-c", local.COMMAND])
         install, join = self.docker.calls[1], self.docker.calls[2]
         self.assertEqual(install[0], ["exec", "-i", "zenthros-ct-1", "sh"])
         self.assertIn("ZENTHROS_INSTALL", install[1])
@@ -118,6 +119,12 @@ class LocalBackendTest(unittest.TestCase):
         self.assertIn(TOKEN, join[1], "the token goes in on standard input")
         self.assertEqual(self.events[:4], ["api POST /backends", "docker run", "docker exec", "docker exec"],
                          "the join is asked first: the container is named after the backend")
+
+    def test_its_command_attaches_the_agent_again_before_it_sleeps(self):
+        # Docker restarts it (--restart unless-stopped) with its command
+        # alone: the agent comes back only if the command brings it.
+        self.assertLess(local.COMMAND.index(f'"{local.AGENT}" attach --resume'), local.COMMAND.index("exec sleep infinity"))
+        self.assertIn(">/dev/null 2>&1;", local.COMMAND, "a container that never attached still sleeps")
 
     def test_ports_are_published_to_this_computer_only_and_the_url_says_so(self):
         zenthros.LocalBackend.create("img")
@@ -132,7 +139,7 @@ class LocalBackendTest(unittest.TestCase):
         # container's own address.
         self.assertEqual(env, ["ZENTHROS_ENDPOINT_TEMPLATE={scheme}://127.0.0.1:{port};scope=Private"])
         self.assertIn("zenthros.ai/ports=8000,9000", run)
-        self.assertEqual(run[-3:], ["img", "sleep", "infinity"])
+        self.assertEqual(run[-4:], ["img", "sh", "-c", local.COMMAND])
 
     def test_the_token_is_in_no_argument_and_no_error(self):
         zenthros.LocalBackend.create("img")

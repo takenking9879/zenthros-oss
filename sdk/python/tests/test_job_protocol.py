@@ -22,6 +22,7 @@ from zenthros.core.storage import MemoryBlobStore
 from support import AckAgent
 
 FIXTURE = Path(__file__).resolve().parents[3] / "operator" / "pkg" / "jobcli" / "testdata" / "wire.json"
+REASONS = Path(__file__).resolve().parents[3] / "operator" / "api" / "v1" / "reasons.go"
 
 
 def load():
@@ -81,6 +82,21 @@ class JobProtocolTest(unittest.TestCase):
         self.assertEqual(path, rep["path"])
         self.assertEqual(headers["Authorization"], fx["authorization"])
         self.assertEqual(body, rep["body"])
+
+
+class ProcessFailures(unittest.TestCase):
+    def test_what_the_sdk_retries_is_what_the_controller_calls_a_process_failure(self):
+        """handle.PROCESS_FAILURES is v1.ProcessFailure: what retries= runs
+        again and what is the code's to explain. A code added in Go alone
+        changed what the SDK retries without a word."""
+        import re
+
+        from zenthros.jobs import handle
+
+        source = REASONS.read_text(encoding="utf-8")
+        values = dict(re.findall(r'^\s*(Reason\w+)\s*=\s*"([A-Z_]+)"', source, re.M))
+        body = re.search(r"func ProcessFailure\(code string\) bool \{(.*?)\n\}", source, re.S).group(1)
+        self.assertEqual({values[name] for name in re.findall(r"\b(Reason\w+)\b", body)}, set(handle.PROCESS_FAILURES))
 
 
 if __name__ == "__main__":

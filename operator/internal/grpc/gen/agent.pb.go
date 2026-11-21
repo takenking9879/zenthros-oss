@@ -3723,8 +3723,11 @@ type ListBackendsResponse struct {
 	// next_page_token asks for the backends after this page; empty on the
 	// last. refused_full comes on the first page only.
 	NextPageToken string `protobuf:"bytes,3,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// includes_offline: the answer lists the backends with no session too, as
+	// include_offline asked. Only such a list says a backend is not there.
+	IncludesOffline bool `protobuf:"varint,4,opt,name=includes_offline,json=includesOffline,proto3" json:"includes_offline,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ListBackendsResponse) Reset() {
@@ -3776,6 +3779,13 @@ func (x *ListBackendsResponse) GetNextPageToken() string {
 		return x.NextPageToken
 	}
 	return ""
+}
+
+func (x *ListBackendsResponse) GetIncludesOffline() bool {
+	if x != nil {
+		return x.IncludesOffline
+	}
+	return false
 }
 
 // RefusedBackend is a machine a full Gateway refused, after matching its
@@ -7661,11 +7671,12 @@ const file_agent_proto_rawDesc = "" +
 	"\fcapabilities\x18\x0f \x03(\v2%.zenthros.agent.v1.WorkloadCapabilityR\fcapabilities\x120\n" +
 	"\x04host\x18\x10 \x01(\v2\x1c.zenthros.agent.v1.HostFactsR\x04host\x12\x12\n" +
 	"\x04name\x18\x11 \x01(\tR\x04name\x12\x18\n" +
-	"\aoffline\x18\x12 \x01(\bR\aoffline\"\xc0\x01\n" +
+	"\aoffline\x18\x12 \x01(\bR\aoffline\"\xeb\x01\n" +
 	"\x14ListBackendsResponse\x12:\n" +
 	"\bbackends\x18\x01 \x03(\v2\x1e.zenthros.agent.v1.BackendInfoR\bbackends\x12D\n" +
 	"\frefused_full\x18\x02 \x03(\v2!.zenthros.agent.v1.RefusedBackendR\vrefusedFull\x12&\n" +
-	"\x0fnext_page_token\x18\x03 \x01(\tR\rnextPageToken\"[\n" +
+	"\x0fnext_page_token\x18\x03 \x01(\tR\rnextPageToken\x12)\n" +
+	"\x10includes_offline\x18\x04 \x01(\bR\x0fincludesOffline\"[\n" +
 	"\x0eRefusedBackend\x12\x1d\n" +
 	"\n" +
 	"backend_id\x18\x01 \x01(\tR\tbackendId\x12*\n" +

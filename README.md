@@ -17,6 +17,19 @@ Apache License 2.0:
 The hub that coordinates them (`api.zenthros.app`) is not in this repository.
 The site: [zenthros.app](https://zenthros.app).
 
+## Start
+
+The SDK is not on PyPI: each release has its wheel.
+
+```bash
+pip install "zenthros[seal] @ https://github.com/takenking9879/zenthros-oss/releases/download/v0.2.4/zenthros-0.2.4-py3-none-any.whl"
+zenthros --version
+```
+
+Then [the SDK's README](sdk/python/README.md): a first job on this computer
+with no account, then a hub and your machines. For a coding agent, `zenthros
+agent skill --to .claude/skills` writes the skill it reads.
+
 ## Build and test
 
 ```bash
@@ -34,14 +47,14 @@ downloaded comes from this code. `.github/workflows/release.yml` builds each
 release from its tag. Build the same binary and compare:
 
 ```bash
-git checkout v0.2.3
+git checkout v0.2.4
 cd operator
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false \
-  -ldflags="-s -w -X github.com/zenthros/operator/internal/buildinfo.Release=v0.2.3" \
+  -ldflags="-s -w -X github.com/zenthros/operator/internal/buildinfo.Release=v0.2.4" \
   -o zenthros-agent ./cmd/agent
 sha256sum zenthros-agent
 # the release's agent, unpacked:
-curl -fsSL https://github.com/takenking9879/zenthros-oss/releases/download/v0.2.3/zenthros-agent-linux-amd64.zst | zstd -d | sha256sum
+curl -fsSL https://github.com/takenking9879/zenthros-oss/releases/download/v0.2.4/zenthros-agent-linux-amd64.zst | zstd -d | sha256sum
 ```
 
 The two digests are the same. `SHA256SUMS` in each release covers every file

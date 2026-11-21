@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	v1 "github.com/zenthros/operator/api/v1"
@@ -35,6 +36,14 @@ type Harness struct {
 	Spec    jobspec.JobSpec
 	End     func(t *testing.T, e Executor, handle string)
 	Missing string
+	// KilledForMemory ends the job as the kernel ends one out of memory,
+	// with the evidence this executor's runtime leaves; Killed ends it by
+	// SIGKILL with none. Confirms: that evidence is the job's own (its
+	// unit, its pod's container), and the job is OOM_KILLED; without it
+	// (a cgroup the job shares) the job is PROCESS_FAILED and says it
+	// probably ran out of memory.
+	KilledForMemory, Killed func(t *testing.T, e Executor, handle string)
+	Confirms                bool
 }
 
 // Contract runs every promise against h.
@@ -124,6 +133,45 @@ func Contract(t *testing.T, h Harness) {
 		state, err := e.Status(ctx, handle)
 		if err == nil && (state.Phase == v1.PhaseRunning || state.Phase == v1.PhasePending || state.Phase == v1.PhaseSubmitted) {
 			t.Fatalf("Status after cancel = %s", state.Phase)
+		}
+	})
+	// The user is told it was memory only on evidence of it, and how sure it
+	// is: a SIGKILL from elsewhere is no memory (observaciones P25, 4d).
+	t.Run("a job killed for memory says so only on evidence", func(t *testing.T) {
+		for _, c := range []struct {
+			name   string
+			end    func(t *testing.T, e Executor, handle string)
+			memory bool
+		}{{"for memory", h.KilledForMemory, true}, {"by a signal", h.Killed, false}} {
+			t.Run(c.name, func(t *testing.T) {
+				e := h.New(t)
+				handle, err := e.Submit(ctx, h.Spec, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.end(t, e, handle)
+				state, err := e.Status(ctx, handle)
+				if err != nil || state.Phase != v1.PhaseFailed {
+					t.Fatalf("Status = %s, %v; want Failed", state.Phase, err)
+				}
+				var codes []string
+				for _, reason := range state.Reasons {
+					codes = append(codes, reason.Code)
+				}
+				switch {
+				case c.memory && h.Confirms:
+					if !slices.Equal(codes, []string{v1.ReasonOOMKilled}) || !strings.Contains(state.Message, v1.OutOfMemoryAdvice) {
+						t.Fatalf("reasons %v, message %q; want OOM_KILLED with what to do", codes, state.Message)
+					}
+				case c.memory:
+					if !slices.Equal(codes, []string{v1.ReasonProcessFailed}) || !strings.Contains(state.Message, "probably ran out of memory") ||
+						!strings.Contains(state.Message, v1.OutOfMemoryAdvice) {
+						t.Fatalf("reasons %v, message %q; want PROCESS_FAILED that says it probably ran out of memory", codes, state.Message)
+					}
+				case slices.Contains(codes, v1.ReasonOOMKilled) || strings.Contains(strings.ToLower(state.Message), "memory"):
+					t.Fatalf("a SIGKILL with no evidence of memory: reasons %v, message %q", codes, state.Message)
+				}
+			})
 		}
 	})
 	t.Run("what names nothing is not found", func(t *testing.T) {

@@ -133,6 +133,26 @@ func TestRecordedStateCarriesTheExitCode(t *testing.T) {
 	}
 }
 
+// The unit is the job's own cgroup: systemd's oom-kill is evidence of the
+// job's, and it is OOM_KILLED with what to do; a SIGKILL from elsewhere
+// says nothing of memory (4d).
+func TestRecordedStateSaysMemoryOnlyForOOMKill(t *testing.T) {
+	for _, tc := range []struct {
+		record, code string
+		memory       bool
+	}{
+		{"result=oom-kill code=killed status=KILL", v1.ReasonOOMKilled, true},
+		{"result=signal code=killed status=KILL", v1.ReasonProcessFailed, false},
+	} {
+		record, _ := parseRecorded(tc.record)
+		state := record.State()
+		if state.Phase != v1.PhaseFailed || len(state.Reasons) != 1 || state.Reasons[0].Code != tc.code ||
+			strings.Contains(state.Message, v1.OutOfMemoryAdvice) != tc.memory {
+			t.Errorf("%q: %s %+v %q, want %s (memory said: %v)", tc.record, state.Phase, state.Reasons, state.Message, tc.code, tc.memory)
+		}
+	}
+}
+
 // An inactive unit is resolved from its record; with none, an installed
 // unit has not run (an error, so the controller resubmits and the unit is
 // started), even when systemd infers a success.

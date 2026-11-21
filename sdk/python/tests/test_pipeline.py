@@ -286,6 +286,26 @@ class ByHand(PipelineBase):
         run = self.pipe.run(start_at="features", upstream={"prep": first}, cache=True)
         self.assertEqual(run.result(), "train(features(prep(x)), depth=1)")
 
+    def test_resume_starts_where_the_last_run_started_with_what_it_was_given(self):
+        pipe = Pipeline([("prep", prep), ("features", broken), ("train", train)], name="desde")
+        first = pipe.run(start_at="features", upstream={"prep": "hecho"})
+        with self.assertRaises(Exception):
+            first.result()
+        pipe.steps[1].fn = features
+        before = self.submits()
+        again = pipe.resume()
+        self.assertEqual(again["prep"].action, SKIP, "prep was not run then, and is not now")
+        self.assertEqual(again.result(), "train(features(hecho), depth=1)")
+        self.assertEqual(self.submits() - before, 2)
+        # The plan of a resume shows the same start: what you gave, then reuse.
+        self.assertEqual([row.action for row in pipe.plan(resume=True).steps], [YOUR_FILE, REUSE, REUSE])
+
+    def test_resume_with_a_cache_gives_the_start_step_what_it_was_given(self):
+        first = remote.run(prep, "x", code_dir=None, on="demo-ml")
+        self.pipe.run(start_at="features", upstream={"prep": first}, cache=True)
+        again = self.pipe.resume()
+        self.assertEqual(again.result(), "train(features(prep(x)), depth=1)")
+
     def test_upstream_of_the_wrong_step_is_refused(self):
         with self.assertRaisesRegex(errors.ValidationError, "takes what features leaves"):
             self.pipe.run(start_at="train", upstream={"prep": "x"})
@@ -293,6 +313,13 @@ class ByHand(PipelineBase):
             self.pipe.run(start_at="prep", upstream={"train": "x"})
         with self.assertRaisesRegex(errors.ValidationError, "goes with start_at"):
             self.pipe.run("x", upstream={"prep": "x"})
+
+    def test_an_option_that_is_not_runs_is_refused_not_given_to_every_step(self):
+        for method in (self.pipe.run, self.pipe.plan):
+            with self.assertRaisesRegex(errors.ValidationError, r"\['depht'\] are not run\(\)'s options.*params=",
+                                        msg=method.__name__):
+                method("x", depht=8)
+        self.assertEqual(self.submits(), 0)
 
     def test_unknown_names_are_refused(self):
         with self.assertRaisesRegex(errors.ValidationError, "no step"):

@@ -10,6 +10,13 @@ import (
 
 // DiagnosticReasonCode maps Kubernetes and native-operator messages to the stable
 // reason taxonomy shared across workload adapters.
+// OOMKilled reports the kubelet's reason for a container the kernel killed
+// for memory (its terminated state's Reason): evidence of the container's
+// own.
+func OOMKilled(terminatedReason string) bool {
+	return terminatedReason == "OOMKilled"
+}
+
 func DiagnosticReasonCode(text string) string {
 	lower := strings.ToLower(text)
 	switch {

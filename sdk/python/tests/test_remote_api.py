@@ -21,6 +21,7 @@ from zenthros import errors, remote
 from zenthros.core.storage import MemoryBlobStore
 from zenthros.jobs.fake import FakeJobClient
 from zenthros.remote import call
+from zenthros.remote.call import RESULT_PRODUCER
 from zenthros.view import Backend
 
 from support import execute
@@ -86,6 +87,22 @@ class CommandTest(Env):
             # hide the image's zenthros (its train, data...).
             self.assertEqual(tar.getnames(), ["prep.py"])
 
+    def test_a_job_says_its_name_once_and_what_it_runs(self):
+        # The name is what zenthros jobs, logs and get() take
+        # (observaciones 16); FUNCTION is the table's column.
+        client = FakeJobClient()
+        said = io.StringIO()
+        with remote.configure(client=client), contextlib.redirect_stderr(said):
+            one = remote.run(add, 1, 2, code_dir=None)
+            many = remote.map(add, [{"a": i, "b": 1} for i in range(4)], code_dir=None)
+            command = remote.run(["python", "prep.py", "--fast"], code_dir=None)
+        lines = [line for line in said.getvalue().splitlines() if "→" in line]
+        self.assertEqual(lines, [f"zenthros: add → {one.name} on {one.where}",
+                                 f"zenthros: add ×4 → {many.name} on {many.where}",
+                                 f"zenthros: python prep.py --fast → {command.name} on {command.where}"])
+        self.assertEqual([client.submitted(c.name).annotations[call.FUNCTION] for c in (one, many, command)],
+                         ["add", "add", "python prep.py --fast"])
+
     def test_result_is_zero_or_the_failure_with_its_log(self):
         client = FakeJobClient()
         with remote.configure(client=client):
@@ -96,6 +113,16 @@ class CommandTest(Env):
             with self.assertRaises(remote.RemoteError) as caught:
                 bug.result(stream_logs=False)
             self.assertIn("last log lines", str(caught.exception))
+            # Killed for memory is the code's too: the end of its log is where
+            # it was when it ran out.
+            big = remote.run(["python", "-c", "x = bytearray(1 << 40)"], code_dir=None)
+            client.fail(big.name, "OOM_KILLED")
+            with self.assertRaises(remote.RemoteError) as caught:
+                big.result(stream_logs=False)
+            self.assertIn("last log lines", str(caught.exception))
+            # Its code is the error's own, as on a function's failure: not
+            # only on the JobFailed behind it.
+            self.assertEqual(caught.exception.reason, "OOM_KILLED")
             platform = remote.run(["true"], code_dir=None, image="nope:1")
             client.fail(platform.name, "IMAGE_PULL_FAILED")
             with self.assertRaises(errors.JobFailed) as caught:
@@ -401,6 +428,14 @@ class SpecTest(Env):
             with self.assertRaises(errors.ValidationError):
                 remote.run(double, 1, timeout=bad)
 
+    def test_result_waits_a_duration_as_run_takes_it(self):
+        call = remote.run(double, 1, code_dir=None)
+        with mock.patch.object(call.handle, "wait", wraps=call.handle.wait) as wait:
+            self.assertEqual(call.result(timeout="30m", stream_logs=False), 2)
+        self.assertEqual(wait.call_args.kwargs["timeout"], 1800)
+        with self.assertRaises(errors.ValidationError):
+            remote.run(double, 1, code_dir=None).result(timeout="soon")
+
 
 class LifecycleTest(Env):
     def test_get_finds_a_call_from_its_name(self):
@@ -420,7 +455,12 @@ class LifecycleTest(Env):
         self.assertEqual((info["phase"], info["kind"], info["attempts"]), ("Succeeded", "call", 1))
         self.assertEqual(info["output"], call.prefix)
         self.assertIn("python", info["machine"])
+        # The runner reported the result's SHA-256: that is Zenthros's, not
+        # what the code published.
+        ours = lambda reports: [r for r in reports if r.producer_id.startswith(RESULT_PRODUCER)]  # noqa: E731
+        self.assertTrue(ours(call.handle.reports()))
         self.assertTrue(call.reports())
+        self.assertEqual(ours(call.reports()), [])
 
     def test_configure_restores_and_knows_its_settings(self):
         with remote.configure(workspace="ws-b"):

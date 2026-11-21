@@ -78,13 +78,14 @@ def _message(raw, fallback):
     return fallback
 
 
-def _hub(method, url, context, body=None):
+def _hub(method, url, context, body=None, timeout=60):
+    """A request to a hub with no key (sign-ups, its version)."""
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(url, data=data, method=method, headers=HEADERS)
     if data is not None:
         request.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(request, context=context, timeout=60) as resp:
+        with urllib.request.urlopen(request, context=context, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as err:
         raw = err.read()
@@ -96,6 +97,16 @@ def _hub(method, url, context, body=None):
         return err.code, raw
     except (urllib.error.URLError, OSError) as err:
         raise errors.TransientError(f"zenthros-api at {url.split('/v1/')[0]}: {getattr(err, 'reason', err)}") from err
+
+
+def hub_version(server, ca_data="", timeout=3):
+    """What the hub says it runs, with no key: {"release", "wire",
+    "sdkInstall"} (GET /v1/version). A hub of another wire refuses this SDK
+    (426) with what to install, as every other call."""
+    code, raw = _hub("GET", server + "/v1/version", _ssl_context(server, ca_data), timeout=timeout)
+    if code != 200:
+        raise errors.TransientError(f"zenthros-api {code}: {_message(raw, 'cannot say its version')}")
+    return json.loads(raw)
 
 
 def how_to_sign_in(server, ca_data=""):

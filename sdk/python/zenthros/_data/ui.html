@@ -128,6 +128,9 @@ const views = {
       {title: "State", get: row => state(row.state)},
       {title: "Exit", get: row => row.exit_code},
       {title: "Reason", get: row => row.reason},
+      {title: "Machine", get: row => row.machine},
+      {title: "Function", get: row => row.tasks > 1 ? row.function + " ×" + row.tasks : row.function},
+      {title: "Map", get: row => row.map || ""},
       {title: "Pipeline", get: row => row.pipeline ? row.pipeline + " · " + row.step : ""},
       {title: "Created", get: row => when(row.created)},
     ], answer.jobs, "No jobs yet. zenthros run hola.py sends one.", {chosen: row => row.job === chosen, go: row => choose(row.job)});

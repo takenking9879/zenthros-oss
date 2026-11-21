@@ -6,6 +6,7 @@ is submitted with, and how its URL is read from the status."""
 import io
 import json
 import os
+import pickle
 import shutil
 import stat
 import tempfile
@@ -132,6 +133,19 @@ class ServeSpecTest(unittest.TestCase):
             call = fn.serve(8000, port=8000, name="cf")
         self.assertEqual(call.service, ["http"])
         self.assertEqual(client.submitted("cf").spec.pool_ref, "demo-llm")
+
+    def test_a_served_function_takes_its_keyword_arguments_in_params(self):
+        fn = zenthros.cloud(code_dir=None, on="demo-llm", params={"port": 8000})(app)
+        client = FakeJobClient()
+        store = MemoryBlobStore()
+        with remote.configure(store=STORE, client=client, blob_store=store, on="demo-ml"), \
+                redirect_stderr(io.StringIO()):
+            call = fn.serve(port=8000, name="kw")
+            with self.assertRaisesRegex(errors.ValidationError, "a command takes its arguments inside it"):
+                zenthros.serve("python -m http.server", port=8000, params={"x": 1})
+        self.assertEqual(client.submitted("kw").spec.pool_ref, "demo-llm")
+        body = pickle.loads(pickle.loads(store.get(call.call_uri))["call"])
+        self.assertEqual(body["kwargs"], {"port": 8000})
 
 
 class ServiceCallTest(unittest.TestCase):

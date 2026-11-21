@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -33,11 +34,18 @@ import (
 // alone gets it cannot: a provider stops a container by signalling its
 // PID 1, so an attached agent hears no stop, and its jobs end as lost
 // workers and run again elsewhere. And a restart of the container brings
-// back its own command, not the agent.
+// back its own command, not the agent: a command that runs `attach
+// --resume` (This computer's) attaches it again as it was.
 const (
 	attachLogName = "attach.log"
 	attachPIDName = "attach.pid"
 	attachLock    = "attach.lock"
+	// attachSavedName is the join as the last attach ran it, without its
+	// secrets: what --resume attaches again with.
+	attachSavedName = "attach.json"
+	// attachNothingToResume is --resume's status in a container that never
+	// attached.
+	attachNothingToResume = 3
 	// attachRegistered is what the agent logs once it is registered; attach
 	// returns when its log says it.
 	attachRegistered = "registered with controller"
@@ -71,6 +79,7 @@ func runAttach(argv []string) int {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
 	stop := fs.Bool("stop", false, "stop the attached agent: its jobs get the interruption notice and ZENTHROS_PREEMPT_GRACE to checkpoint")
 	supervise := fs.Bool(strings.TrimPrefix(attachSupervisorFlag, "--"), false, "internal: run as the detached supervisor")
+	resume := fs.Bool("resume", false, "attach again as the last attach did, with its certificate: after the container restarted")
 	wait := fs.Duration("wait", defaultAttachWait, "how long attach waits for the agent to register before it returns")
 	join := attachJoinFlags(fs)
 	args := argv[2:]
@@ -88,6 +97,8 @@ func runAttach(argv []string) int {
 		return stopAttached(os.Stdout)
 	case *supervise:
 		return superviseAttached(self, rest)
+	case *resume:
+		return resumeAttached(self, *wait, os.Stdout)
 	}
 	if err := join.apply(); err != nil {
 		fmt.Fprintln(os.Stdout, attachSupervisorMessage+err.Error())
@@ -155,7 +166,8 @@ func (j *attachJoin) apply() error {
 
 // attach starts the supervisor detached and waits for the agent to
 // register. Its environ holds the secrets until scrubInit re-execs it
-// without them, before it waits: a job may run in the meantime.
+// without them, before it waits: a job may run in the meantime. The join it
+// starts is saved for --resume.
 func attach(argv []string, self string, rest []string, wait time.Duration, out io.Writer) int {
 	if os.Getenv("ZENTHROS_AGENT_MODE") != agentModeContainer {
 		fmt.Fprintln(out, attachSupervisorMessage+"attach runs the container agent: set ZENTHROS_AGENT_MODE=container")
@@ -173,6 +185,10 @@ func attach(argv []string, self string, rest []string, wait time.Duration, out i
 	if pid, held := attachedPID(state); held {
 		fmt.Fprintf(out, attachSupervisorMessage+"already attached (pid %d); log %s\n", pid, filepath.Join(state, attachLogName))
 		return 0
+	}
+	if err := saveAttach(state, attachSaved{Args: rest, Env: env}); err != nil {
+		fmt.Fprintf(out, attachSupervisorMessage+"%v\n", err)
+		return 1
 	}
 	logPath := filepath.Join(state, attachLogName)
 	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -232,6 +248,82 @@ func attach(argv []string, self string, rest []string, wait time.Duration, out i
 			return 1
 		}
 	}
+}
+
+// attachSaved is a join as attach ran it: its arguments and its environ,
+// which scrubInit took the secrets out of.
+type attachSaved struct {
+	Args []string `json:"args"`
+	Env  []string `json:"env"`
+}
+
+// installVars say where the agent was installed from (the zenadm
+// install-container.sh writes sets them): a reinstall's, in the environ of
+// its zenadm join --resume, replace the saved ones, so the new agent
+// completes its Python from its own release.
+var installVars = []string{"ZENTHROS_INSTALL_BASE", "ZENTHROS_ARTIFACT_URLS", "ZENTHROS_SHA256SUMS_SHA256"}
+
+// saveAttach keeps saved beside the agent's key, readable by its owner
+// only. Each write is a file of its own renamed over the last: two resumes
+// at once (a container's command, and zenthros attach) leave one whole.
+func saveAttach(state string, saved attachSaved) error {
+	raw, err := json.Marshal(saved)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(state, attachSavedName+".*")
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(raw)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), filepath.Join(state, attachSavedName))
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
+	}
+	return err
+}
+
+// resumeAttached attaches again as the last attach did: its environ, and
+// the certificate it enrolled, so no token; a reinstall's installVars over
+// the saved ones. In a container that never attached it says so, with
+// attachNothingToResume.
+func resumeAttached(self string, wait time.Duration, out io.Writer) int {
+	state := containerStateDir()
+	raw, err := os.ReadFile(filepath.Join(state, attachSavedName))
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintln(out, attachSupervisorMessage+"nothing to resume: this container never attached")
+		return attachNothingToResume
+	}
+	var saved attachSaved
+	if err == nil {
+		err = json.Unmarshal(raw, &saved)
+	}
+	if err != nil {
+		fmt.Fprintf(out, attachSupervisorMessage+"%s: %v\n", attachSavedName, err)
+		return 1
+	}
+	reinstalled := map[string]string{}
+	for _, name := range installVars {
+		if value, ok := os.LookupEnv(name); ok {
+			reinstalled[name] = value
+		}
+	}
+	os.Clearenv()
+	for _, kv := range saved.Env {
+		if name, value, ok := strings.Cut(kv, "="); ok {
+			_ = os.Setenv(name, value)
+		}
+	}
+	for name, value := range reinstalled {
+		_ = os.Setenv(name, value)
+	}
+	argv := append([]string{self, "attach", "--wait", wait.String()}, saved.Args...)
+	return attach(argv, self, saved.Args, wait, out)
 }
 
 // attachedBackend is the backend the container attached as: the one it was

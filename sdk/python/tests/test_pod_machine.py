@@ -150,7 +150,7 @@ class PodTest(Env):
 
     def test_on_the_pod_is_its_backend(self):
         self.listed = [[CLUSTER, MI_POD]]
-        self.assertEqual(machines.place("mi-pod", {}).options, {"backend": "ct-1"})
+        self.assertEqual(machines.place("mi-pod", {}).options, {"backend": "ct-1", "no_role": True})
 
 
 @machine_side

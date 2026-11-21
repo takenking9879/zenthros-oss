@@ -31,7 +31,9 @@ root. It joins Private to the Workspace and External: Zenthros never stops
 it, and delete only retires it.
 """
 
+import datetime
 import hashlib
+import math
 import os
 import re
 import secrets
@@ -41,7 +43,16 @@ import time
 from dataclasses import dataclass, field
 
 from zenthros import errors
-from zenthros.local import BACKEND_LABEL, PORTS_LABEL, LocalBackend, _api, _docker
+from zenthros.local import (
+    BACKEND_LABEL,
+    HUB_LABEL,
+    PORTS_LABEL,
+    RESTART_AGENT,
+    WORKSPACE_LABEL,
+    LocalBackend,
+    _api,
+    _docker,
+)
 from zenthros.view import Backend, Pool
 
 LOCAL = "local"
@@ -67,6 +78,9 @@ _sleep = time.sleep
 # create("local")'s size when none is given; the environment may change it.
 LOCAL_CPUS_ENV, LOCAL_MEMORY_ENV = "ZENTHROS_LOCAL_CPUS", "ZENTHROS_LOCAL_MEMORY"
 DEFAULT_LOCAL_CPUS, DEFAULT_LOCAL_MEMORY = 2, "4Gi"
+
+# The repository of local_image's tags.
+LOCAL_IMAGE_REPO = "zenthros-python"
 
 _LOCAL_DOCKERFILE = """\
 # zenthros-python: what a function needs to run in a container of this
@@ -104,6 +118,9 @@ class Machine:
     ports: tuple = ()
     # Made running its own image, which what it asked for completes.
     completes_image: bool = False
+    # attach found its agent older than the hub's, on a machine of its own
+    # (a VM, a provider's container): the lines that update it, to run there.
+    update: tuple = ()
 
     def to_dict(self):
         """This machine as an agent or a script reads it."""
@@ -172,18 +189,22 @@ def docker_capacity(docker="docker", info_format="{{.NCPU}} {{.MemTotal}}"):
     return int(parts[0]), int(parts[1])
 
 
+def fits_docker(cpus, memory, docker="docker"):
+    """Refuses a size this computer's Docker cannot give: its agent declares
+    at most what Docker has, so the machine would never say that size."""
+    ncpu, total = docker_capacity(docker)
+    if cpus is not None and float(cpus) > ncpu:
+        raise errors.ValidationError(f"Docker here has {ncpu} CPUs: {cpus} is more than it can give")
+    if memory is not None and bytes_of(memory) > total:
+        raise errors.ValidationError(f"Docker here has {total / (1 << 30):.1f} GiB: {memory} is more than it can give "
+                                     "(Docker Desktop gives more in Settings, Resources)")
+
+
 def local_image(docker="docker"):
     """The default image of create("local"), built here once per Python
     minor and runner packages."""
-    packages = ["boto3"]
-    try:
-        import cloudpickle
-
-        packages.append(f"cloudpickle=={cloudpickle.__version__}")
-    except ImportError:
-        packages.append("cloudpickle")
-    dockerfile = _LOCAL_DOCKERFILE.format(minor=python_minor(), packages=" ".join(packages))
-    tag = f"zenthros-python:{python_minor()}-{hashlib.sha256(dockerfile.encode()).hexdigest()[:12]}"
+    dockerfile = _LOCAL_DOCKERFILE.format(minor=python_minor(), packages=" ".join(_runner_packages()))
+    tag = f"{LOCAL_IMAGE_REPO}:{python_minor()}-{hashlib.sha256(dockerfile.encode()).hexdigest()[:12]}"
     code, _ = _docker(docker, ["image", "inspect", tag], timeout=60)
     if code != 0:
         print(f"zenthros: building {tag}, once (Python {python_minor()} and the runner's packages)", file=sys.stderr)
@@ -198,8 +219,11 @@ def _backends(client):
     return [Backend.from_api(info) for info in client.backends()]
 
 
-def _find(client, key):
-    for backend in _backends(client):
+def _find(client, key, offline=False):
+    """The Workspace's machine named or numbered key; offline=True finds one
+    whose agent is not connected now too (a This computer stopped)."""
+    listed = _backends(client) if not offline else [Backend.from_api(b) for b in client.backends_with_offline()[0]]
+    for backend in listed:
         if key in (backend.name, backend.id):
             return backend
     return None
@@ -433,14 +457,13 @@ def k8s_memory(value):
 
 
 def _runner_packages():
-    """What a function's runner needs where it runs, cloudpickle at this
-    process's version."""
-    try:
-        import cloudpickle
+    """What a function's runner needs on the Python of a machine made here
+    (a This computer's image, a cluster's pod): runner_packages', at this
+    process's versions, and boto3 for any S3 store. One it lacks starts
+    every call twice (runner.ensure_runner)."""
+    from zenthros.remote.call import runner_packages
 
-        return ["boto3", f"cloudpickle=={cloudpickle.__version__}"]
-    except ImportError:
-        return ["boto3", "cloudpickle"]
+    return ["boto3", *runner_packages("")]
 
 
 def pod_script(install):
@@ -538,6 +561,10 @@ def create(target=LOCAL, *, name=None, cpus=None, memory=None, image=None, docke
     if idle and (target == LOCAL or target.startswith(POD)):
         raise errors.ValidationError(f"create({target!r}, idle=): idle is for a machine from a template, which "
                                      "zenthros.targets() lists; a container or pod here ends with delete")
+    sized = [what for what, value in (("cpus", cpus), ("memory", memory), ("image", image)) if value is not None]
+    if sized and target != LOCAL and not target.startswith(POD):
+        raise errors.ValidationError(f"create({target!r}, {'=, '.join(sized)}=): a template's machines are its size and "
+                                     "run its image (zenthros.targets()); these are for create('local') and a pod")
     if dry_run:
         from zenthros.targetlist import plan_create
 
@@ -565,7 +592,7 @@ def create(target=LOCAL, *, name=None, cpus=None, memory=None, image=None, docke
             return _create_from_template(client, target, name, idle, max_lifetime=limit)
         raise errors.ValidationError(f"create({target!r}): not a target of Workspace {client.workspace}; "
                                      "zenthros.targets() lists them")
-    docker_capacity(docker)
+    fits_docker(cpus, memory, docker)
     default_cpus, default_memory = local_defaults()
     cpus = cpus if cpus is not None else default_cpus
     memory = memory if memory is not None else default_memory
@@ -670,7 +697,9 @@ def delete(machine, docker="docker"):
     if key in _made(client)[1]:
         client.delete_machine(key)
         return
-    found = _find(client, key)
+    # A machine stopped (a This computer after docker stop) is offline, and
+    # still the one to delete.
+    found = _find(client, key, offline=True)
     if found is None:
         # A join no machine used yet has tokens and no record, so no list shows
         # it: the refusal of its name gave this id, and the API retires it.
@@ -680,12 +709,7 @@ def delete(machine, docker="docker"):
         except errors.NotFound:
             names = sorted(b.name or b.id for b in _backends(client))
             raise LookupError(f"Workspace {client.workspace} has no machine {key!r}; it has {names}") from None
-    try:
-        code, out = _docker(docker, ["ps", "-a", "--filter", f"label={BACKEND_LABEL}={found.id}",
-                                     "--format", "{{.Names}}"], timeout=60)
-    except errors.ValidationError:
-        code, out = 1, ""
-    containers = out.split() if code == 0 else []
+    containers = _containers_here(found.id, docker)
     if containers:
         LocalBackend(client, found.id, containers[0], created=True, docker=docker).remove()
         _say_stopped(found)
@@ -697,6 +721,189 @@ def delete(machine, docker="docker"):
     for job in jobs:
         client.delete(job)
     _say_stopped(found)
+
+
+def _containers_here(backend_id, docker="docker"):
+    """The containers on this computer that joined as backend_id (its
+    label), running or not; none without docker."""
+    try:
+        code, out = _docker(docker, ["ps", "-a", "--filter", f"label={BACKEND_LABEL}={backend_id}",
+                                     "--format", "{{.Names}}"], timeout=60)
+    except errors.ValidationError:
+        return []
+    return out.split() if code == 0 else []
+
+
+# How long resize waits for the hub to say the new size: the agent declares
+# it on its next heartbeat.
+RESIZE_TIMEOUT = 90
+
+
+def resize(backend, *, cpus=None, memory=None, docker="docker", out=None):
+    """This computer's machine backend, given cpus and memory in place: its
+    container stays, with its environments. Refused while it runs a job,
+    which a smaller limit could end. Returns the machine once the hub says
+    its new size."""
+    name = backend.name or backend.id
+    containers = _containers_here(backend.id, docker)
+    if not containers:
+        raise errors.ValidationError(f"{name} is not a container on this computer: --cpus and --memory size This "
+                                     "computer (--type local); a VM changes size where it runs")
+    if backend.running_jobs:
+        raise errors.ValidationError(f"{name} runs a job now: change its size once it ends (zenthros jobs)")
+    fits_docker(cpus, memory, docker)
+    client = _api()
+    LocalBackend(client, backend.id, containers[0], created=True, docker=docker).resize(
+        cpus=cpus, memory=None if memory is None else docker_memory(memory))
+    wanted = (backend.cpu if cpus is None else math.ceil(float(cpus)),
+              backend.memory_bytes if memory is None else bytes_of(memory))
+    waited = 0
+    while True:
+        found = _find(client, backend.id)
+        if found is not None and (found.cpu, found.memory_bytes) == wanted:
+            break
+        if waited >= RESIZE_TIMEOUT:
+            raise errors.WaitTimeout(f"{name}: its container has the new size, but its agent has not said it in "
+                                     f"{RESIZE_TIMEOUT} s: see zenthros targets")
+        _sleep(2)
+        waited += 2
+    if out is not None:
+        from zenthros import console
+
+        console.show(f"✓ {name}: {found.cpu} CPUs, {found.memory_bytes / (1 << 30):.1f} GiB, its environments as they were", out)
+    return Machine(name=name, id=found.id, target=LOCAL, container=containers[0])
+
+
+def revive(backend, docker="docker"):
+    """This computer's machine backend, up again as it was (its container
+    started, its agent attached again with its certificate): after docker
+    stop, or an agent stopped. Returns the backend once the hub says it is
+    ready."""
+    name = backend.name or backend.id
+    client = _api()
+    lb = LocalBackend(client, backend.id, _containers_here(backend.id, docker)[0], created=True, docker=docker)
+    try:
+        lb.revive()
+    except errors.BackendJoinError as err:
+        raise errors.BackendJoinError(f"{err}\nMake it again: zenthros detach {name}, then zenthros attach {name} "
+                                      "--type local (its environments install again on first use)") from None
+    return lb.wait_ready(timeout=READY_TIMEOUT)
+
+
+def agent_differs(backend, client):
+    """Whether backend's agent is of another release than the hub's, as the
+    hub's last answer said it (Zenthros-Release)."""
+    return bool(backend.agent_version and client.hub_release and backend.agent_version != client.hub_release)
+
+
+def _installer(client, kind="", runtime=""):
+    """The installer line of a join of the hub's, which is given back at
+    once: the line has no secret, and what it installs is the hub's
+    release."""
+    join = client.join_backend("", kind=kind, runtime=runtime)
+    client.retire_backend(str(join.get("backendId") or ""))
+    return str(join.get("installScript") or "")
+
+
+def update_lines(client, backend):
+    """The lines that update backend's agent where it runs (a VM, or a
+    container of a provider), and keep the machine and its jobs: its
+    installer again, which restarts a VM's agent; in a container, then its
+    agent restarted."""
+    if backend.type == "container":
+        return [_installer(client).rstrip("\n"), RESTART_AGENT]
+    runtime = "containerd" if "containerd" in backend.runtimes else "systemd"
+    return [_installer(client, kind="vm", runtime=runtime).rstrip("\n")]
+
+
+# How long update_agent waits for the hub to hear the new agent.
+UPDATE_TIMEOUT = 300
+
+
+def update_agent(backend, docker="docker"):
+    """This computer's machine backend, its agent updated in place to the
+    hub's release: its container, files and environments stay. Refused
+    while it runs a job, which the restart would end. Returns the backend
+    once the hub hears the new agent."""
+    name = backend.name or backend.id
+    if backend.running_jobs:
+        raise errors.ValidationError(f"{name} runs a job now: its agent updates once it ends (zenthros jobs), with "
+                                     f"zenthros attach {name} --type local")
+    client = _api()
+    container = _containers_here(backend.id, docker)[0]
+    # Zenthros's image gets what its runner needs now (local_image); an image
+    # of the person's own is left as it is: its runner brings them in a venv.
+    _, image = _docker(docker, ["inspect", "--format", "{{.Config.Image}}", container], timeout=60)
+    packages = _runner_packages() if image.strip().startswith(LOCAL_IMAGE_REPO + ":") else []
+    LocalBackend(client, backend.id, container, created=True, docker=docker).update(_installer(client), packages)
+    waited = 0
+    while True:
+        found = _find(client, backend.id)
+        if found is not None and found.healthy and found.agent_version == client.hub_release:
+            return found
+        if waited >= UPDATE_TIMEOUT:
+            raise errors.WaitTimeout(f"{name}: its agent was updated, but the hub has not heard it in {UPDATE_TIMEOUT} s: "
+                                     "see zenthros targets")
+        _sleep(2)
+        waited += 2
+
+
+# A container younger than this may still be joining: a join is good for an
+# hour, and its machine is listed only once its agent registered.
+ORPHAN_AFTER = datetime.timedelta(hours=1)
+
+
+def _created(text):
+    """docker ps' CreatedAt ("2026-11-20 10:11:12 -0600 CST"), or None."""
+    try:
+        return datetime.datetime.strptime(" ".join(text.split()[:3]), "%Y-%m-%d %H:%M:%S %z")
+    except ValueError:
+        return None
+
+
+def sweep(docker="docker", out=None):
+    """Remove the containers create made here for this hub and Workspace
+    whose machine the hub no longer has (deleted from elsewhere, or a hub
+    made again): Docker would start them again forever. Only on a list the
+    hub says holds every machine, those not connected included, and only
+    one older than a join's life. Says each one it removed; returns their
+    names."""
+    try:
+        client = _api()
+        code, listed = _docker(docker, ["ps", "-a", "--filter", f"label={HUB_LABEL}={client.server}",
+                                        "--filter", f"label={WORKSPACE_LABEL}={client.workspace}",
+                                        "--format", '{{.Names}}\t{{.Label "' + BACKEND_LABEL + '"}}\t{{.CreatedAt}}'],
+                               timeout=60)
+    except errors.ValidationError:  # no hub, or no docker: no container of one here
+        return []
+    old = datetime.datetime.now(datetime.timezone.utc) - ORPHAN_AFTER
+    here = []
+    for line in listed.splitlines() if code == 0 else []:
+        container, backend_id, created = (line.split("\t") + ["", ""])[:3]
+        made = _created(created)
+        if backend_id and made is not None and made < old:
+            here.append((container, backend_id))
+    if not here:
+        return []
+    try:
+        backends, complete = client.backends_with_offline()
+    except errors.ZenthrosError:  # no whole list now: this cleanup on the way removes nothing
+        return []
+    if not complete:
+        return []
+    known = {str(b.get("backendId") or "") for b in backends}
+    removed = []
+    for container, backend_id in here:
+        if backend_id in known:
+            continue
+        code, said = _docker(docker, ["rm", "-f", container], timeout=120)
+        if code == 0:
+            removed.append(container)
+            from zenthros import console
+
+            console.show(f"zenthros: removed the container {container}: its machine {backend_id} is no longer in "
+                         f"Workspace {client.workspace}", out or sys.stderr)
+    return removed
 
 
 def _say_stopped(backend):
@@ -790,6 +997,12 @@ def who_reads(name, image):
     return reach.image(image, templates.get(name) or templates.get(made.get(name, {}).get("template", "")))
 
 
+def _no_role(container):
+    """A container (This computer, a provider's pod) has no cloud role of its
+    own to read your bucket with: the call seals it a key."""
+    return {"no_role": True} if container else {}
+
+
 def place(on, options, docker="docker", keep=False, python=None, ports=None):
     """_place, after on= is known (default_on() without it), with the name
     it went to."""
@@ -856,7 +1069,9 @@ def _place(on, options, docker="docker", keep=False, python=None, ports=None):
                 _image_fits(label, image, backend.runtimes if backend is not None else [])
             extra = _image_for(backend, image, python)
         _check_published(label, on.id, ports, docker)
-        return Placement({"backend": on.id, **extra})
+        container = (on.type == "container" if isinstance(on, Backend) else
+                     isinstance(on, LocalBackend) or on.target == LOCAL or bool(on.container))
+        return Placement({"backend": on.id, **_no_role(container), **extra})
     name = str(on)
     client = _api()
     found = _find(client, name)
@@ -867,7 +1082,7 @@ def _place(on, options, docker="docker", keep=False, python=None, ports=None):
                 "attach it with another name")
         _image_fits(name, image, found.runtimes)
         _check_published(name, found.id, ports, docker)
-        return Placement({"backend": found.id, **_image_for(found, image, python)})
+        return Placement({"backend": found.id, **_no_role(found.type == "container"), **_image_for(found, image, python)})
     templates, made = _made(client)
     if name in made:
         template, pool = templates.get(made[name].get("template", "")), made[name].get("pool", "")
@@ -902,6 +1117,18 @@ def _place(on, options, docker="docker", keep=False, python=None, ports=None):
     pools = [Pool.from_api(info) for info in client.pools()]
     if any(pool.name == name for pool in pools):
         return Placement({"pool": name})
-    there = sorted({b.name or b.id for b in _backends(client)} | {p.name for p in pools} | {LOCAL} | set(templates) | set(made))
-    raise errors.ValidationError(f"on={name!r}: Workspace {client.workspace} has nothing called that; "
-                                 f"it has {there} (zenthros.targets())")
+    raise not_there(client, name, {b.name or b.id for b in _backends(client)} | {p.name for p in pools} | {LOCAL} |
+                    set(templates) | set(made))
+
+
+def not_there(client, name, listed):
+    """The refusal of on=name that nothing listed answers, for a call and a
+    dry run: a machine whose agent is away now (restarting, a VM off, a This
+    computer stopped) is said so, since the hub lists only those connected;
+    else what the Workspace has."""
+    if _find(client, name, offline=True) is not None:
+        return errors.ValidationError(
+            f"on={name!r}: {name}'s agent is not connected now (restarting after an update, a VM off, or a This computer "
+            f"stopped: zenthros attach {name} --type local starts it): call again once zenthros targets shows it")
+    return errors.ValidationError(f"on={name!r}: the Workspace has nothing called that; it has {sorted(listed)} "
+                                  "(zenthros.targets())")

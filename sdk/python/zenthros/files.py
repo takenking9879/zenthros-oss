@@ -41,9 +41,15 @@ def _store(uri):
     return options.blob_store(uri)
 
 
+def _uri(value):
+    """A URI or a path, from a str, a path or a zenthros.Artifact (its uri:
+    one in a bucket has no path of this file system)."""
+    return os.fspath(getattr(value, "uri", value))
+
+
 def read_bytes(uri):
     """The object's bytes; FileNotFoundError if there is none."""
-    uri = os.fspath(uri)
+    uri = _uri(uri)
     if not uri.startswith(_REMOTE):
         with builtins.open(uri, "rb") as fh:
             return fh.read()
@@ -52,7 +58,7 @@ def read_bytes(uri):
 
 def write_bytes(uri, data):
     """Write data (bytes) to uri, a folder's parents made as needed; returns uri."""
-    uri = os.fspath(uri)
+    uri = _uri(uri)
     _store(uri).put(uri, bytes(data))
     return uri
 
@@ -90,7 +96,7 @@ def open(uri, mode="rb", encoding="utf-8"):  # noqa: A001 - files.open, as io.op
     closed (not when the with block raised). A local path is opened as is."""
     if mode not in ("rb", "r", "wb", "w"):
         raise ValueError(f"files.open mode {mode!r}: 'rb', 'r', 'wb' or 'w'")
-    uri = os.fspath(uri)
+    uri = _uri(uri)
     if not uri.startswith(_REMOTE):
         if "w" in mode:
             os.makedirs(os.path.dirname(os.path.abspath(uri)), exist_ok=True)

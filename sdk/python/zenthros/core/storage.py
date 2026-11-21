@@ -70,9 +70,13 @@ class BlobStore:
 class MemoryBlobStore(BlobStore):
     def __init__(self):
         self.data = {}
+        # When each object was put (StoredObject.modified); one set in data
+        # by hand was written now.
+        self.written = {}
 
     def put(self, uri, payload):
         self.data[uri] = payload
+        self.written[uri] = datetime.datetime.now(datetime.timezone.utc)
         return uri
 
     def get(self, uri):
@@ -81,7 +85,8 @@ class MemoryBlobStore(BlobStore):
         return self.data[uri]
 
     def ls(self, prefix):
-        return [StoredObject(uri, len(payload), version=hashlib.sha256(payload).hexdigest())
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return [StoredObject(uri, len(payload), self.written.get(uri, now), hashlib.sha256(payload).hexdigest())
                 for uri, payload in sorted(self.data.items()) if uri.startswith(str(prefix))]
 
     def delete(self, uri):

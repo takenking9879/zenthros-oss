@@ -311,6 +311,66 @@ class AllowTest(Base):
         self.assertEqual(agents.allowed(), {})
 
 
+class JobsTest(Base):
+    """zenthros jobs (observaciones 16): which machine ran each, what it ran,
+    and a map spread over machines with its jobs under it."""
+
+    def listed(self, *objects, backends=()):
+        reads = []
+
+        def backends_with_offline():
+            reads.append(1)
+            return list(backends), True
+        self.client.list_jobs = lambda selector="": list(objects)
+        self.client.backends_with_offline = backends_with_offline
+        return reads
+
+    def job(self, name, created, backend="", function="", count=0, map=""):  # noqa: A002 - the label's word
+        template = {"distribution": {"mode": "Independent", "count": count}} if count else {}
+        meta = {"name": name, "creationTimestamp": created, "annotations": {remote.call.FUNCTION: function}}
+        if map:
+            meta["labels"] = {remote.call.MAP_GROUP: map}
+            meta["annotations"][remote.call.MAP_SIZE] = "8"
+        return {"metadata": meta, "spec": {"workload": {"template": template}},
+                "status": {"phase": "Succeeded", "exitCode": 0, "lease": {"backendID": backend}}}
+
+    def test_each_job_names_its_machine_from_one_read_and_what_it_ran(self):
+        reads = self.listed(self.job("zr-add-1", "2026-11-20T11:58:00Z", "ct-1", "add", count=4),
+                            self.job("zr-old-1", "2026-11-19T12:00:00Z", "vm-gone", "old"),
+                            backends=[{"backendId": "ct-1", "name": "caja"}])
+        rows = tools.jobs()["jobs"]
+        self.assertEqual([(r["job"], r["machine"], r["function"], r["tasks"]) for r in rows],
+                         [("zr-add-1", "caja", "add", 4), ("zr-old-1", "vm-gone", "old", 1)])
+        self.assertEqual(len(reads), 1, "one read of the backends, whatever the number of jobs")
+
+    def test_the_table_has_a_column_each_and_a_spread_maps_jobs_under_it(self):
+        self.listed(self.job("zr-add-1", "2026-11-20T11:58:00Z", "ct-1", "add", count=4),
+                    self.job("zr-grid-0", "2026-11-20T11:58:00Z", "ct-1", "grid", count=4, map="zr-grid"),
+                    self.job("zr-fit-1", "2026-11-19T12:00:00Z", "vm-1", "fit"),
+                    self.job("zr-grid-1", "2026-11-20T11:58:00Z", "vm-1", "grid", count=4, map="zr-grid"),
+                    backends=[{"backendId": "ct-1", "name": "caja"}, {"backendId": "vm-1", "name": "taxi-vm"}])
+        rows = tools.jobs()["jobs"]
+        now = 1795176000  # 2026-11-20T12:00:00Z
+        lines = cli.jobs_table(rows, now=now).splitlines()
+        starts = [lines[0].index(column) for column in cli.JOB_COLUMNS]
+        cells = [[line[a:b].strip() for a, b in zip(starts, [*starts[1:], None])] for line in lines]
+        self.assertEqual(cells, [
+            list(cli.JOB_COLUMNS),
+            ["zr-add-1", "succeeded", "caja", "2m ago", "add ×4"],
+            ["zr-grid", "", "2 machines", "2m ago", "grid ×8"],
+            ["zr-grid-0", "succeeded", "caja", "2m ago", "grid ×4"],
+            ["zr-grid-1", "succeeded", "taxi-vm", "2m ago", "grid ×4"],
+            ["zr-fit-1", "succeeded", "taxi-vm", "1d ago", "fit"],
+        ])
+        self.assertTrue(lines[3].startswith("  zr-grid-0"), "a map's jobs go under it")
+
+    def test_a_failure_says_its_exit_code_or_its_reason(self):
+        row = {"job": "j", "state": "failed", "exit_code": None, "reason": "OOM_KILLED", "created": "", "machine": "caja",
+               "function": "fit", "tasks": 1}
+        self.assertIn("failed (OOM_KILLED)", cli.jobs_table([row]))
+        self.assertIn("failed (exit 3)", cli.jobs_table([{**row, "exit_code": 3}]))
+
+
 class CLITest(Base):
     def run_cli(self, *argv):
         out = io.StringIO()

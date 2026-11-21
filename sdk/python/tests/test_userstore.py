@@ -204,6 +204,7 @@ class GoogleBucketTest(Logged):
     def setUp(self):
         super().setUp()
         self.gcs = FakeGCS()
+        self.real_gcs = userstore._gcs
         patcher = mock.patch.object(userstore, "_gcs", lambda: self.gcs)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -224,6 +225,21 @@ class GoogleBucketTest(Logged):
             userstore.set_store("gs://not-mine/z", out=io.StringIO())
         self.assertIn("gs://not-mine/z does not answer to your Google credentials here", str(raised.exception))
         self.assertIn("gcloud auth application-default login", str(raised.exception))
+        self.assertNotIn("store", self.context())
+
+    def test_no_google_credentials_here_says_what_to_run_in_one_line(self):
+        # A laptop with gcloud's login and no application default
+        # credentials: zenthros store printed google.auth's traceback (v0.2.4
+        # acceptance, 2026-11-20). The client is made by the real _gcs.
+        import google.auth.exceptions
+        from google.cloud import storage
+
+        missing = google.auth.exceptions.DefaultCredentialsError("Your default credentials were not found. To set up ...")
+        with mock.patch.object(userstore, "_gcs", self.real_gcs), mock.patch.object(storage, "Client", side_effect=missing):
+            with self.assertRaises(errors.ValidationError) as raised:
+                userstore.set_store("gs://my-bucket/z", out=io.StringIO())
+        self.assertIn("gcloud auth application-default login", str(raised.exception))
+        self.assertNotIn("\n", str(raised.exception))
         self.assertNotIn("store", self.context())
 
     def test_this_process_reads_it_with_the_google_store(self):
@@ -365,6 +381,53 @@ class RunTest(Logged):
                 remote_call._store(options.settings(), options.job_client())
         self.assertIn("zenthros store s3://your-bucket/zenthros", str(raised.exception))
 
+
+@unittest.skipUnless(seal.available(), "pip install 'zenthros[seal]'")
+class GoogleRunTest(Logged):
+    """A call to one of your machines, with your gs:// bucket kept: a
+    container (This computer, a provider's pod) has no cloud role of its own,
+    so it gets the key that reaches only the prefix, sealed to it; a VM reads
+    the bucket with its own account. A This computer's first job failed with
+    no Google credentials (v0.2.4 acceptance, 2026-11-20)."""
+
+    def setUp(self):
+        super().setUp()
+        from zenthros.core.storage import GCS_KEY_ENV
+
+        self.env_name = GCS_KEY_ENV
+        self.gcs = FakeGCS()
+        patcher = mock.patch.object(userstore, "_gcs", lambda: self.gcs)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        keyed = mock.patch.object(userstore, "job_key", return_value='{"type": "service_account"}')
+        self.job_key = keyed.start()
+        self.addCleanup(keyed.stop)
+        self.api = FakeAPI()
+        self.addCleanup(self.api.close)
+        self.client = HTTPJobClient(self.api.url, "risk", "bob-token")
+        self.api.routes[("GET", "/v1/workspaces/risk")] = (200, {"name": "risk"})
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = (201, {})
+        _, self.key = keypair("caja")
+        self.api.routes[("GET", "/v1/workspaces/risk/backends")] = (200, {"backends": [
+            {"backendId": "ct-1", "name": "caja", "backendType": "container", "ageRecipients": [self.key]},
+            {"backendId": "vm-1", "name": "my-vm", "backendType": "vm", "ageRecipients": [self.key]}]})
+        userstore.set_store("gs://my-bucket/zenthros", out=io.StringIO())
+
+    def sources(self, on):
+        from zenthros.remote import call as remote_call
+
+        with options.configure(client=self.client):
+            remote_call.run(double_it, 21, on=on, code_dir=None)
+        template = json.loads(self.api.requests[-1]["body"])["spec"]["workload"]["template"]
+        return [s["materialization"]["envName"] for s in template.get("secretSources") or []]
+
+    def test_a_container_gets_the_prefix_key_sealed_to_it(self):
+        self.assertEqual(self.sources("caja"), [self.env_name])
+        self.assertEqual(self.job_key.call_args.args, ("gs://my-bucket/zenthros",))
+
+    def test_a_vm_reads_it_with_its_own_account(self):
+        self.assertEqual(self.sources("my-vm"), [])
+        self.job_key.assert_not_called()
 
 
 class _FakeBucket:

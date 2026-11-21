@@ -24,7 +24,6 @@ import copy
 import hashlib
 import inspect
 import os
-import pickle
 import platform
 import select
 import shutil
@@ -43,7 +42,7 @@ from zenthros.core import preemption
 from zenthros.core.env import JobEnv
 from zenthros.core.report import Reporter
 from zenthros.core.storage import store_for
-from zenthros.remote import bundle, carried, envs, savedlogs
+from zenthros.remote import bundle, carried, envs, payload, savedlogs
 from zenthros.remote.call import (
     CALL_SHA256_ENV,
     MAP_KIND,
@@ -124,13 +123,16 @@ def _package_drift(wanted):
 
 
 def resolve(value, store):
-    """value with every upstream call swapped for its result. A container
+    """value with every upstream call swapped for its result, and every
+    upload or argument kept apart for what it stands for. A container
     holding none is the caller's object itself; one holding some is rebuilt
     as its own type (a namedtuple, a defaultdict, an OrderedDict)."""
     if isinstance(value, Upstream):
         return value.value(store or store_for(value.prefix))
     if isinstance(value, artifact.Sent):
         return value.fetch(store or store_for(value.uri))
+    if isinstance(value, artifact.Kept):
+        return value.value(store or store_for(value.uri))
     if isinstance(value, dict):
         items = {k: resolve(v, store) for k, v in value.items()}
         if all(items[k] is v for k, v in value.items()):
@@ -175,15 +177,15 @@ def store_result(store, uri, record, producer, out):
     names bytes that are in the store. Each attempt and item reports from a
     producer of its own, so a replacement's digest never waits behind the
     lost attempt's sequence."""
-    raw = pickle.dumps(record, protocol=4)
+    raw = payload.dump(record)
     extra = {}
     if carried.carries(uri):
         # No bucket: the result comes back in the report, if it fits one.
         if len(raw) > carried.MAX_RESULT_BYTES:
             message = carried.too_large(len(raw))
             print(f"zenthros: {message}", file=out, flush=True)
-            raw = pickle.dumps({**record, "ok": False, "value": None, "type": "ResultTooLarge", "message": message,
-                                "traceback": ""}, protocol=4)
+            raw = payload.dump({**record, "ok": False, "value": None, "type": "ResultTooLarge", "message": message,
+                                "traceback": ""})
         extra = {carried.BYTES_KEY: base64.b64encode(raw).decode("ascii")}
     store.put(uri, raw)
     reporter = Reporter(producer_id=producer, strict=False).set(
@@ -240,7 +242,7 @@ def execute(call_uri, blob_store=None, out=None, index=None):
                    f"{CALL_SHA256_ENV}); refusing to unpickle it")
         print(f"zenthros: {message}", file=out, flush=True)
         return EXIT_TAMPERED
-    envelope = pickle.loads(raw)
+    envelope = payload.load(raw)
     is_map = envelope.get("kind") == MAP_KIND
     if is_map:
         # A map of one item is not distributed, so its machine has no
@@ -271,7 +273,8 @@ def execute(call_uri, blob_store=None, out=None, index=None):
         print(where, file=out, flush=True)
     if envelope.get("python") != bundle.python_version():
         message = (f"the call was pickled by Python {envelope.get('python')} and this machine runs "
-                   f"{bundle.python_version()}; cloudpickle needs the same minor version on both ends")
+                   f"{bundle.python_version()}; cloudpickle needs the same minor version on both ends: "
+                   f"{bundle.same_minor(bundle.python_version())}")
         print(f"zenthros: {message}", file=out, flush=True)
         store_result(store, result_uri, {
             "ok": False, "type": "PythonVersionMismatch", "message": message, "traceback": "",

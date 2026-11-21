@@ -109,7 +109,7 @@ def _job():
 
 
 def _hub(sent, answering):
-    def hub(method, url, _ctx, body=None):
+    def hub(method, url, _ctx, body=None, timeout=60):
         path = urllib.parse.urlsplit(url).path
         sent.append((method, path, body))
         answering[0] = f"{method} {path}"
@@ -152,6 +152,7 @@ DRIVERS = {
 HUB_DRIVERS = {
     "GET /v1/signup": lambda server: signin.how_to_sign_in(server),
     "POST /v1/signup": lambda server: signin.exchange(server, "t", "v"),
+    "GET /v1/version": lambda server: signin.hub_version(server),
 }
 
 

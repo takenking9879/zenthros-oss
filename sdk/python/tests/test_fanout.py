@@ -164,7 +164,7 @@ class MapTest(unittest.TestCase):
     def test_items_that_are_not_json_are_refused_not_turned_into_text(self):
         import datetime
 
-        with self.assertRaises(TypeError):
+        with self.assertRaisesRegex(errors.ValidationError, "travel as JSON.*date"):
             self.run_map([datetime.date(2026, 10, 19)])
 
     def test_map_name_is_deterministic(self):

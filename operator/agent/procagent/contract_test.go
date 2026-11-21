@@ -7,17 +7,46 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
 
 	"github.com/zenthros/operator/agent/executortest"
 	"github.com/zenthros/operator/pkg/backend"
+	"github.com/zenthros/operator/pkg/containerfacts"
 	"github.com/zenthros/operator/pkg/owner"
 )
+
+// memoryEvents is a container's memory.events with oom_kill at n: a counter
+// of the cgroup the agent and every job share.
+func memoryEvents(n string) string {
+	return "low 0\nhigh 0\nmax 12\noom 1\noom_kill " + n + "\noom_group_kill 0\n"
+}
+
+// killedBy ends a job by SIGKILL; for memory, the kernel's count of
+// processes it killed for memory in the container grew while it ran.
+func killedBy(memory bool) func(t *testing.T, e executortest.Executor, handle string) {
+	return func(t *testing.T, e executortest.Executor, handle string) {
+		p := e.(*Executor)
+		if memory {
+			write(t, filepath.Join(p.cfg.Facts.Root, "sys/fs/cgroup/memory.events"), memoryEvents("4"))
+		}
+		p.mu.Lock()
+		j := p.jobs[handle]
+		p.mu.Unlock()
+		_ = syscall.Kill(-j.pgid, syscall.SIGKILL)
+		waitTerminal(t, p, handle)
+	}
+}
 
 func TestProcagentKeepsTheExecutorContract(t *testing.T) {
 	executortest.Contract(t, executortest.Harness{
 		New: func(t *testing.T) executortest.Executor {
 			e := newTestExecutor(t, "")
+			// A container of 4 GiB that killed 3 processes for memory
+			// before: a count already high is no evidence.
+			root := cgroupTree(t, "max 100000\n", "4294967296\n")
+			write(t, filepath.Join(root, "sys/fs/cgroup/memory.events"), memoryEvents("3"))
+			e.cfg.Facts = containerfacts.Sources{Root: root}
 			t.Cleanup(func() { e.Close(context.Background()) })
 			return e
 		},
@@ -30,7 +59,9 @@ func TestProcagentKeepsTheExecutorContract(t *testing.T) {
 			p.stop(context.Background(), j)
 			waitTerminal(t, p, handle)
 		},
-		Missing: "never-submitted",
+		Missing:         "never-submitted",
+		KilledForMemory: killedBy(true),
+		Killed:          killedBy(false),
 	})
 }
 
