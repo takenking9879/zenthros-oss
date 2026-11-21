@@ -179,7 +179,7 @@ class NamedCommandsTest(unittest.TestCase):
         named = re.compile(r"(?<!from )\bzenthros ([a-z][a-z-]*)")
         wrong = []
         for path in sorted(Path(zenthros.__file__).parent.rglob("*.py")):
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(path.read_text(encoding="utf-8"))
             prose = {id(n.body[0].value) for n in ast.walk(tree)
                      if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
                      and n.body and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}

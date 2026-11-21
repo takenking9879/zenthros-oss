@@ -10,7 +10,22 @@ import unittest
 from pathlib import Path
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "data" / "lazy_training.py"
-HAS = all(importlib.util.find_spec(name) for name in ("polars", "xgboost", "numpy"))
+
+
+def _loads():
+    """The example's packages there, and xgboost's own library loads: on a
+    Mac without OpenMP (libomp) it is installed and its import fails (the
+    public CI's macOS, v0.2.4)."""
+    if not all(importlib.util.find_spec(name) for name in ("polars", "xgboost", "numpy")):
+        return False
+    try:
+        import xgboost  # noqa: F401
+    except Exception:  # noqa: BLE001 - xgboost's XGBoostError when its native library does not load
+        return False
+    return True
+
+
+HAS = _loads()
 
 
 def _example():
@@ -20,7 +35,7 @@ def _example():
     return module
 
 
-@unittest.skipUnless(HAS, "polars, xgboost and numpy: the example's own packages")
+@unittest.skipUnless(HAS, "polars, xgboost and numpy, xgboost's library loading: the example's own packages")
 class LazyTrainingTest(unittest.TestCase):
     ROWS, CHUNK = 40_000, 7_000
 

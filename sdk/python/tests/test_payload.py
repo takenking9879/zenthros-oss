@@ -68,7 +68,7 @@ class Payload(unittest.TestCase):
         for path in sorted(package.rglob("*.py")):
             if path == pathlib.Path(payload.__file__):
                 continue
-            for node in ast.walk(ast.parse(path.read_text())):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                         and node.func.attr in ("loads", "load") and isinstance(node.func.value, ast.Name)
                         and node.func.value.id in ("pickle", "pickler", "cloudpickle")

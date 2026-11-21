@@ -15,6 +15,7 @@ anything is read from the store, and starts again inside it, once.
 import io
 import json
 import os
+import re
 import sys
 import unittest
 from importlib import metadata
@@ -35,6 +36,7 @@ from test_where import vm
 SLIM = "python:3.12-slim-bookworm"
 RUNNER_ENV = envs.runner_env
 WIRE = Path(__file__).resolve().parents[3] / "operator" / "pkg" / "jobcli" / "testdata" / "wire.json"
+PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 
 def images_by_default(name, backend_id):
@@ -119,6 +121,13 @@ class RunnerPackagesTest(unittest.TestCase):
         table = json.loads(WIRE.read_text())["runner_packages"]
         names = sorted(package.split("==")[0] for package in machines._runner_packages())
         self.assertEqual(names, sorted(table["%d.%d" % sys.version_info[:2]]))
+
+    def test_the_table_has_every_minor_the_sdk_runs_on(self):
+        # The public CI on 3.11 found no row (v0.2.4): each minor the SDK
+        # declares, whichever one runs this test.
+        declared = re.findall(r'"Programming Language :: Python :: (3\.\d+)"', PYPROJECT.read_text())
+        self.assertTrue(declared)
+        self.assertEqual(sorted(set(declared) - set(json.loads(WIRE.read_text())["runner_packages"])), [])
 
     def test_a_commands_job_names_nothing(self):
         self.assertNotIn(remote_call.RUNNER_PACKAGES_ENV, self.env(remote.run(["echo", "hi"], code_dir=None)))

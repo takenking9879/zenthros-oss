@@ -173,11 +173,11 @@ class Skill(unittest.TestCase):
             out = io.StringIO()
             self.assertEqual(cli.main(["agent", "skill", "--to", folder], out=out), 0)
             written = Path(folder) / "zenthros" / "SKILL.md"
-            self.assertEqual(written.read_text(), ui.skill_text())
+            self.assertEqual(written.read_text(encoding="utf-8"), ui.skill_text())
             self.assertIn(str(written), out.getvalue())
             # The reference the skill links, beside it.
             for name, text in ui.skill_files().items():
-                self.assertEqual((Path(folder) / "zenthros" / name).read_text(), text, name)
+                self.assertEqual((Path(folder) / "zenthros" / name).read_text(encoding="utf-8"), text, name)
             self.assertTrue(any(name.startswith("reference/") for name in ui.skill_files()))
 
 
