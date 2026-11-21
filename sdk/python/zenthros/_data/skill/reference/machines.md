@@ -143,7 +143,7 @@ The order is always the same: checks, then the token, then the two lines, then t
 
 A name the Workspace already has is that machine, and `type`, `runtime` and `host` are not read:
 
-- A This computer on this computer: if it is stopped, it is started again as it was. If its agent is not the hub's release, it is updated in place, its environments kept. With `cpus=` or `memory=` it is resized in place, its environments kept. An update or a resize is refused while a job runs on it.
+- A This computer on this computer: if it is stopped, or its agent is not the hub's release, it gets the hub's agent in place and starts with it, its environments kept. With `cpus=` or `memory=` it is resized in place, its environments kept. An update or a resize is refused while a job runs on it.
 - A VM or a container: when its agent is not the hub's release, attach writes to `out` the lines to paste on it again. They update the agent and keep the machine and its jobs.
 
 | Parameter | Type | Default | What it is |

@@ -774,22 +774,6 @@ def resize(backend, *, cpus=None, memory=None, docker="docker", out=None):
     return Machine(name=name, id=found.id, target=LOCAL, container=containers[0])
 
 
-def revive(backend, docker="docker"):
-    """This computer's machine backend, up again as it was (its container
-    started, its agent attached again with its certificate): after docker
-    stop, or an agent stopped. Returns the backend once the hub says it is
-    ready."""
-    name = backend.name or backend.id
-    client = _api()
-    lb = LocalBackend(client, backend.id, _containers_here(backend.id, docker)[0], created=True, docker=docker)
-    try:
-        lb.revive()
-    except errors.BackendJoinError as err:
-        raise errors.BackendJoinError(f"{err}\nMake it again: zenthros detach {name}, then zenthros attach {name} "
-                                      "--type local (its environments install again on first use)") from None
-    return lb.wait_ready(timeout=READY_TIMEOUT)
-
-
 def agent_differs(backend, client):
     """Whether backend's agent is of another release than the hub's, as the
     hub's last answer said it (Zenthros-Release)."""
@@ -822,9 +806,10 @@ UPDATE_TIMEOUT = 300
 
 def update_agent(backend, docker="docker"):
     """This computer's machine backend, its agent updated in place to the
-    hub's release: its container, files and environments stay. Refused
-    while it runs a job, which the restart would end. Returns the backend
-    once the hub hears the new agent."""
+    hub's release and started (a stopped one too, after docker stop): its
+    container, files and environments stay. Refused while it runs a job,
+    which the restart would end. Returns the backend once the hub hears the
+    new agent."""
     name = backend.name or backend.id
     if backend.running_jobs:
         raise errors.ValidationError(f"{name} runs a job now: its agent updates once it ends (zenthros jobs), with "
@@ -835,7 +820,11 @@ def update_agent(backend, docker="docker"):
     # of the person's own is left as it is: its runner brings them in a venv.
     _, image = _docker(docker, ["inspect", "--format", "{{.Config.Image}}", container], timeout=60)
     packages = _runner_packages() if image.strip().startswith(LOCAL_IMAGE_REPO + ":") else []
-    LocalBackend(client, backend.id, container, created=True, docker=docker).update(_installer(client), packages)
+    try:
+        LocalBackend(client, backend.id, container, created=True, docker=docker).update(_installer(client), packages)
+    except errors.BackendJoinError as err:
+        raise errors.BackendJoinError(f"{err}\nMake it again: zenthros detach {name}, then zenthros attach {name} "
+                                      "--type local (its environments install again on first use)") from None
     waited = 0
     while True:
         found = _find(client, backend.id)

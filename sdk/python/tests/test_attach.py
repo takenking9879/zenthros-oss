@@ -410,31 +410,44 @@ class SizeTest(Attach):
 
 class ReviveTest(Attach):
     """A This computer stopped (docker stop, or Docker without its restart)
-    is started again as it was by zenthros attach NAME: its container, then
-    its agent with the certificate it has (attach --resume). A stopped one
-    is offline, in no default list (observaciones P25)."""
+    comes back by zenthros attach NAME with the hub's agent: its container
+    started, the hub's agent installed in it, and started with the
+    certificate it has. An agent away says no release to the hub, and the
+    one it had may not speak to it: v0.2.3's had no attach --resume, which
+    asking it back used (close of v0.2.4, mi-maquina). A stopped one is
+    offline, in no default list (observaciones P25)."""
 
     def setUp(self):
         super().setUp()
         self.docker.answers["ps"] = (0, "zenthros-mi-pc\n")
+        self.api.routes[("POST", "/v1/workspaces/risk/backends")] = (201, UPDATE_JOIN)
+        self.api.routes[("DELETE", "/v1/workspaces/risk/backends/ct-new")] = (200, {"backendId": "ct-new"})
+        listed = self.api.routes[("GET", "/v1/workspaces/risk/backends")]
 
-    def test_a_stopped_one_starts_and_its_agent_attaches_again(self):
-        self.listed = [[OFFLINE_PC], [MI_PC]]
+        def released(body):
+            return (*listed(body), RELEASED)
+        self.api.routes[("GET", "/v1/workspaces/risk/backends")] = released
+
+    def test_a_stopped_one_starts_with_the_hubs_agent_not_its_own(self):
+        self.listed = [[OFFLINE_PC], [{**MI_PC, "agentVersion": "v0.2.4"}]]
         out = io.StringIO()
         m = machines.attach("mi-pc", type="local", out=out)
         self.assertEqual((m.name, m.id), ("mi-pc", "ct-1"))
         args = self.docker_args()
-        start, resume = args.index(["start", "zenthros-mi-pc"]), args.index(
-            ["exec", "zenthros-mi-pc", local.AGENT, "attach", "--resume", "--wait", local.REVIVE_WAIT])
-        self.assertLess(start, resume, "the container runs before its agent is asked back")
+        self.assertNotIn(["exec", "zenthros-mi-pc", local.AGENT, "attach", "--resume", "--wait", local.REVIVE_WAIT],
+                         args, "its own agent was asked back")
+        first_exec = next(i for i, a in enumerate(args) if a[0] == "exec")
+        self.assertLess(args.index(["start", "zenthros-mi-pc"]), first_exec, "something ran in a stopped container")
+        execs = [stdin for a, stdin in self.docker.calls if a[0] == "exec"]
+        self.assertIn("install-container.sh", execs[0])
+        self.assertIn(local.RESTART_AGENT, execs[1], "the installed agent is the one started")
         self.assertFalse([a for a in args if a[0] in ("rm", "run")], "made again")
-        self.assertEqual(self.joins(), [], "a new join for a machine that has its certificate")
-        self.assertIn("✓ mi-pc is back", out.getvalue())
-        self.assertEqual(self.events[-1], "api GET /backends", "returned before the hub said it is ready")
+        self.assertIn("✓ mi-pc: back with the hub's agent (v0.2.4), its environments as they were", out.getvalue())
+        self.assertEqual(self.events[-1], "api GET /backends", "returned before the hub heard it")
 
     def test_one_whose_agent_does_not_come_back_says_how_to_make_it_again(self):
         self.listed = [[OFFLINE_PC]]
-        self.docker.fail["exec"] = (3, "zenthros-agent attach: nothing to resume: this container never attached\n")
+        self.docker.fail["exec"] = (3, "zenadm join: nothing to resume: this container never attached\n")
         with self.assertRaisesRegex(errors.BackendJoinError, "nothing to resume(.|\n)*zenthros detach mi-pc, then "
                                                              "zenthros attach mi-pc --type local"):
             machines.attach("mi-pc", type="local")

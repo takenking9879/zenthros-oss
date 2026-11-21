@@ -207,11 +207,12 @@ def attach(name=None, *, type=None, runtime=None, host=None, key=None, ssh="ssh"
     there as root, and returns the Machine. type="local" starts a container
     on this computer (zenthros.create) with cpus and memory as its limits.
     A name already attached is that machine; cpus= or memory= give a This
-    computer of this one that size in place, with its environments, and one
-    stopped is started again as it was. A This computer whose agent is of
-    another release than the hub's gets the hub's in place; a VM or a
-    container of another release, the lines that update it (out). First, a container here whose
-    machine the hub no longer has is removed (machines.sweep)."""
+    computer of this one that size in place, with its environments. A This
+    computer of this one that is stopped, or whose agent is of another
+    release than the hub's, gets the hub's agent in place and starts with it,
+    its environments kept; a VM or a container of another release, the lines
+    that update it (out). First, a container here whose machine the hub no
+    longer has is removed (machines.sweep)."""
     from zenthros import machines
 
     if ask is None:
@@ -223,14 +224,16 @@ def attach(name=None, *, type=None, runtime=None, host=None, key=None, ssh="ssh"
         found = machines._find(client, name, offline=True)
         if found is not None:
             here = bool(machines._containers_here(found.id))
-            revived = not found.healthy and here
-            if revived:
-                found = machines.revive(found)
+            # One not connected comes back with the hub's agent, never with
+            # the one it had: the hub hears no release from an agent away,
+            # and the one it had may speak another wire.
+            updated = here and (not found.healthy or machines.agent_differs(found, client))
             was = found.agent_version
-            updated = here and machines.agent_differs(found, client)
             if updated:
                 found = machines.update_agent(found)
-                _say(out, f"✓ {name}: its agent updated from {was} to {found.agent_version}, its environments as they were")
+                came = (f"its agent updated from {was} to {found.agent_version}" if was
+                        else f"back with the hub's agent ({found.agent_version})")
+                _say(out, f"✓ {name}: {came}, its environments as they were")
             if sized:
                 return machines.resize(found, cpus=cpus, memory=memory, out=out)
             machine = machines._machine(found, "external")
@@ -241,7 +244,7 @@ def attach(name=None, *, type=None, runtime=None, host=None, key=None, ssh="ssh"
                 for line in machine.update:
                     _say(out, line)
             elif not updated:
-                _say(out, f"✓ {name} is back" if revived else f"✓ {name} is already attached")
+                _say(out, f"✓ {name} is already attached")
             return machine
     if sized and type is not None and _kind(type) != "local":
         raise errors.ValidationError(SIZE_IS_LOCAL)

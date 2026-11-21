@@ -32,7 +32,7 @@ A container create() starts comes back when Docker does (--restart
 unless-stopped), as a VM's agent comes back with its machine: its command
 attaches the agent again as it was (zenthros-agent attach --resume), with
 its files and environments. One stopped by hand stays stopped until
-zenthros attach NAME starts it (revive()).
+zenthros attach NAME starts it with the hub's agent (update()).
 """
 
 import re
@@ -249,12 +249,14 @@ class LocalBackend:
             raise errors.BackendJoinError(f"{self.container}: its agent did not come back: {out.strip()[-600:]}")
 
     def update(self, install, packages=()):
-        """The agent of a container create() made, updated in place: packages
-        (what its runner needs) installed as root, as its image did, then
+        """The agent of a container create() made, updated in place: the
+        container started (a stopped one; a running one stays as it is), then
+        packages (what its runner needs) installed as root, as its image did,
         install (a join's installScript, no secret in it) run again in it, and
-        the agent restarted (RESTART_AGENT). Its files and environments stay."""
-        code, out = 0, ""
-        if packages:
+        the agent restarted (RESTART_AGENT), the installed one. Its files and
+        environments stay."""
+        code, out = _docker(self.docker, ["start", self.container], timeout=120)
+        if code == 0 and packages:
             code, out = _docker(self.docker, ["exec", "-u", "0", self.container, "python3", "-m", "pip", "install",
                                               "--no-cache-dir", "--quiet", "--disable-pip-version-check", *packages],
                                 timeout=300)
