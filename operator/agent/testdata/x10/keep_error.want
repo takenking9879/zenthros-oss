@@ -1,0 +1,4 @@
+[synth] Starting training pipeline
+[synth] Training job failed: boom
+Traceback (most recent call last):
+RuntimeError: worker died

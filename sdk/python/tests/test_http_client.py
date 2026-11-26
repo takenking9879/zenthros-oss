@@ -1,0 +1,965 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+
+"""HTTPJobClient and zenthros.config against a fake zenthros-api.
+
+The client carries a token and nothing else: every request has it, a
+refusal is the server's words mapped to the SDK's errors, and the job's
+namespace is the Workspace's, never the client's.
+"""
+import base64
+import io
+import json
+import os
+import pathlib
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.parse
+from http.client import IncompleteRead
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
+
+from zenthros import config, errors
+from zenthros.jobs import http, hubconn
+from zenthros.jobs import spec as S
+from zenthros.jobs.client import ZctlJobClient
+from zenthros.jobs.handle import SUCCEEDED
+from zenthros.jobs.http import HTTPJobClient, PresignedBlobStore
+from zenthros.remote import options
+from zenthros.remote.call import _LogFollower
+
+from support import FakeAPI, record, status
+
+OPERATOR = pathlib.Path(__file__).resolve().parents[3] / "operator"
+REFUSALS = OPERATOR / "pkg" / "api" / "testdata" / "wire" / "refusals.json"
+# The tables the SDK and the operator read alike (jobcli_test.go reads it too).
+FIXTURE = OPERATOR / "pkg" / "jobcli" / "testdata" / "wire.json"
+NAME_VECTOR = OPERATOR / "pkg" / "sourcebundle" / "testdata" / "name.json"
+
+
+def read(path):
+    with open(path) as fh:
+        return fh.read()
+
+
+def job(name="j"):
+    return S.Job(name=name, spec=S.Spec(workload=S.Workload(kind="Job", template=S.Template(
+        entrypoint="echo hi", image="python:3.13"))))
+
+
+class HTTPJobClientTest(unittest.TestCase):
+    def setUp(self):
+        self.api = FakeAPI()
+        self.addCleanup(self.api.close)
+        self.client = HTTPJobClient(self.api.url, "risk", "bob-token", poll_seconds=0.01)
+
+    def test_every_request_carries_the_token_and_nothing_decides_the_namespace_but_the_workspace(self):
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = (201, {"metadata": {"name": "j"}})
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs/j/cancel")] = (200, {"metadata": {"name": "j"}})
+        self.api.routes[("DELETE", "/v1/workspaces/risk/jobs/j")] = (200, {"kind": "Status"})
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j/logs")] = (200, record(b"hello\n", cursor="6"))
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j/reports")] = (200, [])
+        with mock.patch.dict(os.environ, {"ZENTHROS_NAMESPACE": "tenant-other"}):
+            handle = self.client.submit(job())
+        self.assertEqual(handle.job_id, "j")
+        self.client.cancel("j")
+        self.client.delete("j")
+        self.assertEqual(self.client.logs("j"), "hello\n")
+        self.assertEqual(self.client.reports("j"), [])
+        self.assertTrue(all(r["auth"] == "Bearer bob-token" for r in self.api.requests), self.api.requests)
+        sent = json.loads(self.api.requests[0]["body"])
+        self.assertEqual(sent["kind"], "ZenthrosJob")
+        self.assertNotIn("namespace", sent["metadata"], "the Workspace in the path decides the namespace")
+
+    def test_job_lists_are_read_a_page_at_a_time(self):
+        # One list of a busy Workspace held the whole namespace in
+        # zenthros-api's memory at once (audit 2026-10-16 AUD-018).
+        def pages(_body):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.api.requests[-1]["path"]).query)
+            self.assertEqual(query.get("limit"), ["200"])
+            if query.get("continue") == ["p2"]:
+                return 200, {"kind": "ZenthrosJobList", "metadata": {}, "items": [{"metadata": {"name": "b"}}]}
+            return 200, {"kind": "ZenthrosJobList", "metadata": {"continue": "p2"}, "items": [{"metadata": {"name": "a"}}]}
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs")] = pages
+        names = [item["metadata"]["name"] for item in self.client.list_jobs(selector="team=risk")]
+        self.assertEqual(names, ["a", "b"])
+        lists = [r["path"] for r in self.api.requests]
+        self.assertEqual(len(lists), 2, lists)
+        self.assertTrue(all("labelSelector=team%3Drisk" in path for path in lists), lists)
+
+    def test_a_server_that_does_not_page_answers_in_one(self):
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs")] = (200, {"items": [{"metadata": {"name": "a"}}]})
+        self.assertEqual(len(self.client.list_jobs()), 1)
+        self.assertEqual(len(self.api.requests), 1)
+
+    def test_refusals_are_the_servers_words(self):
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = status(403, 'User "bob" cannot create resource "zenthrosjobs"')
+        with self.assertRaises(errors.WorkspaceForbidden) as caught:
+            self.client.submit(job())
+        self.assertIn('User "bob" cannot create', str(caught.exception))
+        # A key the server no longer takes is a login to renew, not a
+        # Workspace the caller may not use; a name taken is not worth a
+        # retry (audit 2026-10-16 AUD-040).
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j/logs")] = status(401, "this is not a token of this hub", "Unauthorized")
+        with self.assertRaises(errors.LoginRequired) as caught:
+            self.client.logs("j")
+        self.assertIn("zctl user token", str(caught.exception))
+        # The hub says which it is (not a token, expired when, or revoked):
+        # the lab's garbage token heard it had expired (16).
+        self.assertIn("this is not a token of this hub", str(caught.exception))
+        self.assertNotIn("expired", str(caught.exception))
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = status(409, 'zenthrosjobs "j" already exists', "AlreadyExists")
+        with self.assertRaises(errors.Conflict) as caught:
+            self.client.submit(job())
+        self.assertNotIsInstance(caught.exception, errors.TransientError)
+        self.assertIn("already exists", str(caught.exception))
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs/j/cancel")] = status(400, "bad", "BadRequest")
+        with self.assertRaises(errors.ValidationError):
+            self.client.cancel("j")
+        self.api.routes[("DELETE", "/v1/workspaces/risk/jobs/j")] = status(503, "no Gateway", "ServiceUnavailable")
+        with mock.patch.object(http, "_sleep"), self.assertRaises(errors.TransientError):
+            self.client.delete("j")
+
+    def test_a_refusal_is_transient_only_by_the_one_table(self):
+        """Which answers are asked again is errors.transient_status's, the
+        operator's table too (fault.TransientHTTP): any other 4xx is an
+        answer that turns the request down. A 410 or a 405 read as a moment
+        of the API was asked again for 300 s, and a 412 on a submit said the
+        job may have been created. A 410 is a log its machine no longer
+        keeps (LogGone), never asked again either, and a 501 is how the hub
+        is set up: one with no call store answered each read 503, and every
+        `zenthros jobs` read them all again (20)."""
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = status(410, "gone", "Gone")
+        with mock.patch.object(http, "_sleep") as slept, self.assertRaises(errors.LogGone):
+            self.client.job_object("j")
+        slept.assert_not_called()
+        for code in (405, 412, 415, 501):
+            self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = status(code, "no", "Refused")
+            with self.subTest(code=code), self.assertRaises(errors.Refused) as caught:
+                self.client.job_object("j")
+            self.assertNotIsInstance(caught.exception, errors.TransientError)
+            self.assertEqual(caught.exception.status, code)
+        for code in (408, 429, 500, 503):
+            self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = status(code, "later", "Unavailable")
+            with self.subTest(code=code), mock.patch.object(http, "_sleep"), self.assertRaises(errors.TransientError):
+                self.client.job_object("j")
+
+    def test_a_rate_limit_is_waited_out_for_as_long_as_it_says(self):
+        """A 429 of the API's limit comes before anything is done, so even a
+        create is safe to send again; it waits what Retry-After says."""
+        answers = [(*status(429, "too many", "TooManyRequests"), {"Retry-After": "2"}), (200, {"metadata": {"name": "j"}})]
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = lambda _body: answers.pop(0)
+        with mock.patch.object(http, "_sleep") as slept:
+            self.client.job_object("j")
+        slept.assert_called_once_with(2)
+
+    def test_a_rate_limit_that_does_not_end_is_transient(self):
+        limited = (*status(429, "too many", "TooManyRequests"), {"Retry-After": "1"})
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = limited
+        with mock.patch.object(http, "_sleep") as slept, self.assertRaises(errors.TransientError):
+            self.client.job_object("j")
+        self.assertEqual(slept.call_count, http.RATE_LIMIT_ATTEMPTS - 1)
+
+    def test_a_rate_limit_never_waits_longer_than_its_ceiling(self):
+        """The header is the server's word: a huge one does not hang a call."""
+        answers = [(*status(429, "too many", "TooManyRequests"), {"Retry-After": "86400"}), (200, {"metadata": {"name": "j"}})]
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = lambda _body: answers.pop(0)
+        with mock.patch.object(http, "_sleep") as slept:
+            self.client.job_object("j")
+        slept.assert_called_once_with(http.RATE_LIMIT_MAX_WAIT)
+
+    def test_a_submit_whose_answer_is_lost_is_sent_again_by_its_name(self):
+        # The API created the job and its answer was lost: the error named no
+        # job, and a rerun named another one and ran the work twice (audit
+        # 2026-10-16 AUD-075). Sent again, the name is taken by this very
+        # submission, which is the job.
+        created = {}
+
+        def post(body):
+            if created:
+                return status(409, 'zenthrosjobs "j" already exists', "AlreadyExists")
+            created.update(json.loads(body))
+            return status(504, "upstream timed out", "Timeout")
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = post
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = lambda _body: (200, created)
+        with mock.patch.object(http, "_sleep") as slept:
+            handle = self.client.submit(job())
+        self.assertEqual(handle.job_id, "j")
+        posts = [json.loads(r["body"]) for r in self.api.requests if r["method"] == "POST"]
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(posts[0], posts[1], "sent again as it was: the same name and the same submission")
+        self.assertTrue(posts[0]["metadata"]["annotations"][http.SUBMISSION])
+        slept.assert_called_once_with(http.HUB_AWAY_WAITS[0])
+
+    def code_job(self, name, core, own=b""):
+        """A call's job: its source holds the core and its own files (any
+        client), and its code says which is which (the hub's)."""
+        sent = job(name)
+        sent.spec.workload.template.source = S.Source(inline=base64.b64encode(core + own).decode())
+        sent.code = S.Code(base=core, overlay=own)
+        return sent
+
+    def test_the_core_goes_by_its_digest_beside_a_calls_own_files_and_whole_once(self):
+        # The SDK's core rode inline in every job: 290 KB uploaded on every
+        # call to a hub across the internet (2026-11-18). With no bucket a
+        # call's own files rode in the same tarball, of a new digest on every
+        # call: the hub never held it, and each call sent the whole after a
+        # refused POST (GCP, 2026-11-19). The core goes by its name with the
+        # call's own files beside it, and whole (base) once, when the hub does
+        # not hold it.
+        core, own = b"print('zenthros')\n" * 1024, b"the call"
+        name = http.bundle_name(core)
+        absent = next(r for r in json.loads(REFUSALS.read_text())["refusals"] if r["means"] == "code-absent")
+        said = json.loads(absent["body"])["details"]["name"]
+        answers = [(404, absent["body"].replace(said, name).encode()), (201, {"metadata": {"name": "j"}}),
+                   (201, {"metadata": {"name": "k"}}), (201, {"metadata": {"name": "l"}})]
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = lambda _body: answers.pop(0)
+        for name_of in ("j", "k"):
+            self.client.submit(self.code_job(name_of, core, own))
+        self.client.submit(self.code_job("l", core))
+        posts = [r["body"] for r in self.api.requests if r["method"] == "POST"]
+        sources = [json.loads(p)["spec"]["workload"]["template"]["source"] for p in posts]
+        mine = base64.b64encode(own).decode()
+        self.assertEqual(sources, [{"ref": name, "inline": mine}, {"base": base64.b64encode(core).decode(), "inline": mine},
+                                   {"ref": name, "inline": mine}, {"ref": name}])
+        self.assertLess(len(posts[0]), 10_000)
+        self.assertEqual(json.loads(posts[0])["metadata"]["annotations"], json.loads(posts[1])["metadata"]["annotations"],
+                         "sent again with its core, the same submission")
+
+    def test_a_small_core_and_code_with_no_core_go_as_they_are(self):
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = (201, {"metadata": {"name": "j"}})
+        small = self.code_job("j", b"print(1)", b"the call")
+        large = job("k")
+        large.spec.workload.template.source = S.Source(inline=base64.b64encode(b"x" * 20_000).decode())
+        for sent in (small, large):
+            self.client.submit(sent)
+        sources = [json.loads(r["body"])["spec"]["workload"]["template"]["source"] for r in self.api.requests if r["method"] == "POST"]
+        self.assertEqual(sources, [{"inline": base64.b64encode(b"print(1)the call").decode()},
+                                   {"inline": base64.b64encode(b"x" * 20_000).decode()}],
+                         "the hub keeps a large one by its digest itself")
+
+    def test_a_bundle_is_named_as_the_hub_names_it(self):
+        vector = json.loads(NAME_VECTOR.read_text())
+        self.assertEqual(http.bundle_name(base64.b64decode(vector["data"])), vector["name"])
+
+    def test_a_name_another_submission_took_is_refused_after_a_lost_answer(self):
+        answers = [status(503, "busy", "ServiceUnavailable"), status(409, 'zenthrosjobs "j" already exists', "AlreadyExists")]
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = lambda _body: answers.pop(0)
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = (200, {"metadata": {"name": "j", "annotations": {http.SUBMISSION: "another"}}})
+        with mock.patch.object(http, "_sleep"), self.assertRaises(errors.Conflict):
+            self.client.submit(job())
+
+    def test_a_name_taken_says_what_to_do_as_on_this_computer(self):
+        # A script rerun after a failed run with name= (wave 7, 2026-11-20)
+        # got the hub's raw "zenthrosjobs ... already exists".
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = status(409, 'zenthrosjobs "j" already exists', "AlreadyExists")
+        with self.assertRaises(errors.Conflict) as caught:
+            self.client.submit(job())
+        self.assertEqual(str(caught.exception), "job j already exists here: name another, or zenthros.get('j')")
+        answers = [status(503, "busy", "ServiceUnavailable"), status(409, 'zenthrosjobs "j" already exists', "AlreadyExists")]
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = lambda _body: answers.pop(0)
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = (200, {"metadata": {"name": "j", "annotations": {http.SUBMISSION: "another"}}})
+        with mock.patch.object(http, "_sleep"), self.assertRaises(errors.Conflict) as caught:
+            self.client.submit(job())
+        self.assertIn("name another, or zenthros.get('j')", str(caught.exception))
+
+    def test_a_name_that_could_not_be_read_back_is_no_conflict(self):
+        # The read back of a name a lost answer may have taken did not
+        # answer either: whose it is is unknown, not someone else's. A
+        # Conflict told the user to rename, and the rerun ran the work twice
+        # (R4 ronda 4, M4).
+        answers = [status(503, "busy", "ServiceUnavailable"), status(409, 'zenthrosjobs "j" already exists', "AlreadyExists")]
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = lambda _body: answers.pop(0)
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = status(503, "busy", "ServiceUnavailable")
+        with mock.patch.object(http, "_sleep"), self.assertRaises(errors.TransientError) as caught:
+            self.client.submit(job())
+        self.assertEqual(caught.exception.job, "j")
+        self.assertIn("zenthros.get('j')", str(caught.exception))
+
+    def test_a_submit_that_never_answers_names_its_job(self):
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = status(504, "upstream timed out", "Timeout")
+        with mock.patch.object(http, "_sleep"), self.assertRaises(errors.TransientError) as caught:
+            self.client.submit(job())
+        self.assertEqual(caught.exception.job, "j")
+        self.assertIn("zenthros.get('j')", str(caught.exception))
+        # Sent by its name and nonce through the hub's wait, once: not that
+        # wait again for each of SUBMIT_ATTEMPTS.
+        self.assertEqual(len([r for r in self.api.requests if r["method"] == "POST"]), len(http.HUB_AWAY_WAITS) + 1)
+
+    def test_a_submit_through_a_restart_is_one_job(self):
+        # The hub restarting answers 503; sent again, the first had made the
+        # job: the 409 that answers the resend is this submission's (its
+        # nonce), never "the name is taken".
+        posted = []
+
+        def post(body):
+            posted.append(body)
+            return status(503, "the hub is restarting", "ServiceUnavailable") if len(posted) == 1 else \
+                status(409, 'zenthrosjobs "j" already exists', "AlreadyExists")
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = post
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = lambda _body: (200, {"metadata": json.loads(posted[0])["metadata"]})
+        with mock.patch.object(http, "_sleep"):
+            self.assertEqual(self.client.submit(job()).job_id, "j")
+        self.assertEqual(len(posted), 2)
+
+    def test_the_hubs_restart_is_waited_out_for_two_minutes_and_said_once(self):
+        """A restarting hub went about 15 s without a controller and the SDK
+        gave up after 8 s: reads raised, and a write raised at once. Any
+        request waits out a connection refused (nothing was sent); one safe
+        to send twice (a GET, PUT or DELETE, a submit by its nonce) waits out
+        a 502, 503 or 504 too, Retry-After first; a POST that is not
+        (a join) never. After about 5 s it says so, once."""
+        self.assertAlmostEqual(sum(http.HUB_AWAY_WAITS), 128)
+        path = "/v1/workspaces/risk/targets"
+        self.api.routes[("GET", path)] = status(503, "the hub is restarting", "ServiceUnavailable")
+        said = io.StringIO()
+        with mock.patch.object(http, "_sleep") as slept, mock.patch("sys.stderr", said), \
+                self.assertRaises(errors.TransientError):
+            self.client._json("GET", "/targets")
+        self.assertEqual([c.args[0] for c in slept.call_args_list], list(http.HUB_AWAY_WAITS))
+        self.assertEqual(said.getvalue().count("is not answering (it may be restarting)"), 1, said.getvalue())
+        self.assertIn(self.api.url, said.getvalue())
+
+        later = [(503, b'{"message": "restarting"}', {"Retry-After": "2"}), (200, {"name": "x"})]
+        self.api.routes[("PUT", "/v1/workspaces/risk/secrets/x")] = lambda _body: later.pop(0)
+        with mock.patch.object(http, "_sleep") as slept:
+            self.assertEqual(self.client._json("PUT", "/secrets/x", {"value": "v"}), {"name": "x"})
+        self.assertEqual([c.args[0] for c in slept.call_args_list], [2], "Retry-After first")
+
+        self.api.routes[("POST", "/v1/workspaces/risk/backends")] = status(503, "the hub is restarting", "ServiceUnavailable")
+        with mock.patch.object(http, "_sleep") as slept, self.assertRaises(errors.TransientError):
+            self.client._json("POST", "/backends", {}, idempotent=False)
+        slept.assert_not_called()
+
+        self.api.routes[("POST", "/v1/workspaces/risk/backends")] = (201, {"backendId": "b"})
+        real = self.client._hub.request
+        refused = [ConnectionRefusedError("Connection refused")]
+
+        def restarting(*args, **kwargs):
+            if refused:
+                raise refused.pop()
+            return real(*args, **kwargs)
+
+        with mock.patch.object(self.client._hub, "request", side_effect=restarting), mock.patch.object(http, "_sleep"):
+            self.assertEqual(self.client._json("POST", "/backends", {}, idempotent=False), {"backendId": "b"})
+
+    def test_a_wait_with_a_timeout_bounds_the_hubs_waits_inside_it(self):
+        """A loop that asks again until its own timeout, and takes the hub
+        away for "not yet" (a machine's boot, wait_ready), waited the whole
+        table on each ask: a wait of 300 s on a hub that was down took
+        hours. Inside waiting_until, an ask waits no later than its end."""
+        self.api.routes[("GET", "/v1/workspaces/risk/targets")] = status(503, "the hub is restarting", "ServiceUnavailable")
+        with mock.patch.object(http, "_sleep") as slept, hubconn.waiting_until(time.monotonic() + 10), \
+                self.assertRaises(errors.TransientError):
+            self.client._json("GET", "/targets")
+        waited = [c.args[0] for c in slept.call_args_list]
+        self.assertTrue(waited, "it still waits a restart out")
+        self.assertLessEqual(sum(waited), 10)
+        with mock.patch.object(http, "_sleep") as slept, hubconn.waiting_until(time.monotonic() - 1), \
+                self.assertRaises(errors.TransientError):
+            self.client._json("GET", "/targets")
+        slept.assert_not_called()
+
+    def test_a_poll_waits_out_a_restart_no_longer_than_its_own_wait(self):
+        """A wait polls with what is left of its timeout: each poll waited
+        out the whole two minutes of a hub restarting, so a wait(timeout=30)
+        timed out after more than two minutes."""
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j/wait")] = status(503, "the hub is restarting", "ServiceUnavailable")
+        with mock.patch.object(http, "_sleep") as slept, self.assertRaises(errors.TransientError):
+            self.client._status_since("j", "", 3)
+        waited = [c.args[0] for c in slept.call_args_list]
+        self.assertTrue(waited, "a poll waits a restart out too")
+        self.assertLessEqual(sum(waited), 3)
+
+    def test_unreachable_server_is_transient(self):
+        client = HTTPJobClient("http://127.0.0.1:1", "risk", "t")
+        with mock.patch.object(http, "_sleep") as slept, self.assertRaises(errors.TransientError):
+            client.status("j")
+        # A read waits out a hub that restarts before it says so (29.2).
+        self.assertEqual([c.args[0] for c in slept.call_args_list], list(http.HUB_AWAY_WAITS))
+
+    def test_a_read_waits_out_a_hub_restarting(self):
+        """A gateway pod going answered 502 for ~7 s and a restarted hub
+        refused connections: each read raised at once (24, 29). A GET asks
+        again by the table both sides read (wire.json hub_away_retry); a
+        POST that is not safe to send twice, and a 501, never."""
+        table = json.loads(FIXTURE.read_text(encoding="utf-8"))["hub_away_retry"]
+        self.assertEqual(list(http.HUB_AWAY_WAITS), table["waits_seconds"])
+        self.assertAlmostEqual(sum(http.HUB_AWAY_WAITS), table["total_seconds"])
+        self.assertEqual(sorted(http.HUB_AWAY_STATUSES), table["statuses"])
+        path = "/v1/workspaces/risk/targets"
+        for away in [status(code, "a gateway goes", "ServiceUnavailable") for code in table["statuses"]]:
+            answers = [away, (200, {"targets": []})]
+            self.api.routes[("GET", path)] = lambda _body, answers=answers: answers.pop(0)
+            with mock.patch.object(http, "_sleep") as slept:
+                self.assertEqual(self.client._json("GET", "/targets"), {"targets": []})
+            self.assertEqual([c.args[0] for c in slept.call_args_list], [http.HUB_AWAY_WAITS[0]])
+        self.api.routes[("GET", path)] = (200, {"targets": []})
+        real = self.client._hub.request
+        refused = [ConnectionRefusedError("Connection refused")]
+
+        def restarting(*args, **kwargs):
+            if refused:
+                raise refused.pop()
+            return real(*args, **kwargs)
+
+        with mock.patch.object(self.client._hub, "request", side_effect=restarting), mock.patch.object(http, "_sleep"):
+            self.assertEqual(self.client._json("GET", "/targets"), {"targets": []})
+        for method, code in (("POST", 502), ("GET", 501)):
+            self.api.routes[(method, path)] = status(code, "no", "Unavailable")
+            before = len(self.api.requests)
+            with mock.patch.object(http, "_sleep") as slept, self.assertRaises(errors.ZenthrosError):
+                self.client._json(method, "/targets", {} if method == "POST" else None)
+            slept.assert_not_called()
+            self.assertEqual(len(self.api.requests) - before, 1, (method, code))
+
+    def test_wait_is_the_shared_one(self):
+        self.api.phases = ["Pending", "Running", "Succeeded"]
+        self.assertEqual(self.client.wait("j", timeout=10), SUCCEEDED)
+        waits = [r for r in self.api.requests if r["path"].startswith("/v1/workspaces/risk/jobs/j/wait")]
+        self.assertEqual([r["path"].split("seen=")[1].split("&")[0] for r in waits], ["", "Pending", "Running"],
+                         "each wait sends the token of the state before")
+        self.api.phases = ["Running", "Failed"]
+        with self.assertRaises(errors.JobFailed) as caught:
+            self.client.wait("j", timeout=10)
+        self.assertEqual(str(caught.exception), "job is Failed")
+
+    def test_the_wait_gives_the_job_it_saw_end(self):
+        """zenthros-api's wait answers the job's metadata and status: what
+        ended a call is read from it, not asked for again."""
+        self.api.phases = ["Running", "Succeeded"]
+        seen = []
+        self.assertEqual(self.client.wait("j", timeout=10, on_status=seen.append), SUCCEEDED)
+        self.assertEqual([s.phase for s in seen], ["Running", SUCCEEDED])
+        self.assertEqual(seen[-1].job["status"]["phase"], SUCCEEDED)
+        self.assertFalse([r for r in self.api.requests if r["path"] == "/v1/workspaces/risk/jobs/j"])
+
+    def test_wait_names_the_api_when_it_times_out_refused(self):
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j")] = status(503, "Workspace has no namespace yet", "ServiceUnavailable")
+        with self.assertRaises(errors.WaitTimeout) as caught:
+            self.client.wait("j", timeout=0.05)
+        self.assertIn("last zenthros-api error", str(caught.exception))
+
+    def test_token_is_asked_for_on_every_request(self):
+        tokens = iter(["first", "second"])
+        client = HTTPJobClient(self.api.url, "risk", lambda: next(tokens))
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j/logs")] = (200, b"")
+        client.logs("j")
+        client.logs("j")
+        self.assertEqual([r["auth"] for r in self.api.requests], ["Bearer first", "Bearer second"])
+
+    def test_followed_logs_drive_the_log_follower(self):
+        self.api.routes[("GET", "/v1/workspaces/risk/jobs/j/logs")] = (200, record(b"line 1\nline 2\n", cursor="14", handle="h", attempt=1))
+        out = io.StringIO()
+        follower = _LogFollower(self.client, "j", poll_seconds=0.01, out=out)
+        follower.start()
+        follower.stop(grace=0.2)
+        self.assertEqual(out.getvalue(), "line 1\nline 2\n")
+        self.assertTrue(any("follow=1" in r["path"] for r in self.api.requests))
+
+    def test_whoami_is_the_servers_answer(self):
+        self.api.routes[("GET", "/v1/whoami")] = (200, {"username": "system:serviceaccount:tenant-risk:bob"})
+        self.assertEqual(self.client.whoami()["username"], "system:serviceaccount:tenant-risk:bob")
+
+
+class PresignedStoreTest(unittest.TestCase):
+    """The call store through signed URLs: the API signs, the store serves,
+    and the bearer token never leaves for the store."""
+
+    def setUp(self):
+        self.api, self.s3 = FakeAPI(), FakeAPI()
+        self.addCleanup(self.api.close)
+        self.addCleanup(self.s3.close)
+        self.client = HTTPJobClient(self.api.url, "risk", "bob-token")
+
+    def sign(self, method, path, status=200):
+        self.api.routes[("POST", "/v1/workspaces/risk/objects/presign")] = (status, {
+            "url": f"{self.s3.url}{path}?X-Amz-Signature=abc", "method": method,
+            "headers": {"X-Amz-Checksum": ["1"]}} if status == 200 else
+            {"kind": "Status", "code": status, "message": "outside the Workspace's store"})
+
+    def test_a_put_says_its_size_and_a_file_is_measured_not_read(self):
+        store = PresignedBlobStore(self.client)
+        self.sign("PUT", "/calls/zenthros/risk/c/f")
+        self.s3.routes[("PUT", "/calls/zenthros/risk/c/f")] = (200, b"")
+        with tempfile.TemporaryDirectory() as scratch:
+            path = os.path.join(scratch, "f")
+            with open(path, "wb") as fh:
+                fh.write(b"12345")
+            store.put_file("s3://calls/zenthros/risk/c/f", path)
+        store.put("s3://calls/zenthros/risk/c/f", b"")
+        asked = [json.loads(r["body"])["size"] for r in self.api.requests]
+        self.assertEqual(asked, [5, 0])
+
+    def test_over_the_limit_nothing_is_sent_and_it_says_where_to_put_it(self):
+        store = PresignedBlobStore(self.client)
+        self.api.routes[("POST", "/v1/workspaces/risk/objects/presign")] = (413, {
+            "kind": "Status", "code": 413,
+            "message": "an object of 9 bytes is over this store's limit of 8 bytes for one upload: "
+                       "use your own bucket (zenthros.set_store) for data this large"})
+        with self.assertRaises(Exception) as caught:
+            store.put("s3://calls/zenthros/risk/c/f", b"123456789")
+        self.assertIn("set_store", str(caught.exception))
+        self.assertEqual(len(self.api.requests), 1, "a refusal is not worth asking again")
+        self.assertFalse(self.s3.requests)
+
+    def test_put_and_get_go_to_the_signed_url_without_the_token(self):
+        store = PresignedBlobStore(self.client)
+        self.sign("PUT", "/calls/zenthros/risk/c/call.pkl")
+        self.s3.routes[("PUT", "/calls/zenthros/risk/c/call.pkl")] = (200, b"")
+        store.put("s3://calls/zenthros/risk/c/call.pkl", b"payload")
+        self.sign("GET", "/calls/zenthros/risk/c/result.pkl")
+        self.s3.routes[("GET", "/calls/zenthros/risk/c/result.pkl")] = (200, b"result")
+        self.assertEqual(store.get("s3://calls/zenthros/risk/c/result.pkl"), b"result")
+
+        asked = [json.loads(r["body"]) for r in self.api.requests]
+        self.assertEqual(asked, [{"uri": "s3://calls/zenthros/risk/c/call.pkl", "method": "PUT", "size": 7},
+                                 {"uri": "s3://calls/zenthros/risk/c/result.pkl", "method": "GET"}])
+        self.assertEqual(self.s3.requests[0]["body"], b"payload")
+        self.assertTrue(all(r["auth"] is None for r in self.s3.requests), "the token reached the store")
+
+    def test_a_missing_object_is_file_not_found_and_a_refusal_is_the_apis(self):
+        store = PresignedBlobStore(self.client)
+        self.sign("GET", "/calls/zenthros/risk/c/result.pkl")
+        with self.assertRaises(FileNotFoundError):
+            store.get("s3://calls/zenthros/risk/c/result.pkl")
+        self.sign("PUT", "", status=403)
+        with self.assertRaises(errors.WorkspaceForbidden):
+            store.put("s3://calls/zenthros/ml/c/call.pkl", b"x")
+
+    def test_run_through_the_api_uses_the_workspace_store(self):
+        self.api.routes[("GET", "/v1/workspaces/risk")] = (200, {"name": "risk", "store": "s3://calls/zenthros/risk"})
+        self.assertEqual(self.client.store, "s3://calls/zenthros/risk")
+        with options.configure(client=self.client):
+            self.assertIsInstance(options.blob_store("s3://calls/zenthros/risk/x"), PresignedBlobStore)
+            from zenthros.remote import call as remote_call
+
+            self.assertEqual(remote_call._store(options.settings(), options.job_client()), "s3://calls/zenthros/risk")
+
+
+SEALED = {"secrets": [
+    {"type": "encrypted-payload", "encryptedPayload": {"ciphertext": f"-----BEGIN AGE ENCRYPTED FILE-----{name}",
+                                                       "recipients": ["age1abc"], "keyId": "k1"},
+     "materialization": {"mode": "env", "envName": name}}
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")],
+    "env": {"AWS_REGION": "us-east-1", "AWS_ENDPOINT_URL": "http://172.25.17.20:4566"},
+    "expiresAt": "2026-10-15T12:00:00Z"}
+
+
+def double_it(x):
+    return 2 * x
+
+
+class StoreAccessTest(unittest.TestCase):
+    """A job reaches the Workspace's store as zenthros-api says: its region
+    and the endpoint jobs reach it at for every job, and for a backend an
+    hour of credentials sealed to that backend, asked before the job exists."""
+
+    def setUp(self):
+        self.api = FakeAPI()
+        self.addCleanup(self.api.close)
+        self.client = HTTPJobClient(self.api.url, "risk", "bob-token")
+        self.api.routes[("GET", "/v1/workspaces/risk")] = (200, {
+            "name": "risk", "store": "s3://calls/zenthros/risk", "storeRegion": "us-east-1",
+            "storeJobEndpoint": "http://172.25.17.20:4566"})
+        self.api.routes[("POST", "/v1/workspaces/risk/jobs")] = (201, {})
+        # on="ct-1" finds the machine by its name.
+        self.api.routes[("GET", "/v1/workspaces/risk/backends")] = (200, {"backends": [
+            {"backendId": "ct-1", "name": "ct-1", "backendType": "container"}]})
+
+    def test_a_backend_gets_sealed_credentials_and_where_the_store_is(self):
+        self.api.routes[("POST", "/v1/workspaces/risk/store/credentials")] = (200, SEALED)
+        # The answer's env is where this backend reaches the store.
+        self.api.routes[("GET", "/v1/workspaces/risk")] = (200, {"name": "risk", "store": "s3://calls/zenthros/risk"})
+        env, secrets = self.client.store_access("ct-1")
+        self.assertEqual(env, {"AWS_REGION": "us-east-1", "AWS_ENDPOINT_URL": "http://172.25.17.20:4566"})
+        self.assertEqual([s.materialization.env_name for s in secrets],
+                         ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"])
+        sealed = secrets[0]
+        self.assertEqual((sealed.type, sealed.encrypted_payload.recipients, sealed.encrypted_payload.key_id),
+                         ("encrypted-payload", ["age1abc"], "k1"))
+        asked = [r for r in self.api.requests if r["method"] == "POST"]
+        self.assertEqual(json.loads(asked[0]["body"]), {"backend": "ct-1"})
+
+    def test_a_pool_gets_where_the_store_is_and_its_machines_their_role(self):
+        env, secrets = self.client.store_access("")
+        self.assertEqual((env, secrets), ({"AWS_REGION": "us-east-1", "AWS_ENDPOINT_URL": "http://172.25.17.20:4566"}, []))
+        self.assertFalse([r for r in self.api.requests if r["method"] == "POST"])
+
+    def test_an_api_without_a_role_leaves_the_backend_its_own(self):
+        self.api.routes[("POST", "/v1/workspaces/risk/store/credentials")] = status(
+            501, "zenthros-api gives no store credentials", "MethodNotAllowed")
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            env, secrets = self.client.store_access("vm-1")
+        self.assertEqual(secrets, [])
+        self.assertEqual(env["AWS_REGION"], "us-east-1")
+        self.assertIn("vm-1", err.getvalue())
+
+    def test_an_outage_is_no_answer_that_there_is_no_role(self):
+        # A job sent without its credentials on a 503 could not read its
+        # call: the outage is raised, not read as "no role".
+        self.api.routes[("POST", "/v1/workspaces/risk/store/credentials")] = status(
+            503, "Workspace risk is not ready", "ServiceUnavailable")
+        with mock.patch.object(http, "_sleep"), self.assertRaises(errors.TransientError):
+            self.client.store_access("vm-1")
+
+    def test_run_on_a_backend_seals_first_then_creates_the_job(self):
+        from zenthros.core.storage import MemoryBlobStore
+        from zenthros.remote import call as remote_call
+
+        self.api.routes[("POST", "/v1/workspaces/risk/store/credentials")] = (200, SEALED)
+        with options.configure(client=self.client, blob_store=MemoryBlobStore()):
+            remote_call.run(double_it, 21, on="ct-1", code_dir=None, env={"AWS_REGION": "eu-west-1"})
+        posts = [r["path"] for r in self.api.requests if r["method"] == "POST"]
+        self.assertEqual(posts, ["/v1/workspaces/risk/store/credentials", "/v1/workspaces/risk/jobs"])
+        template = json.loads(self.api.requests[-1]["body"])["spec"]["workload"]["template"]
+        env = {e["name"]: e["value"] for e in template["env"]}
+        # What the caller says beats what the API says.
+        self.assertEqual((env["AWS_REGION"], env["AWS_ENDPOINT_URL"]), ("eu-west-1", "http://172.25.17.20:4566"))
+        self.assertEqual([s["materialization"]["envName"] for s in template["secretSources"]],
+                         ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"])
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
+
+    def test_one_run_asks_for_the_workspace_once(self):
+        # Each step made its own client from the login, and each asked the
+        # hub for the Workspace again.
+        from zenthros.core.storage import MemoryBlobStore
+        from zenthros.remote import call as remote_call
+
+        self.api.routes[("POST", "/v1/workspaces/risk/store/credentials")] = (200, SEALED)
+        with mock.patch.dict(os.environ, {config.CONFIG_ENV: os.devnull + ".none"}), \
+                options.configure(server=self.api.url, token="bob-token", workspace="risk",
+                                  blob_store=MemoryBlobStore()):
+            remote_call.run(double_it, 21, on="ct-1", code_dir=None)
+        asked = [r for r in self.api.requests if r["method"] == "GET" and r["path"] == "/v1/workspaces/risk"]
+        self.assertEqual(len(asked), 1)
+
+    def test_credentials_of_the_callers_own_are_not_replaced(self):
+        from zenthros.core.storage import MemoryBlobStore
+        from zenthros.remote import call as remote_call
+
+        mine = options.Secret("encrypted-payload", payload=S.EncryptedPayload(ciphertext="x" * 64, recipients=["age1me"]))
+        with options.configure(client=self.client, blob_store=MemoryBlobStore()):
+            remote_call.run(double_it, 21, on="ct-1", code_dir=None, secrets={"AWS_ACCESS_KEY_ID": mine})
+        self.assertNotIn("/v1/workspaces/risk/store/credentials", [r["path"] for r in self.api.requests])
+
+    def test_a_store_of_the_callers_own_is_left_to_the_caller(self):
+        # With credentials of its own for it, the hub is not asked and its
+        # endpoint not added (without them: test_userstore, minted here).
+        from zenthros.core.storage import MemoryBlobStore
+        from zenthros.remote import call as remote_call
+
+        mine = options.Secret("encrypted-payload", payload=S.EncryptedPayload(ciphertext="x" * 64, recipients=["age1me"]))
+        with options.configure(client=self.client, blob_store=MemoryBlobStore(), store="s3://mine/calls"):
+            remote_call.run(double_it, 21, on="ct-1", code_dir=None, secrets={"AWS_ACCESS_KEY_ID": mine})
+        self.assertEqual([r["path"] for r in self.api.requests if r["method"] == "POST"], ["/v1/workspaces/risk/jobs"])
+        template = json.loads(self.api.requests[-1]["body"])["spec"]["workload"]["template"]
+        self.assertNotIn("AWS_ENDPOINT_URL", {e["name"] for e in template["env"]})
+
+
+class ConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = os.path.join(self.dir.name, "config.yaml")
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("ZENTHROS_")}
+        patcher = mock.patch.dict(os.environ, {**clean, "ZENTHROS_CONFIG": self.path}, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, doc):
+        with open(self.path, "w") as fh:
+            fh.write(doc if isinstance(doc, str) else json.dumps(doc))
+
+    def zenconfig(self, **auth):
+        return {"current-context": "risk", "contexts": {
+            "risk": {"server": "https://api.test", "workspace": "risk", "auth": {"type": "token", **auth}},
+            "ml": {"server": "https://ml.test", "workspace": "ml", "auth": {"type": "token", "token": "ml-token"}}}}
+
+    def test_a_key_in_the_environment_keeps_the_bucket_saved_for_its_workspace(self):
+        # The key is the connection, and the bucket the person keeps for
+        # that Workspace stays theirs: read as none, a result in it was asked
+        # of a hub that cannot sign it, 503 (20).
+        from zenthros import userstore
+
+        doc = self.zenconfig(token="file-token")
+        doc["contexts"]["risk"]["store"] = "gs://mine/zenthros"
+        self.write(doc)
+
+        def key(server, workspace):
+            body = json.dumps({"server": server, "workspace": workspace, "token": "key-token"}).encode()
+            return config.API_KEY_PREFIX + base64.urlsafe_b64encode(body).decode().rstrip("=")
+
+        with mock.patch.dict(os.environ, {config.API_KEY_ENV: key("https://api.test/", "risk")}):
+            self.assertEqual(userstore.saved(), ("gs://mine/zenthros", ""))
+            self.assertEqual(config.resolve().token(), "key-token")
+        with mock.patch.dict(os.environ, {config.API_KEY_ENV: key("https://api.test", "ml")}):
+            self.assertEqual(userstore.saved(), ("", ""))
+
+    def test_configure_beats_the_environment_beats_the_context(self):
+        self.write(self.zenconfig(token="file-token"))
+        conn = config.resolve()
+        self.assertEqual((conn.server, conn.workspace, conn.token()), ("https://api.test", "risk", "file-token"))
+        with mock.patch.dict(os.environ, {"ZENTHROS_SERVER": "https://env.test", "ZENTHROS_TOKEN": "env-token",
+                                          "ZENTHROS_WORKSPACE": "env-ws"}):
+            conn = config.resolve()
+            self.assertEqual((conn.server, conn.workspace, conn.token()), ("https://env.test", "env-ws", "env-token"))
+            conn = config.resolve(server="https://arg.test", token="arg-token", workspace="arg-ws")
+            self.assertEqual((conn.server, conn.workspace, conn.token()), ("https://arg.test", "arg-ws", "arg-token"))
+        conn = config.resolve(context="ml")
+        self.assertEqual((conn.server, conn.token()), ("https://ml.test", "ml-token"))
+        with mock.patch.dict(os.environ, {"ZENTHROS_CONTEXT": "ml"}):
+            self.assertEqual(config.resolve().workspace, "ml")
+
+    def test_no_server_means_zctl_as_before(self):
+        self.assertIsNone(config.resolve())
+        # A context that names the gateway, not zenthros-api: no server.
+        self.write({"current-context": "prod", "contexts": {"prod": {"controller": "gw:9443", "cert": "/etc/z/admin.crt"},
+                                                            "risk": {"server": "https://api.test", "workspace": "risk"}}})
+        self.assertIsNone(config.resolve())
+        # Whether this machine has a zctl is not what this asks.
+        with options.configure(client=None), mock.patch.object(options, "_zctl_configured", return_value=True):
+            self.assertIsInstance(options.job_client(), ZctlJobClient)
+
+    def test_a_broken_zenconfig_is_an_error_not_no_connection(self):
+        # A trailing comma read as "no connection" sent the caller to zctl
+        # ("zctl not found") or asked for a server the file has.
+        self.write('{"current-context": "risk", "contexts": {"risk": {"server": "https://api.test",}}}')
+        with self.assertRaises(errors.ValidationError) as caught:
+            config.resolve()
+        self.assertIn(self.path, str(caught.exception))
+        with self.assertRaises(errors.ValidationError):
+            options.job_client()
+
+    def test_a_server_means_the_http_client(self):
+        self.write(self.zenconfig(token="t"))
+        client = options.job_client()
+        self.assertIsInstance(client, HTTPJobClient)
+        self.assertEqual((client.server, client.workspace), ("https://api.test", "risk"))
+        with options.configure(server="https://other.test", token="x", workspace="w"):
+            client = options.job_client()
+        self.assertEqual((client.server, client.workspace), ("https://other.test", "w"))
+
+    def test_token_file_is_read_on_every_request(self):
+        token_file = os.path.join(self.dir.name, "token")
+        self.write(self.zenconfig(**{"token-file": token_file}))
+        source = config.resolve().token
+        for value in ("one", "two"):
+            with open(token_file, "w") as fh:
+                fh.write(value + "\n")
+            self.assertEqual(source(), value)
+
+    def test_token_command_speaks_exec_credential(self):
+        script = os.path.join(self.dir.name, "cred.py")
+        counter = os.path.join(self.dir.name, "count")
+        with open(script, "w") as fh:
+            fh.write(
+                "import json, os, sys\n"
+                "assert json.loads(os.environ['KUBERNETES_EXEC_INFO'])['spec']['interactive'] is False\n"
+                f"open({counter!r}, 'a').write('x')\n"
+                "print(json.dumps({'apiVersion': 'client.authentication.k8s.io/v1', 'kind': 'ExecCredential',"
+                " 'status': {'token': 'oidc-token', 'expirationTimestamp': sys.argv[1]}}))\n")
+        self.write(self.zenconfig(**{"token-command": {"command": sys.executable, "args": [script, "2999-01-01T00:00:00Z"]}}))
+        source = config.resolve().token
+        self.assertEqual(source(), "oidc-token")
+        self.assertEqual(source(), "oidc-token")
+        self.assertEqual(read(counter), "x", "a token that has not expired is reused")
+        self.write(self.zenconfig(**{"token-command": {"command": sys.executable, "args": [script, "2000-01-01T00:00:00Z"]}}))
+        source = config.resolve().token
+        source()
+        source()
+        self.assertEqual(read(counter), "xxx", "an expired token is fetched again")
+
+    def test_a_server_without_a_workspace_or_a_token_is_refused(self):
+        self.write({"current-context": "x", "contexts": {"x": {"server": "https://api.test", "auth": {"token": "t"}}}})
+        with self.assertRaises(errors.ValidationError):
+            config.resolve()
+        self.write({"current-context": "x", "contexts": {"x": {"server": "https://api.test", "workspace": "w", "auth": {}}}})
+        with self.assertRaises(errors.ValidationError):
+            config.resolve()
+        with self.assertRaises(errors.ValidationError):
+            config.resolve(context="missing")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class LogStreamCloseTest(unittest.TestCase):
+    """Found on Floci: wait() closed the followed log while the follower thread
+    was reading it, and http.client raised AttributeError in that thread."""
+
+    class Response:
+        """Sends a line, then reads as http.client does once closed."""
+
+        def __init__(self):
+            self.closed = False
+            self._pieces = iter([record(b"first\n", cursor="6"), record(b"second\n", cursor="13")])
+
+        def read1(self, n):
+            piece = next(self._pieces, b"")
+            if self.closed and piece:
+                raise AttributeError("'NoneType' object has no attribute 'readline'")
+            return piece
+
+        def close(self):
+            self.closed = True
+
+        def getheader(self, name, default=None):
+            return default
+
+    def test_closing_mid_read_ends_the_stream_quietly(self):
+        from zenthros.jobs.http import _LogStream
+
+        stream = _LogStream(self.Response())
+        self.assertEqual(next(stream.stdout), "first\n")
+        stream.wait()
+        self.assertEqual(list(stream.stdout), [])
+        self.assertEqual(stream.poll(), 0)
+
+    def test_the_same_error_on_an_open_stream_is_a_bug_and_propagates(self):
+        from zenthros.jobs.http import _LogStream
+
+        response = self.Response()
+        stream = _LogStream(response)
+        next(stream.stdout)
+        response.closed = True  # closed by nobody we know of
+        with self.assertRaises(AttributeError):
+            list(stream.stdout)
+
+
+class LogStreamBreaksOffTest(unittest.TestCase):
+    """A followed log cut mid-chunk, or with a piece that is not a record,
+    ends: the follower thread died of it (code review 2026-11-08)."""
+
+    class Cut:
+        def __init__(self):
+            self._pieces = iter([record(b"first\n", cursor="6", handle="h", attempt=1)])
+
+        def read1(self, n):
+            piece = next(self._pieces, None)
+            if piece is None:
+                raise IncompleteRead(b"")
+            return piece
+
+        def close(self):
+            pass
+
+        def getheader(self, name, default=None):
+            return default
+
+    class Corrupt(Cut):
+        def read1(self, n):
+            return b"not a record at all\n"
+
+    def test_a_stream_that_breaks_off_ends_with_what_came(self):
+        from zenthros.jobs.http import _LogStream
+
+        stream = _LogStream(self.Cut())
+        self.assertEqual(list(stream.stdout), ["first\n"])
+        # The next stream goes on right after it.
+        self.assertEqual((stream.position.handle, stream.position.cursor), ("h", "6"))
+        stream = _LogStream(self.Corrupt())
+        self.assertEqual(list(stream.stdout), [])
+        self.assertEqual(stream.poll(), 0)
+
+
+class SharedClientTest(unittest.TestCase):
+    """The process keeps one client per server, Workspace and CA: another
+    credential replaces it, and login() and logout() drop them, as the
+    session behind a context's name may be another person's (code review
+    2026-11-08)."""
+
+    def setUp(self):
+        http.forget_shared()
+        self.addCleanup(http.forget_shared)
+
+    def conn(self, token, workspace="risk"):
+        return config.Connection("https://api.test", workspace, config.TokenSource(token=token))
+
+    def test_one_client_per_credential_in_force(self):
+        first = HTTPJobClient.for_connection(self.conn("a"))
+        self.assertIs(HTTPJobClient.for_connection(self.conn("a")), first)
+        second = HTTPJobClient.for_connection(self.conn("b"))
+        self.assertIsNot(second, first)
+        self.assertEqual(len(http._shared), 1, "a credential refreshed replaces the client, never adds one")
+        HTTPJobClient.for_connection(self.conn("b", workspace="ops"))
+        self.assertEqual(len(http._shared), 2)
+
+    def test_login_and_logout_drop_the_processs_clients(self):
+        from zenthros import auth
+
+        HTTPJobClient.for_connection(self.conn("a"))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"ZENTHROS_CONFIG": os.path.join(tmp, "config")}):
+            for name in (config.TOKEN_ENV, config.TOKEN_FILE_ENV, config.API_KEY_ENV):
+                os.environ.pop(name, None)
+            ws = auth.login(server="https://api.test", workspace="risk", token="t")
+            self.assertEqual(list(http._shared.values()), [(("token", "t"), ws._client)])
+            auth.logout()
+            self.assertEqual(http._shared, {})
+
+
+class HangingLog(BaseHTTPRequestHandler):
+    """A followed log that sends a line and then nothing, and never ends:
+    the Gateway's stream of an attempt whose machine is gone."""
+
+    release = threading.Event()
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.zenthros.log-records")
+        self.end_headers()
+        self.wfile.write(record(b"first\n", cursor="6"))
+        self.wfile.flush()
+        self.release.wait(30)
+
+    def log_message(self, *args):
+        pass
+
+
+class LogStreamStopTest(unittest.TestCase):
+    """result() stops its log follower when the job ends. The follower's
+    thread is inside a read on a stream that may never end; stopping must
+    not wait for that read (it held the buffer's lock, and the call hung
+    after its job had succeeded)."""
+
+    def setUp(self):
+        HangingLog.release.clear()
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), HangingLog)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(HangingLog.release.set)
+        self.client = HTTPJobClient(server=f"http://127.0.0.1:{self.server.server_port}", workspace="w", token="t")
+
+    def test_stopping_a_follower_mid_read_returns(self):
+        out = io.StringIO()
+        follower = _LogFollower(self.client, "job", poll_seconds=0.05, out=out)
+        follower.start()
+        for _ in range(100):
+            if out.getvalue():
+                break
+            threading.Event().wait(0.05)
+        self.assertEqual(out.getvalue(), "first\n")
+        stopper = threading.Thread(target=follower.stop, kwargs={"grace": 0.3}, daemon=True)
+        stopper.start()
+        stopper.join(5)
+        self.assertFalse(stopper.is_alive(), "stop() hung on a log that never ends")
+        follower.join(5)
+        self.assertFalse(follower.is_alive(), "the follower kept reading after stop()")
+
+    def test_wait_lets_a_log_end_on_its_own_first(self):
+        stream = self.client.follow_logs("job")
+        lines = []
+        reader = threading.Thread(target=lambda: lines.extend(stream.stdout), daemon=True)
+        reader.start()
+        threading.Timer(0.2, HangingLog.release.set).start()
+        self.assertEqual(stream.wait(timeout=5), 0)
+        reader.join(5)
+        self.assertEqual(lines, ["first\n"])
+        self.assertFalse(stream._closed, "stopped a log that was about to end")

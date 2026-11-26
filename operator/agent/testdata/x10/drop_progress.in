@@ -1,0 +1,5 @@
+2026-08-17 03:53:23,563	INFO logging_progress.py:225 -- Total Progress: 0/?
+2026-08-17 03:53:23,564	INFO logging_progress.py:231 -- ListFiles: 0/1
+2026-08-17 03:53:23,564	INFO logging_progress.py:231 -- MapBatches(count_rows): 0/1
+2026-08-17 03:53:18,343	INFO worker.py:2024 -- Started a local Ray instance.
+[synth-data] rows=80000 schema=Column  Type

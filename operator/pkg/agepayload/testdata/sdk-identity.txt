@@ -1,0 +1,2 @@
+# A test-only age identity: it opens sdk-sealed.age and nothing else.
+AGE-SECRET-KEY-1A74HGZTRDGFFR70HPC2NC7LZ47C72XK7NQD0ZYX6C230NUZ8DLCQL2P4VR

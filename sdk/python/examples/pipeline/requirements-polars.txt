@@ -1,0 +1,8 @@
+# entrenar(): features with Polars, then the scikit-learn models. Pinned as
+# in requirements.txt (tests/test_pipeline_notebook.py keeps them equal).
+numpy==2.4.4
+pandas==3.0.2
+polars==1.44.2
+pyarrow==24.0.0
+scikit-learn==1.8.0
+threadpoolctl==3.6.0

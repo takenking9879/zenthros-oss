@@ -1,0 +1,12 @@
+[synth] phase=start sample=true
+[synth-data] read_parquet /home/user/zenthros/external/kuberay/data/synth_cls.parquet
+[synth-data] rows=80000 schema=Column  Type
+[synth] Starting training pipeline
+(RayTrainWorker pid=33797) [synth-train] start epochs=3 lr=0.01
+(RayTrainWorker pid=33797) [synth-train] completed loss=1.3906
+[synth] Training completed successfully metrics=None
+[synth] Starting hyperparameter tuning
+(tune_func pid=34471) [synth-tune] trial start lr=0.001
+(tune_func pid=34471) [synth-tune] trial completed loss=1.5191
+[synth] Tuning completed successfully
+[synth] phase=done

@@ -1,0 +1,194 @@
+{{- if .Values.logs.nodeReader }}
+{{- /*
+The node log readers (benchmarks/loglab/PLAN.md, section 4): the agent's own
+binary in node-log-reader mode, one on every node, reading the pods' log
+files there (read-only hostPath /var/log/pods, root's group, not root) for
+the agent alone: ~5 mCPU a reader, against ~560 through the Kubernetes API.
+In a namespace of their own, Pod Security privileged, which a hostPath
+needs; the agent's namespace stays as it is. The agent and the readers trust
+a CA this chart makes once (kept across upgrades): the readers serve the
+agent's certificate only, and the logs cross the pod network encrypted. A
+NetworkPolicy lets only the agent's pods reach them. A node where a reader
+is not ready (one that runs no DaemonSet, a policy that refused it) is read
+through the API.
+*/ -}}
+{{- $ns := include "zenthros-agent.nodeLogsNamespace" . }}
+{{- $fullname := include "zenthros-agent.fullname" . }}
+{{- $agentSecret := printf "%s-node-logs-tls" $fullname }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $agentSecret }}
+{{- $tls := dict }}
+{{- if and $existing $existing.data (hasKey $existing.data "server.key") }}
+{{- $tls = $existing.data }}
+{{- else }}
+{{- $ca := genCA "zenthros-node-logs" 3650 }}
+{{- $server := genSignedCert "zenthros-node-log-reader" nil (list "zenthros-node-log-reader") 3650 $ca }}
+{{- $client := genSignedCert "zenthros-agent" nil nil 3650 $ca }}
+{{- $tls = dict "ca.crt" ($ca.Cert | b64enc) "server.crt" ($server.Cert | b64enc) "server.key" ($server.Key | b64enc) "client.crt" ($client.Cert | b64enc) "client.key" ($client.Key | b64enc) }}
+{{- end }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: privileged
+---
+# The CA and both certificates; the agent mounts the CA and its own.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $agentSecret }}
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+type: Opaque
+data:
+  {{- toYaml $tls | nindent 2 }}
+---
+# The readers' certificate and the CA, in their namespace.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: zenthros-node-log-reader-tls
+  namespace: {{ $ns }}
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+type: Opaque
+data:
+  ca.crt: {{ get $tls "ca.crt" }}
+  server.crt: {{ get $tls "server.crt" }}
+  server.key: {{ get $tls "server.key" }}
+---
+# The readers ask the Kubernetes API nothing.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zenthros-node-log-reader
+  namespace: {{ $ns }}
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+{{- include "zenthros-agent.imagePullSecrets" . }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zenthros-node-log-reader
+  namespace: {{ $ns }}
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: node-log-reader
+  policyTypes: [Ingress]
+  ingress:
+    # The logs: the agent's pods only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "zenthros-agent.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: logs
+    # The kubelet's probes.
+    - ports:
+        - port: health
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: zenthros-node-log-reader
+  namespace: {{ $ns }}
+  labels:
+    {{- include "zenthros-agent.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: node-log-reader
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: node-log-reader
+      annotations:
+        checksum/tls: {{ toJson $tls | sha256sum }}
+    spec:
+      serviceAccountName: zenthros-node-log-reader
+      automountServiceAccountToken: false
+      # Every node a job may land on, tainted ones too.
+      tolerations:
+        - operator: Exists
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # The kubelet's log files are root's, readable by its group.
+        supplementalGroups: [0]
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: reader
+          image: {{ .Values.agent.image | quote }}
+          imagePullPolicy: {{ .Values.agent.imagePullPolicy }}
+          args: ["node-log-reader"]
+          env:
+            - name: ZENTHROS_NODE_LOGS_LISTEN
+              value: {{ printf ":%v" .Values.logs.nodeReaderPort | quote }}
+            - name: ZENTHROS_NODE_LOGS_HEALTH
+              value: ":8081"
+            - name: ZENTHROS_NODE_LOGS_TLS_DIR
+              value: /etc/zenthros/node-logs
+            - name: ZENTHROS_NODE_LOGS_CONTAINER
+              value: reader
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          ports:
+            - name: logs
+              containerPort: {{ .Values.logs.nodeReaderPort }}
+            - name: health
+              containerPort: 8081
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+          # Ready once it can read the node's files: its own log.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.logs.nodeReaderResources | nindent 12 }}
+          volumeMounts:
+            - name: pod-logs
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: tls
+              mountPath: /etc/zenthros/node-logs
+              readOnly: true
+      volumes:
+        - name: pod-logs
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+        - name: tls
+          secret:
+            secretName: zenthros-node-log-reader-tls
+{{- end }}

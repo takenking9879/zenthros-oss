@@ -1,0 +1,6 @@
+# tablas_spark(): the same tables with Spark; Java comes from tools=["java"].
+# Pinned as in requirements.txt (tests/test_pipeline_notebook.py keeps them
+# equal).
+numpy==2.4.4
+pyarrow==24.0.0
+pyspark==4.2.0

@@ -1,0 +1,9 @@
+[zenthros-resources] host CPU=24 RAM=31.20 GiB torch.cuda=False gpu=nvidia-smi:NVIDIA GeForce RTX 4070 Laptop GPU
+[RAY CLUSTER RESOURCES]
+                ────────────────────────────────
+                CPU           : 0.00 / 24.00
+                GPU           : 0.00 / 1.00
+                Memory        : 0.00 GiB / 15.96 GiB
+                Object Store  : 0.00 GiB / 6.84 GiB
+                accelerator_type:GeForce-RTX-4070-Laptop-GPU: 0.00 / 1.00
+                ────────────────────────────────

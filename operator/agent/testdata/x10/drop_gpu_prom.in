@@ -1,0 +1,3 @@
+[pytorch_utils][GPU_DEBUG] world_rank=0, device=cpu, torch.cuda.is_available=False, torch.cuda.device_count=0, ray.get_gpu_ids=[], CUDA_VISIBLE_DEVICES=<unset>
+[pytorch_utils] Prometheus server start failed (likely already bound): [Errno 98] Address already in use
+[zenthros-resources] host CPU=24 RAM=31.20 GiB torch.cuda=False gpu=none

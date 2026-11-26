@@ -1,0 +1,42 @@
+# The SDK's development environment (make env): every package a test of
+# tests/ or tests/e2e imports, pinned. tests/test_dev_env.py fails under
+# make test when one of them does not import, so no test skips for a package
+# this file should have installed. CI installs this same file
+# (.github/workflows/playground-sdk.yml, sdk-os.yml).
+#
+# The extras of pyproject.toml (s3, gcs, seal) come with `-e .[s3,gcs,seal]`;
+# their versions are pinned here.
+boto3==1.43.126
+google-cloud-storage==3.17.1
+cryptography==50.0.2
+# Tests, lint and the wheel check. pytest runs the pinned tests of
+# operator's make contracts (PYTHON is this venv's).
+pyyaml==6.0.3
+pytest==9.2.0
+ruff==0.17.1
+setuptools==84.2.1
+wheel==0.48.0
+build==1.6.1
+# Data the SDK reads and writes (targets, contracts) and the E2E's jobs.
+# numpy and xgboost left Python 3.11 behind; sdk-os.yml runs 3.11, the
+# oldest the SDK supports, with their last releases for it.
+numpy==2.5.4; python_version >= "3.12"
+numpy==2.4.6; python_version < "3.12"
+pandas==3.1.1
+pyarrow==26.0.1
+polars==2.1.0
+scikit-learn==1.9.1
+# The CPU build: the same xgboost module without the CUDA/NCCL wheels
+# (macOS's xgboost has none: xgboost-cpu has no wheel for it).
+xgboost-cpu==3.4.1; python_version >= "3.12" and sys_platform != "darwin"
+xgboost-cpu==3.2.0; python_version < "3.12" and sys_platform != "darwin"
+xgboost==3.4.1; python_version >= "3.12" and sys_platform == "darwin"
+xgboost==3.2.0; python_version < "3.12" and sys_platform == "darwin"
+# The notebook E2E (tests/e2e/test_notebook_flow.py), and the demo notebook
+# test_remote_demo_notebook.py runs as it is, which plots.
+nbclient==0.11.0
+nbformat==5.11.1
+ipykernel==7.4.0
+matplotlib==3.11.2
+# zenthros.auth's keyring path.
+keyring==25.7.0
